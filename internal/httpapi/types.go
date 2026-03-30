@@ -85,6 +85,7 @@ type executionResultSummary struct {
 	Region      string    `json:"region"`
 	StartedAt   time.Time `json:"startedAt"`
 	FinishedAt  time.Time `json:"finishedAt"`
+	LatencyMs   int64     `json:"latencyMs"`
 	LogsReady   bool      `json:"logsReady"`
 	OutputReady bool      `json:"outputReady"`
 }

@@ -510,7 +510,7 @@ func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, job)
+	writeJSON(w, http.StatusAccepted, withJobLatency(job))
 }
 
 func (s *Server) getBuildJob(w http.ResponseWriter, r *http.Request) {
@@ -546,7 +546,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, withJobLatency(job))
 }
 
 func (s *Server) listJobAttempts(w http.ResponseWriter, r *http.Request) {
@@ -561,7 +561,7 @@ func (s *Server) listJobAttempts(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, attempts)
+	writeJSON(w, http.StatusOK, withAttemptLatency(attempts))
 }
 
 func (s *Server) listJobCosts(w http.ResponseWriter, r *http.Request) {
@@ -826,6 +826,7 @@ func (s *Server) listWebhookTriggers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
+	requestStartedAt := time.Now().UTC()
 	token := chi.URLParam(r, "token")
 	trigger, err := s.store.GetHTTPTrigger(r.Context(), token)
 	if err != nil || !trigger.Enabled {
@@ -879,12 +880,15 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 
 	job, err = s.waitForExecutionJob(waitCtx, job.ID, 100*time.Millisecond)
 	if err != nil {
+		latencyMs := computeLatencyMs(requestStartedAt, time.Now().UTC())
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
 			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
 				"jobId":             job.ID,
 				"functionVersionId": version.ID,
 				"state":             "timeout",
 				"message":           "function url execution did not complete before the response deadline",
+				"latencyMs":         latencyMs,
 			})
 			return
 		}
@@ -892,9 +896,16 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	job = withJobLatency(job)
+	latencyMs := jobLatencyMs(job)
+	if latencyMs == 0 {
+		latencyMs = computeLatencyMs(requestStartedAt, time.Now().UTC())
+	}
+
 	w.Header().Set("X-Lecrev-Job-Id", job.ID)
 	w.Header().Set("X-Lecrev-Function-Version-Id", version.ID)
 	w.Header().Set("X-Lecrev-Function-Url-Token", token)
+	w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
 
 	if job.State != domain.JobStateSucceeded || job.Result == nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -902,16 +913,18 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 			"functionVersionId": version.ID,
 			"state":             job.State,
 			"error":             job.Error,
+			"latencyMs":         latencyMs,
 		})
 		return
 	}
 
-	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output); err != nil {
+	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output, latencyMs); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"jobId":             job.ID,
 			"functionVersionId": version.ID,
 			"state":             job.State,
 			"error":             err.Error(),
+			"latencyMs":         latencyMs,
 		})
 	}
 }
@@ -935,7 +948,7 @@ func (s *Server) invokeWebhook(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, job)
+	writeJSON(w, http.StatusAccepted, withJobLatency(job))
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -1204,8 +1217,8 @@ func (s *Server) waitForExecutionJob(ctx context.Context, jobID string, pollInte
 	}
 }
 
-func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.RawMessage) error {
-	statusCode, headers, body, structured, err := decodeHTTPFunctionResult(output)
+func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.RawMessage, latencyMs int64) error {
+	statusCode, headers, body, structured, err := decodeHTTPFunctionResult(output, latencyMs)
 	if err != nil {
 		return err
 	}
@@ -1213,7 +1226,7 @@ func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.R
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if method != http.MethodHead {
-			_, _ = w.Write(output)
+			_, _ = w.Write(withLatencyJSON(output, latencyMs))
 		}
 		return nil
 	}
@@ -1229,7 +1242,7 @@ func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.R
 	return nil
 }
 
-func decodeHTTPFunctionResult(output json.RawMessage) (int, http.Header, []byte, bool, error) {
+func decodeHTTPFunctionResult(output json.RawMessage, latencyMs int64) (int, http.Header, []byte, bool, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(output, &payload); err != nil {
 		return 0, nil, nil, false, nil
@@ -1252,6 +1265,7 @@ func decodeHTTPFunctionResult(output json.RawMessage) (int, http.Header, []byte,
 		headers = headerMap
 	}
 
+	payload["body"] = withLatencyValue(payload["body"], latencyMs)
 	bodyBytes, err := encodeHTTPResponseBody(payload["body"], headers, payload["isBase64Encoded"])
 	if err != nil {
 		return 0, nil, nil, true, err
@@ -1323,6 +1337,68 @@ func toInt(value any) (int, error) {
 	default:
 		return 0, fmt.Errorf("invalid integer value %T", value)
 	}
+}
+
+func withJobLatency(job *domain.ExecutionJob) *domain.ExecutionJob {
+	if job == nil || job.Result == nil {
+		return job
+	}
+	jobCopy := *job
+	result := *job.Result
+	result.LatencyMs = computeLatencyMs(result.StartedAt, result.FinishedAt)
+	jobCopy.Result = &result
+	return &jobCopy
+}
+
+func jobLatencyMs(job *domain.ExecutionJob) int64 {
+	if job == nil || job.Result == nil {
+		return 0
+	}
+	return computeLatencyMs(job.Result.StartedAt, job.Result.FinishedAt)
+}
+
+func withAttemptLatency(attempts []domain.Attempt) []domain.Attempt {
+	decorated := make([]domain.Attempt, 0, len(attempts))
+	for _, attempt := range attempts {
+		if attempt.State.Terminal() {
+			attempt.LatencyMs = computeLatencyMs(attempt.StartedAt, attempt.UpdatedAt)
+		}
+		decorated = append(decorated, attempt)
+	}
+	return decorated
+}
+
+func computeLatencyMs(startedAt, finishedAt time.Time) int64 {
+	if startedAt.IsZero() || finishedAt.IsZero() || finishedAt.Before(startedAt) {
+		return 0
+	}
+	latencyMs := finishedAt.Sub(startedAt).Milliseconds()
+	if latencyMs == 0 && finishedAt.After(startedAt) {
+		return 1
+	}
+	return latencyMs
+}
+
+func withLatencyJSON(output json.RawMessage, latencyMs int64) []byte {
+	var value any
+	if err := json.Unmarshal(output, &value); err != nil {
+		return output
+	}
+	value = withLatencyValue(value, latencyMs)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return output
+	}
+	return encoded
+}
+
+func withLatencyValue(value any, latencyMs int64) any {
+	bodyMap, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	bodyMap["latencyMs"] = latencyMs
+	return bodyMap
 }
 
 func toBool(value any) (bool, error) {
@@ -1445,6 +1521,7 @@ func summarizeExecutionJobs(items []domain.ExecutionJob) []executionJobSummary {
 				Region:      item.Result.Region,
 				StartedAt:   item.Result.StartedAt,
 				FinishedAt:  item.Result.FinishedAt,
+				LatencyMs:   computeLatencyMs(item.Result.StartedAt, item.Result.FinishedAt),
 				LogsReady:   strings.TrimSpace(item.Result.LogsKey) != "",
 				OutputReady: strings.TrimSpace(item.Result.OutputKey) != "",
 			}
@@ -1645,7 +1722,7 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Idempotency-Key, Authorization")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, X-Lecrev-Job-Id, X-Lecrev-Function-Version-Id, X-Lecrev-Function-Url-Token")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, X-Lecrev-Job-Id, X-Lecrev-Function-Version-Id, X-Lecrev-Function-Url-Token, X-Lecrev-Latency-Ms")
 	w.Header().Set("Access-Control-Max-Age", "600")
 	w.Header().Add("Vary", "Origin")
 }

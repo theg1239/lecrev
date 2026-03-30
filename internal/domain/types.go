@@ -150,6 +150,7 @@ type JobResult struct {
 	Region     string          `json:"region"`
 	StartedAt  time.Time       `json:"startedAt"`
 	FinishedAt time.Time       `json:"finishedAt"`
+	LatencyMs  int64           `json:"latencyMs"`
 }
 
 type ExecutionJob struct {
@@ -177,6 +178,7 @@ type Attempt struct {
 	State             AttemptState `json:"state"`
 	StartMode         StartMode    `json:"startMode,omitempty"`
 	StartedAt         time.Time    `json:"startedAt,omitempty"`
+	LatencyMs         int64        `json:"latencyMs"`
 	LeaseExpiresAt    time.Time    `json:"leaseExpiresAt"`
 	Error             string       `json:"error,omitempty"`
 	CreatedAt         time.Time    `json:"createdAt"`

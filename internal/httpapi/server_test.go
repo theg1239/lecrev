@@ -311,6 +311,7 @@ func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 			if err == nil && len(jobs) > 0 {
 				job := jobs[0]
 				now := time.Now().UTC()
+				finishedAt := now.Add(25 * time.Millisecond)
 				job.State = domain.JobStateSucceeded
 				job.TargetRegion = "ap-south-1"
 				job.AttemptCount = 1
@@ -320,7 +321,7 @@ func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 					HostID:     "host-ap-south-1-a",
 					Region:     "ap-south-1",
 					StartedAt:  now,
-					FinishedAt: now,
+					FinishedAt: finishedAt,
 				}
 				_ = meta.UpdateExecutionJob(context.Background(), &job)
 				return
@@ -348,12 +349,18 @@ func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 	if resp.Header().Get("X-Lecrev-Job-Id") == "" {
 		t.Fatal("expected X-Lecrev-Job-Id header to be set")
 	}
+	if got := resp.Header().Get("X-Lecrev-Latency-Ms"); got != "25" {
+		t.Fatalf("expected X-Lecrev-Latency-Ms header 25, got %s", got)
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response body: %v", err)
 	}
 	if payload["ok"] != true || payload["hello"] != "world" {
 		t.Fatalf("unexpected function url payload: %+v", payload)
+	}
+	if payload["latencyMs"] != float64(25) {
+		t.Fatalf("expected latencyMs in response body, got %+v", payload)
 	}
 
 	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
@@ -497,6 +504,7 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 		t.Fatalf("ensure project: %v", err)
 	}
 	now := time.Now().UTC()
+	finishedAt := now.Add(25 * time.Millisecond)
 	if err := meta.PutExecutionJob(context.Background(), &domain.ExecutionJob{
 		ID:                "job-observe",
 		FunctionVersionID: "fn-observe",
@@ -512,10 +520,10 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 			HostID:     "host-ap-south-1-a",
 			Region:     "ap-south-1",
 			StartedAt:  now,
-			FinishedAt: now,
+			FinishedAt: finishedAt,
 		},
 		CreatedAt: now,
-		UpdatedAt: now,
+		UpdatedAt: finishedAt,
 	}); err != nil {
 		t.Fatalf("put job: %v", err)
 	}
@@ -536,7 +544,7 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 		StartedAt:         now,
 		LeaseExpiresAt:    now,
 		CreatedAt:         now,
-		UpdatedAt:         now,
+		UpdatedAt:         finishedAt,
 	}); err != nil {
 		t.Fatalf("put attempt: %v", err)
 	}
@@ -578,6 +586,21 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	admin := &testAdmin{region: "ap-south-1"}
 	handler := New(meta, objects, builder, sched, admin)
 
+	jobReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe", nil)
+	jobReq.Header.Set("X-API-Key", "dev-root-key")
+	jobResp := httptest.NewRecorder()
+	handler.ServeHTTP(jobResp, jobReq)
+	if jobResp.Code != http.StatusOK {
+		t.Fatalf("expected job status %d, got %d: %s", http.StatusOK, jobResp.Code, jobResp.Body.String())
+	}
+	var job domain.ExecutionJob
+	if err := json.Unmarshal(jobResp.Body.Bytes(), &job); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	if job.Result == nil || job.Result.LatencyMs != 25 {
+		t.Fatalf("expected job result latencyMs 25, got %+v", job.Result)
+	}
+
 	attemptsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/attempts", nil)
 	attemptsReq.Header.Set("X-API-Key", "dev-root-key")
 	attemptsResp := httptest.NewRecorder()
@@ -591,6 +614,9 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 	if len(attempts) != 1 || attempts[0].ID != "attempt-observe" {
 		t.Fatalf("unexpected attempts payload: %+v", attempts)
+	}
+	if attempts[0].LatencyMs != 25 {
+		t.Fatalf("expected attempt latencyMs 25, got %+v", attempts[0])
 	}
 
 	logsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/logs", nil)
