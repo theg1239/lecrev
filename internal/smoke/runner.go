@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -147,7 +148,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get archived output: %w", err)
 	}
-	if string(archivedOutput) != string(job.Result.Output) {
+	if !jsonEqual(archivedOutput, job.Result.Output) {
 		return nil, fmt.Errorf("expected archived output %s, got %s", string(job.Result.Output), string(archivedOutput))
 	}
 
@@ -198,6 +199,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		Hosts:          hosts,
 		WarmPools:      warmPools,
 	}, nil
+}
+
+func jsonEqual(left, right []byte) bool {
+	var lhs any
+	if err := json.Unmarshal(left, &lhs); err != nil {
+		return false
+	}
+	var rhs any
+	if err := json.Unmarshal(right, &rhs); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(lhs, rhs)
 }
 
 func waitForBuildReady(ctx context.Context, cfg Config, versionID, buildJobID string) (domain.BuildJob, domain.FunctionVersion, error) {
