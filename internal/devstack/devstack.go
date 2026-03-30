@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theg1239/lecrev/internal/apikey"
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/coordinator"
@@ -23,6 +24,7 @@ import (
 	"github.com/theg1239/lecrev/internal/regions"
 	"github.com/theg1239/lecrev/internal/scheduler"
 	"github.com/theg1239/lecrev/internal/secrets"
+	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/store"
 	memstore "github.com/theg1239/lecrev/internal/store/memory"
 	pgstore "github.com/theg1239/lecrev/internal/store/postgres"
@@ -134,6 +136,15 @@ func Run(ctx context.Context, cfg Config) error {
 		grpcServerOptions = append(grpcServerOptions, grpc.Creds(bundle.Server))
 		grpcDialOptions = append(grpcDialOptions, grpc.WithTransportCredentials(bundle.Client))
 	}
+	if err := metaStore.PutAPIKey(ctx, &domain.APIKey{
+		KeyHash:     apikey.Hash("dev-root-key"),
+		TenantID:    "tenant-dev",
+		Description: "local development root key",
+		IsAdmin:     true,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
 
 	dispatchers := make([]scheduler.RegionDispatcher, 0, len(cfg.ExecutionRegions))
 	type localRegion struct {
@@ -166,7 +177,7 @@ func Run(ctx context.Context, cfg Config) error {
 		admins = append(admins, region.svc)
 	}
 
-	apiHandler := httpapi.New(metaStore, builder, schedulerService, map[string]string{"dev-root-key": "demo"}, "tenant-dev", "demo", admins...)
+	apiHandler := httpapi.New(metaStore, builder, schedulerService, admins...)
 	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: apiHandler}
 
 	errCh := make(chan error, len(localRegions)*2+2)

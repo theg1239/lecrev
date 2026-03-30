@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/theg1239/lecrev/internal/apikey"
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/domain"
@@ -48,6 +49,7 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, false)
 	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
 		t.Fatalf("ensure project: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 		t.Fatalf("put function version: %v", err)
 	}
 
-	handler := New(meta, builder, sched, map[string]string{"dev-root-key": "demo"}, "tenant-dev", "demo")
+	handler := New(meta, builder, sched)
 
 	createReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-webhook/triggers/webhook", bytes.NewBufferString(`{"description":"github push"}`))
 	createReq.Header.Set("Content-Type", "application/json")
@@ -124,6 +126,7 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, true)
 	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
 		t.Fatalf("ensure project: %v", err)
 	}
@@ -190,7 +193,7 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 
 	admin := &testAdmin{region: "ap-south-1"}
-	handler := New(meta, builder, sched, map[string]string{"dev-root-key": "demo"}, "tenant-dev", "demo", admin)
+	handler := New(meta, builder, sched, admin)
 
 	attemptsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/attempts", nil)
 	attemptsReq.Header.Set("X-API-Key", "dev-root-key")
@@ -247,5 +250,100 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 	if admin.hostID != "host-ap-south-1-a" || admin.reason != "maintenance" {
 		t.Fatalf("expected drain to be forwarded, got host=%s reason=%s", admin.hostID, admin.reason)
+	}
+}
+
+func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	builder := build.New(meta, artifact.NewMemoryStore())
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-a-key", "tenant-a", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "project-b", "tenant-b", "project-b"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+
+	handler := New(meta, builder, sched)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/project-b/functions", bytes.NewBufferString(`{
+		"name":"echo",
+		"runtime":"node22",
+		"entrypoint":"index.mjs",
+		"source":{"type":"bundle","inlineFiles":{"index.mjs":"export async function handler(){ return { ok: true }; }"}}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "tenant-a-key")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, resp.Code, resp.Body.String())
+	}
+}
+
+func TestAuthRejectsInvalidAndDisabledAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	builder := build.New(meta, artifact.NewMemoryStore())
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "disabled-key", "tenant-dev", true, false)
+
+	handler := New(meta, builder, sched)
+
+	invalidReq := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
+	invalidReq.Header.Set("X-API-Key", "missing-key")
+	invalidResp := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResp, invalidReq)
+	if invalidResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid key status %d, got %d: %s", http.StatusUnauthorized, invalidResp.Code, invalidResp.Body.String())
+	}
+
+	disabledReq := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
+	disabledReq.Header.Set("X-API-Key", "disabled-key")
+	disabledResp := httptest.NewRecorder()
+	handler.ServeHTTP(disabledResp, disabledReq)
+	if disabledResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected disabled key status %d, got %d: %s", http.StatusUnauthorized, disabledResp.Code, disabledResp.Body.String())
+	}
+}
+
+func TestInfraEndpointsRequireAdminAPIKey(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	builder := build.New(meta, artifact.NewMemoryStore())
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+
+	handler := New(meta, builder, sched)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
+	req.Header.Set("X-API-Key", "tenant-key")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected admin-only status %d, got %d: %s", http.StatusForbidden, resp.Code, resp.Body.String())
+	}
+}
+
+func mustSeedAPIKey(t *testing.T, meta *memstore.Store, rawKey, tenantID string, disabled, isAdmin bool) {
+	t.Helper()
+	if err := meta.PutAPIKey(context.Background(), &domain.APIKey{
+		KeyHash:    apikey.Hash(rawKey),
+		TenantID:   tenantID,
+		IsAdmin:    isAdmin,
+		Disabled:   disabled,
+		CreatedAt:  time.Now().UTC(),
+		LastUsedAt: time.Time{},
+	}); err != nil {
+		t.Fatalf("put api key: %v", err)
 	}
 }

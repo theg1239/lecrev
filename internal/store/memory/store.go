@@ -14,6 +14,7 @@ import (
 
 type Store struct {
 	mu              sync.RWMutex
+	apiKeys         map[string]domain.APIKey
 	projects        map[string]domain.Project
 	idempotency     map[string]domain.IdempotencyRecord
 	artifacts       map[string]domain.Artifact
@@ -32,6 +33,7 @@ var _ store.Store = (*Store)(nil)
 
 func New() *Store {
 	return &Store{
+		apiKeys:         make(map[string]domain.APIKey),
 		projects:        make(map[string]domain.Project),
 		idempotency:     make(map[string]domain.IdempotencyRecord),
 		artifacts:       make(map[string]domain.Artifact),
@@ -54,6 +56,8 @@ func (s *Store) EnsureProject(_ context.Context, projectID, tenantID, name strin
 	if !ok {
 		project = domain.Project{ID: projectID, TenantID: tenantID, Name: name}
 		s.projects[projectID] = project
+	} else if project.TenantID != tenantID {
+		return nil, store.ErrAccessDenied
 	}
 	cp := project
 	return &cp, nil
@@ -64,10 +68,40 @@ func (s *Store) GetProject(_ context.Context, projectID string) (*domain.Project
 	defer s.mu.RUnlock()
 	project, ok := s.projects[projectID]
 	if !ok {
-		return nil, fmt.Errorf("project %q not found", projectID)
+		return nil, fmt.Errorf("%w: project %q", store.ErrNotFound, projectID)
 	}
 	cp := project
 	return &cp, nil
+}
+
+func (s *Store) PutAPIKey(_ context.Context, key *domain.APIKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.apiKeys[key.KeyHash] = *key
+	return nil
+}
+
+func (s *Store) GetAPIKeyByHash(_ context.Context, keyHash string) (*domain.APIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key, ok := s.apiKeys[keyHash]
+	if !ok {
+		return nil, fmt.Errorf("%w: api key %q", store.ErrNotFound, keyHash)
+	}
+	cp := key
+	return &cp, nil
+}
+
+func (s *Store) TouchAPIKeyLastUsed(_ context.Context, keyHash string, usedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.apiKeys[keyHash]
+	if !ok {
+		return fmt.Errorf("%w: api key %q", store.ErrNotFound, keyHash)
+	}
+	key.LastUsedAt = usedAt
+	s.apiKeys[keyHash] = key
+	return nil
 }
 
 func (s *Store) CreateIdempotencyRecord(_ context.Context, record *domain.IdempotencyRecord) error {

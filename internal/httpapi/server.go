@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/theg1239/lecrev/internal/apikey"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/scheduler"
@@ -23,9 +25,6 @@ type Server struct {
 	store     store.Store
 	builder   *build.Service
 	scheduler *scheduler.Service
-	apiKeys   map[string]string
-	projectID string
-	tenantID  string
 	admins    map[string]RegionAdmin
 }
 
@@ -34,7 +33,7 @@ type RegionAdmin interface {
 	DrainHost(ctx context.Context, hostID, reason string) error
 }
 
-func New(store store.Store, builder *build.Service, scheduler *scheduler.Service, apiKeys map[string]string, tenantID, projectID string, admins ...RegionAdmin) http.Handler {
+func New(store store.Store, builder *build.Service, scheduler *scheduler.Service, admins ...RegionAdmin) http.Handler {
 	adminIndex := make(map[string]RegionAdmin, len(admins))
 	for _, admin := range admins {
 		adminIndex[admin.Region()] = admin
@@ -43,9 +42,6 @@ func New(store store.Store, builder *build.Service, scheduler *scheduler.Service
 		store:     store,
 		builder:   builder,
 		scheduler: scheduler,
-		apiKeys:   apiKeys,
-		projectID: projectID,
-		tenantID:  tenantID,
 		admins:    adminIndex,
 	}
 	r := chi.NewRouter()
@@ -70,16 +66,30 @@ func New(store store.Store, builder *build.Service, scheduler *scheduler.Service
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("X-API-Key")
-		if key == "" {
+		rawKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
+		if rawKey == "" {
 			http.Error(w, "missing X-API-Key", http.StatusUnauthorized)
 			return
 		}
-		if _, ok := s.apiKeys[key]; !ok {
+		keyHash := apikey.Hash(rawKey)
+		record, err := s.store.GetAPIKeyByHash(r.Context(), keyHash)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				http.Error(w, "invalid X-API-Key", http.StatusUnauthorized)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if record.Disabled || subtle.ConstantTimeCompare([]byte(record.KeyHash), []byte(keyHash)) != 1 {
 			http.Error(w, "invalid X-API-Key", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		_ = s.store.TouchAPIKeyLastUsed(r.Context(), keyHash, time.Now().UTC())
+		next.ServeHTTP(w, r.WithContext(withAuthContext(r.Context(), authContext{
+			TenantID: record.TenantID,
+			IsAdmin:  record.IsAdmin,
+		})))
 	})
 }
 
@@ -92,8 +102,8 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	if _, err := s.store.EnsureProject(ctx, projectID, s.tenantID, projectID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if _, err := s.store.EnsureProject(ctx, projectID, tenantIDFromContext(r.Context()), projectID); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 
@@ -134,6 +144,15 @@ func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing versionID", http.StatusBadRequest)
 		return
 	}
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	var body invokeRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
@@ -154,7 +173,11 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobID")
 	job, err := s.store.GetExecutionJob(r.Context(), jobID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), job.ProjectID); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
@@ -162,9 +185,18 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listJobAttempts(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobID")
+	job, err := s.store.GetExecutionJob(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), job.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	attempts, err := s.store.ListAttemptsByJob(r.Context(), jobID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, attempts)
@@ -172,9 +204,18 @@ func (s *Server) listJobAttempts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listJobCosts(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobID")
+	job, err := s.store.GetExecutionJob(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), job.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	records, err := s.store.ListCostRecordsByJob(r.Context(), jobID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, records)
@@ -184,42 +225,62 @@ func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
 	versionID := chi.URLParam(r, "versionID")
 	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, version)
 }
 
 func (s *Server) listRegions(w http.ResponseWriter, r *http.Request) {
+	if err := requireAdmin(r.Context()); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	regions, err := s.store.ListRegions(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, regions)
 }
 
 func (s *Server) listRegionHosts(w http.ResponseWriter, r *http.Request) {
+	if err := requireAdmin(r.Context()); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	region := chi.URLParam(r, "region")
 	hosts, err := s.store.ListHostsByRegion(r.Context(), region)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, hosts)
 }
 
 func (s *Server) listWarmPools(w http.ResponseWriter, r *http.Request) {
+	if err := requireAdmin(r.Context()); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	region := chi.URLParam(r, "region")
 	pools, err := s.store.ListWarmPoolsByRegion(r.Context(), region)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pools)
 }
 
 func (s *Server) drainHost(w http.ResponseWriter, r *http.Request) {
+	if err := requireAdmin(r.Context()); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	region := chi.URLParam(r, "region")
 	hostID := chi.URLParam(r, "hostID")
 	admin, ok := s.admins[region]
@@ -248,7 +309,11 @@ func (s *Server) createWebhookTrigger(w http.ResponseWriter, r *http.Request) {
 	versionID := chi.URLParam(r, "versionID")
 	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 
@@ -282,9 +347,18 @@ func (s *Server) createWebhookTrigger(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listWebhookTriggers(w http.ResponseWriter, r *http.Request) {
 	versionID := chi.URLParam(r, "versionID")
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	triggers, err := s.store.ListWebhookTriggersByFunctionVersion(r.Context(), versionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, triggers)
@@ -323,6 +397,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
+	case errors.Is(err, store.ErrAccessDenied):
+		status = http.StatusForbidden
+	case errors.Is(err, store.ErrNotFound):
+		status = http.StatusNotFound
 	case errors.Is(err, domain.ErrIdempotencyConflict), errors.Is(err, domain.ErrIdempotencyInProgress), errors.Is(err, store.ErrAlreadyExists):
 		status = http.StatusConflict
 	default:
@@ -394,4 +472,42 @@ func buildWebhookPayload(r *http.Request, token string) ([]byte, error) {
 		"headers": headers,
 		"body":    payloadBody,
 	})
+}
+
+type authContext struct {
+	TenantID string
+	IsAdmin  bool
+}
+
+type authContextKey struct{}
+
+func withAuthContext(ctx context.Context, auth authContext) context.Context {
+	return context.WithValue(ctx, authContextKey{}, auth)
+}
+
+func authFromContext(ctx context.Context) authContext {
+	auth, _ := ctx.Value(authContextKey{}).(authContext)
+	return auth
+}
+
+func tenantIDFromContext(ctx context.Context) string {
+	return authFromContext(ctx).TenantID
+}
+
+func (s *Server) authorizeProject(ctx context.Context, projectID string) error {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if project.TenantID != tenantIDFromContext(ctx) {
+		return store.ErrAccessDenied
+	}
+	return nil
+}
+
+func requireAdmin(ctx context.Context) error {
+	if !authFromContext(ctx).IsAdmin {
+		return store.ErrAccessDenied
+	}
+	return nil
 }

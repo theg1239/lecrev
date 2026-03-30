@@ -10,6 +10,9 @@ import (
 type Store interface {
 	EnsureProject(ctx context.Context, projectID, tenantID, name string) (*domain.Project, error)
 	GetProject(ctx context.Context, projectID string) (*domain.Project, error)
+	PutAPIKey(ctx context.Context, key *domain.APIKey) error
+	GetAPIKeyByHash(ctx context.Context, keyHash string) (*domain.APIKey, error)
+	TouchAPIKeyLastUsed(ctx context.Context, keyHash string, usedAt time.Time) error
 	CreateIdempotencyRecord(ctx context.Context, record *domain.IdempotencyRecord) error
 	UpdateIdempotencyRecord(ctx context.Context, record *domain.IdempotencyRecord) error
 	DeleteIdempotencyRecord(ctx context.Context, scope, projectID, key string) error

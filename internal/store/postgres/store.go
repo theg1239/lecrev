@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -49,7 +50,7 @@ func (s *Store) EnsureProject(ctx context.Context, projectID, tenantID, name str
 	if _, err := s.pool.Exec(ctx, `
 		insert into projects (id, tenant_id, name, created_at)
 		values ($1, $2, $3, $4)
-		on conflict (id) do update set tenant_id = excluded.tenant_id, name = excluded.name
+		on conflict (id) do nothing
 	`, projectID, tenantID, name, now); err != nil {
 		return nil, err
 	}
@@ -57,10 +58,13 @@ func (s *Store) EnsureProject(ctx context.Context, projectID, tenantID, name str
 	project := &domain.Project{}
 	if err := s.pool.QueryRow(ctx, `
 		select id, tenant_id, name, created_at
-		from projects
-		where id = $1
+	from projects
+	where id = $1
 	`, projectID).Scan(&project.ID, &project.TenantID, &project.Name, &project.CreatedAt); err != nil {
 		return nil, err
+	}
+	if project.TenantID != tenantID {
+		return nil, store.ErrAccessDenied
 	}
 	return project, nil
 }
@@ -72,9 +76,62 @@ func (s *Store) GetProject(ctx context.Context, projectID string) (*domain.Proje
 		from projects
 		where id = $1
 	`, projectID).Scan(&project.ID, &project.TenantID, &project.Name, &project.CreatedAt); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	return project, nil
+}
+
+func (s *Store) PutAPIKey(ctx context.Context, key *domain.APIKey) error {
+	if _, err := s.pool.Exec(ctx, `
+		insert into tenants (id, name, created_at)
+		values ($1, $2, $3)
+		on conflict (id) do nothing
+	`, key.TenantID, key.TenantID, key.CreatedAt); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		insert into api_keys (key_hash, tenant_id, description, is_admin, disabled, created_at, last_used_at)
+		values ($1, $2, $3, $4, $5, $6, $7)
+		on conflict (key_hash) do update set
+			tenant_id = excluded.tenant_id,
+			description = excluded.description,
+			is_admin = excluded.is_admin,
+			disabled = excluded.disabled,
+			created_at = excluded.created_at,
+			last_used_at = excluded.last_used_at
+	`, key.KeyHash, key.TenantID, nullableText(key.Description), key.IsAdmin, key.Disabled, key.CreatedAt, nullableTime(key.LastUsedAt))
+	return err
+}
+
+func (s *Store) GetAPIKeyByHash(ctx context.Context, keyHash string) (*domain.APIKey, error) {
+	var key domain.APIKey
+	var lastUsedAt *time.Time
+	if err := s.pool.QueryRow(ctx, `
+		select key_hash, tenant_id, coalesce(description, ''), is_admin, disabled, created_at, last_used_at
+		from api_keys
+		where key_hash = $1
+	`, keyHash).Scan(&key.KeyHash, &key.TenantID, &key.Description, &key.IsAdmin, &key.Disabled, &key.CreatedAt, &lastUsedAt); err != nil {
+		return nil, mapNotFound(err)
+	}
+	if lastUsedAt != nil {
+		key.LastUsedAt = *lastUsedAt
+	}
+	return &key, nil
+}
+
+func (s *Store) TouchAPIKeyLastUsed(ctx context.Context, keyHash string, usedAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		update api_keys
+		set last_used_at = $2
+		where key_hash = $1
+	`, keyHash, usedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) CreateIdempotencyRecord(ctx context.Context, record *domain.IdempotencyRecord) error {
@@ -153,7 +210,7 @@ func (s *Store) GetArtifact(ctx context.Context, digest string) (*domain.Artifac
 		from artifacts
 		where digest = $1
 	`, digest).Scan(&artifact.Digest, &artifact.SizeBytes, &artifact.BundleKey, &artifact.StartupKey, &rawRegions, &artifact.CreatedAt); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	if err := json.Unmarshal(rawRegions, &artifact.Regions); err != nil {
 		return nil, err
@@ -225,7 +282,7 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 		&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvRefs,
 		&version.MaxRetries, &version.ArtifactDigest, &sourceType, &state, &version.CreatedAt,
 	); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	version.NetworkPolicy = domain.NetworkPolicy(networkPolicy)
 	version.SourceType = domain.SourceType(sourceType)
@@ -306,7 +363,7 @@ func (s *Store) GetExecutionJob(ctx context.Context, jobID string) (*domain.Exec
 		&job.MaxRetries, &job.AttemptCount, &job.LastAttemptID, &job.Error, &rawResult,
 		&job.CreatedAt, &job.UpdatedAt,
 	); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	job.State = domain.JobState(state)
 	job.Payload = append([]byte(nil), rawPayload...)
@@ -376,7 +433,7 @@ func (s *Store) GetAttempt(ctx context.Context, attemptID string) (*domain.Attem
 		&attempt.ID, &attempt.JobID, &attempt.FunctionVersionID, &attempt.HostID, &attempt.Region,
 		&state, &startMode, &startedAt, &attempt.LeaseExpiresAt, &attempt.Error, &attempt.CreatedAt, &attempt.UpdatedAt,
 	); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	attempt.State = domain.AttemptState(state)
 	attempt.StartMode = domain.StartMode(startMode)
@@ -554,7 +611,7 @@ func (s *Store) GetHost(ctx context.Context, hostID string) (*domain.Host, error
 		&host.ID, &host.Region, &host.Driver, &state, &host.AvailableSlots,
 		&host.BlankWarm, &rawFunctionWarm, &host.LastHeartbeat,
 	); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	host.State = domain.HostState(state)
 	if err := json.Unmarshal(rawFunctionWarm, &host.FunctionWarm); err != nil {
@@ -661,7 +718,7 @@ func (s *Store) GetWebhookTrigger(ctx context.Context, token string) (*domain.We
 	`, token).Scan(
 		&trigger.Token, &trigger.ProjectID, &trigger.FunctionVersionID, &trigger.Description, &trigger.Enabled, &trigger.CreatedAt,
 	); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	return &trigger, nil
 }
@@ -716,7 +773,7 @@ func (s *Store) GetRegion(ctx context.Context, regionName string) (*domain.Regio
 		&region.Name, &region.State, &region.AvailableHosts, &region.BlankWarm,
 		&region.FunctionWarm, &region.LastHeartbeatAt, &region.LastError,
 	); err != nil {
-		return nil, err
+		return nil, mapNotFound(err)
 	}
 	return &region, nil
 }
@@ -768,6 +825,16 @@ func mapExecError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return fmt.Errorf("%w: %s", store.ErrAlreadyExists, pgErr.ConstraintName)
+	}
+	return err
+}
+
+func mapNotFound(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.ErrNotFound
 	}
 	return err
 }
