@@ -2,7 +2,7 @@
 
 There are now two deployment shapes in this repo:
 
-1. **Split deployment**: one EC2 for the control plane, one EC2 for the execution host.
+1. **Split deployment**: one EC2 for the control plane, one EC2 for a dedicated build worker, and one EC2 for the execution host.
 2. **One-box demo**: the older monolith that runs `lecrev devstack` on a single host.
 
 Use the split deployment when you want `jailer` enabled and a production-shaped Firecracker execution host.
@@ -67,7 +67,34 @@ That deploys:
 - `nginx`
 - the frontend static bundle
 
-### 2. Execution-host EC2
+### 2. Build-worker EC2
+
+Install the base runtime on the build host:
+
+```bash
+scp -i /path/to/key.pem deploy/ec2/install-runtime.sh ec2-user@<build-host>:/tmp/
+ssh -i /path/to/key.pem ec2-user@<build-host> 'bash /tmp/install-runtime.sh'
+```
+
+Install the build-worker env file:
+
+```bash
+scp -i /path/to/key.pem deploy/ec2/build-worker.env.example ec2-user@<build-host>:/tmp/build-worker.env
+ssh -i /path/to/key.pem ec2-user@<build-host> \
+  'sudo install -o root -g lecrev -m 0640 /tmp/build-worker.env /etc/lecrev/build-worker.env'
+```
+
+Deploy the build worker:
+
+```bash
+bash deploy/ec2/deploy-build-worker.sh <build-host> /path/to/key.pem
+```
+
+That deploys:
+
+- `lecrev build-worker`
+
+### 3. Execution-host EC2
 
 Install the base runtime plus Firecracker host assets:
 
@@ -122,13 +149,19 @@ That deploys:
 - the Firecracker rootfs rebuild helper
 - the Firecracker host check helper
 
-### 3. Verify the split deployment
+### 4. Verify the split deployment
 
 Control plane:
 
 ```bash
 curl -sS http://<control-plane-host>/healthz
 curl -sS http://<control-plane-host>/v1/regions -H 'X-API-Key: <bootstrap-api-key>'
+```
+
+Build worker:
+
+```bash
+ssh -i /path/to/key.pem ec2-user@<build-host> 'sudo systemctl status lecrev-build-worker --no-pager'
 ```
 
 Execution host:

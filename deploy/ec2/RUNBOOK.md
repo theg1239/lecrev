@@ -3,6 +3,7 @@
 This runbook is for the split production-shaped deployment:
 
 - one EC2 for the control plane
+- one EC2 for the dedicated build worker
 - one EC2 for the Firecracker execution host
 
 The control plane is public. The execution host should be private-only once provisioning is complete.
@@ -15,6 +16,7 @@ Set these before running any commands from your laptop:
 export AWS_REGION='ap-south-1'
 export CONTROL_PLANE_PUBLIC_HOST='<control-plane-public-ip-or-dns>'
 export CONTROL_PLANE_PRIVATE_HOST='<control-plane-private-ip>'
+export BUILD_HOST_PRIVATE='<build-host-private-ip>'
 export EXECUTION_HOST_PRIVATE='<execution-host-private-ip>'
 export SSH_KEY_PATH='/absolute/path/to/key.pem'
 export FRONTEND_DIR='/absolute/path/to/frontend-repo'
@@ -45,7 +47,18 @@ Important files:
 - binary: `/opt/lecrev/bin/lecrev`
 - static frontend: `/var/www/lecrev`
 
-## 3. Execution host layout
+## 3. Build-worker host layout
+
+Main services:
+
+- `lecrev-build-worker`
+
+Important files:
+
+- env: `/etc/lecrev/build-worker.env`
+- binary: `/opt/lecrev/bin/lecrev`
+
+## 4. Execution host layout
 
 Main services:
 
@@ -65,7 +78,7 @@ Important files:
   - `/var/lib/lecrev/runtime`
   - `/var/lib/lecrev/jailer`
 
-## 4. Redeploy commands
+## 5. Redeploy commands
 
 Redeploy the control plane and frontend:
 
@@ -81,9 +94,16 @@ cd /Users/ishaan/eeeverc
 bash deploy/ec2/deploy-execution-host.sh "${EXECUTION_HOST_PRIVATE}" "${SSH_KEY_PATH}"
 ```
 
+Redeploy the build worker over the private address:
+
+```bash
+cd /Users/ishaan/eeeverc
+bash deploy/ec2/deploy-build-worker.sh "${BUILD_HOST_PRIVATE}" "${SSH_KEY_PATH}"
+```
+
 If `LECREV_SSH_PROXY_JUMP` is set, the deploy scripts automatically use a proxy command that reuses the same PEM for the jump host. If the execution host still has a temporary public IP during bootstrap, you can use that first and remove it later.
 
-## 5. Service start, stop, restart
+## 6. Service start, stop, restart
 
 Control-plane services:
 
@@ -99,6 +119,30 @@ ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
 
 ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
   'sudo systemctl start lecrev-control-plane nginx nats-server postgresql'
+```
+
+Build-worker service:
+
+```bash
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${BUILD_HOST_PRIVATE}" \
+  'sudo systemctl status lecrev-build-worker --no-pager'
+
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${BUILD_HOST_PRIVATE}" \
+  'sudo systemctl restart lecrev-build-worker'
+
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${BUILD_HOST_PRIVATE}" \
+  'sudo systemctl stop lecrev-build-worker'
+
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${BUILD_HOST_PRIVATE}" \
+  'sudo systemctl start lecrev-build-worker'
 ```
 
 Execution-host service:
@@ -125,7 +169,7 @@ ssh -i "${SSH_KEY_PATH}" \
   'sudo systemctl start lecrev-node-agent'
 ```
 
-## 6. Log inspection
+## 7. Log inspection
 
 Control-plane logs:
 
@@ -135,6 +179,15 @@ ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
 
 ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
   'sudo journalctl -u nginx -n 100 --no-pager'
+```
+
+Build-worker logs:
+
+```bash
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${BUILD_HOST_PRIVATE}" \
+  'sudo journalctl -u lecrev-build-worker -n 200 --no-pager'
 ```
 
 Execution-host logs:
@@ -155,7 +208,7 @@ ssh -i "${SSH_KEY_PATH}" \
   'sudo APP_USER=lecrev /usr/local/bin/lecrev-check-firecracker-host'
 ```
 
-## 7. Health and inventory checks
+## 8. Health and inventory checks
 
 Public health:
 
@@ -176,7 +229,7 @@ curl -sS "http://${CONTROL_PLANE_PUBLIC_HOST}/v1/regions/ap-south-1/warm-pools" 
   -H 'X-API-Key: <bootstrap-api-key>'
 ```
 
-## 8. End-to-end smoke
+## 9. End-to-end smoke
 
 Run the public smoke test from the repo:
 
@@ -189,7 +242,7 @@ go run ./cmd/lecrev smoke \
   --regions ap-south-1
 ```
 
-## 9. Function URL operations
+## 10. Function URL operations
 
 The control plane should set `LECREV_PUBLIC_BASE_URL` in `/etc/lecrev/control-plane.env` so returned function URLs use the real public origin.
 
@@ -244,7 +297,7 @@ curl -I "http://${CONTROL_PLANE_PUBLIC_HOST}/f/<token>" \
   -H 'Authorization: Bearer <project-api-key>'
 ```
 
-## 10. Stop instances to control spend
+## 11. Stop instances to control spend
 
 Stop only the execution host when you do not need Firecracker validation:
 
@@ -259,7 +312,7 @@ Stop both hosts when the demo window is over:
 ```bash
 aws ec2 stop-instances \
   --region "${AWS_REGION}" \
-  --instance-ids <control-plane-instance-id> <execution-host-instance-id>
+  --instance-ids <control-plane-instance-id> <build-host-instance-id> <execution-host-instance-id>
 ```
 
 Start them again:
@@ -267,7 +320,7 @@ Start them again:
 ```bash
 aws ec2 start-instances \
   --region "${AWS_REGION}" \
-  --instance-ids <control-plane-instance-id> <execution-host-instance-id>
+  --instance-ids <control-plane-instance-id> <build-host-instance-id> <execution-host-instance-id>
 ```
 
 Wait for state changes:
@@ -277,7 +330,7 @@ aws ec2 wait instance-stopped --region "${AWS_REGION}" --instance-ids <instance-
 aws ec2 wait instance-running --region "${AWS_REGION}" --instance-ids <instance-id>
 ```
 
-## 11. Remove execution-host public exposure
+## 12. Remove execution-host public exposure
 
 Recommended target state:
 
@@ -334,7 +387,7 @@ aws ec2 describe-instances \
   --output text
 ```
 
-## 12. Current platform constraints
+## 13. Current platform constraints
 
 - `networkPolicy=full` still uses a single static `tap0`, so keep `LECREV_EXECUTION_HOST_SLOTS=1`.
 - The control plane is the only public entrypoint.

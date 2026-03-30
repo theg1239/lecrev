@@ -43,6 +43,12 @@ func main() {
 		}); err != nil {
 			log.Fatal(err)
 		}
+	case "build-worker":
+		if err := devstack.RunBuildWorker(ctx, devstack.Config{
+			ExecutionRegions: regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
+		}); err != nil {
+			log.Fatal(err)
+		}
 	case "node-agent":
 		if err := devstack.RunNodeAgent(ctx, devstack.Config{
 			ExecutionRegions: regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
@@ -101,7 +107,7 @@ func runSmoke(ctx context.Context, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: lecrev <devstack|control-plane|node-agent|smoke>")
+	fmt.Fprintln(os.Stderr, "usage: lecrev <devstack|control-plane|build-worker|node-agent|smoke>")
 }
 
 func coordinatorBasePortFromEnv() int {

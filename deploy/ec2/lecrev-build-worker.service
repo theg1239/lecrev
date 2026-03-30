@@ -1,0 +1,19 @@
+[Unit]
+Description=Lecrev Build Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lecrev
+Group=lecrev
+WorkingDirectory=/opt/lecrev
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/lecrev/build-worker.env
+ExecStart=/opt/lecrev/bin/lecrev build-worker
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

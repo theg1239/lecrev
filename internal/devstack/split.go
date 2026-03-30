@@ -115,9 +115,6 @@ func RunControlPlane(ctx context.Context, cfg Config) error {
 	for _, region := range localRegions {
 		region := region
 		slog.Info("control-plane coordinator configured", "region", region.name, "listen", region.addr)
-		run("build-consumer-"+region.name, func() error {
-			return builder.RunBuildConsumer(ctx, region.name, "builder-"+sanitizeRegionToken(region.name))
-		})
 		run("coordinator-"+region.name, func() error { return region.svc.Listen(ctx, region.addr, grpcServerOptions...) })
 		run("queue-consumer-"+region.name, func() error {
 			return region.svc.RunExecutionConsumer(ctx, "coordinator-"+sanitizeRegionToken(region.name))
@@ -185,6 +182,65 @@ func RunNodeAgent(ctx context.Context, cfg Config) error {
 	return nodeagent.NewWithConfig(nodeagent.Config{
 		MaxConcurrentAssignments: cfg.ExecutionHostSlots,
 	}, cfg.NodeAgentHostID, cfg.NodeAgentRegion, cfg.NodeAgentCoordinator, driver, objectStore, secretsClient, dialOptions...).Run(ctx)
+}
+
+func RunBuildWorker(ctx context.Context, cfg Config) error {
+	cfg.LoadEnv = true
+	if err := prepareConfig(&cfg); err != nil {
+		return err
+	}
+	if stringsEmpty(cfg.PostgresDSN) {
+		return fmt.Errorf("LECREV_POSTGRES_DSN is required for build-worker")
+	}
+	if stringsEmpty(cfg.NATSURL) {
+		return fmt.Errorf("LECREV_NATS_URL is required for build-worker")
+	}
+
+	metaStore, cleanup, err := buildMetadataStore(ctx, cfg.PostgresDSN)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	objectStore, closeObjectStore, err := buildArtifactStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer closeObjectStore()
+	buildBus, closeBuildBus, err := buildBuildBus(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeBuildBus()
+
+	builder := build.New(metaStore, objectStore)
+	builder.SetBuildBus(buildBus)
+
+	errCh := make(chan error, len(cfg.ExecutionRegions))
+	run := func(name string, fn func() error) {
+		go func() {
+			if err := fn(); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- fmt.Errorf("%s: %w", name, err)
+			}
+		}()
+	}
+
+	for _, regionName := range cfg.ExecutionRegions {
+		regionName := regionName
+		consumer := "builder-" + sanitizeRegionToken(regionName)
+		slog.Info("build-worker configured", "region", regionName, "consumer", consumer)
+		run("build-consumer-"+regionName, func() error {
+			return builder.RunBuildConsumer(ctx, regionName, consumer)
+		})
+	}
+
+	slog.Info("build-worker started", "regions", cfg.ExecutionRegions)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	}
 }
 
 func stringsEmpty(value string) bool {
