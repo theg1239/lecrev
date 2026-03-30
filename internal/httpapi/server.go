@@ -52,6 +52,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	r := chi.NewRouter()
 	r.Use(srv.corsMiddleware)
 	r.Options("/*", srv.handlePreflight)
+	r.Get("/healthz", srv.healthz)
 	r.Post("/v1/triggers/webhook/{token}", srv.invokeWebhook)
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
@@ -119,6 +120,14 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			TenantID: record.TenantID,
 			IsAdmin:  record.IsAdmin,
 		})))
+	})
+}
+
+func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":     true,
+		"status": "healthy",
 	})
 }
 

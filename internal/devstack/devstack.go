@@ -36,24 +36,25 @@ import (
 )
 
 type Config struct {
-	LoadEnv             bool
-	APIAddr             string
-	ExecutionRegions    []string
-	CoordinatorBasePort int
-	PostgresDSN         string
-	NATSURL             string
-	S3Region            string
-	S3Endpoint          string
-	S3AccessKey         string
-	S3SecretKey         string
-	S3Bucket            string
-	SecretsBackend      string
-	AWSRegion           string
-	AWSAccessKey        string
-	AWSSecretKey        string
-	SecretsProxyToken   string
-	EnableMTLS          bool
-	ExecutionDriver     string
+	LoadEnv              bool
+	APIAddr              string
+	ExecutionRegions     []string
+	CoordinatorBasePort  int
+	PostgresDSN          string
+	NATSURL              string
+	S3Region             string
+	S3Endpoint           string
+	S3AccessKey          string
+	S3SecretKey          string
+	S3Bucket             string
+	SecretsBackend       string
+	AWSRegion            string
+	AWSAccessKey         string
+	AWSSecretKey         string
+	SecretsProxyToken    string
+	BootstrapAdminAPIKey string
+	EnableMTLS           bool
+	ExecutionDriver      string
 
 	FirecrackerBinary      string
 	JailerBinary           string
@@ -82,8 +83,20 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 func prepareConfig(cfg *Config) error {
+	if cfg.LoadEnv && cfg.APIAddr == "" {
+		cfg.APIAddr = strings.TrimSpace(os.Getenv("LECREV_API_ADDR"))
+	}
 	if cfg.APIAddr == "" {
 		cfg.APIAddr = ":8080"
+	}
+	if cfg.LoadEnv && cfg.CoordinatorBasePort == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_COORDINATOR_BASE_PORT")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_COORDINATOR_BASE_PORT: %w", err)
+			}
+			cfg.CoordinatorBasePort = value
+		}
 	}
 	if cfg.CoordinatorBasePort == 0 {
 		cfg.CoordinatorBasePort = 9091
@@ -123,6 +136,9 @@ func prepareConfig(cfg *Config) error {
 	}
 	if cfg.LoadEnv && cfg.SecretsProxyToken == "" {
 		cfg.SecretsProxyToken = strings.TrimSpace(os.Getenv("LECREV_SECRETS_PROXY_TOKEN"))
+	}
+	if cfg.LoadEnv && cfg.BootstrapAdminAPIKey == "" {
+		cfg.BootstrapAdminAPIKey = strings.TrimSpace(os.Getenv("LECREV_BOOTSTRAP_ADMIN_API_KEY"))
 	}
 	if cfg.LoadEnv && cfg.ExecutionDriver == "" {
 		cfg.ExecutionDriver = strings.TrimSpace(os.Getenv("LECREV_EXECUTION_DRIVER"))
@@ -196,6 +212,9 @@ func prepareConfig(cfg *Config) error {
 	if strings.TrimSpace(cfg.SecretsProxyToken) == "" {
 		cfg.SecretsProxyToken = "dev-secrets-token"
 	}
+	if strings.TrimSpace(cfg.BootstrapAdminAPIKey) == "" {
+		cfg.BootstrapAdminAPIKey = "dev-root-key"
+	}
 	if strings.TrimSpace(cfg.ExecutionDriver) == "" {
 		cfg.ExecutionDriver = "local-node"
 	}
@@ -258,9 +277,9 @@ func runNetworked(ctx context.Context, cfg Config) error {
 		grpcDialOptions = append(grpcDialOptions, grpc.WithTransportCredentials(bundle.Client))
 	}
 	if err := metaStore.PutAPIKey(ctx, &domain.APIKey{
-		KeyHash:     apikey.Hash("dev-root-key"),
+		KeyHash:     apikey.Hash(cfg.BootstrapAdminAPIKey),
 		TenantID:    "tenant-dev",
-		Description: "local development root key",
+		Description: "bootstrap admin key",
 		IsAdmin:     true,
 		CreatedAt:   time.Now().UTC(),
 	}); err != nil {

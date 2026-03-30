@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/theg1239/lecrev/internal/devstack"
@@ -27,8 +29,9 @@ func main() {
 	switch os.Args[1] {
 	case "devstack":
 		if err := devstack.Run(ctx, devstack.Config{
-			APIAddr:          ":8080",
-			ExecutionRegions: regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
+			APIAddr:             strings.TrimSpace(os.Getenv("LECREV_API_ADDR")),
+			CoordinatorBasePort: coordinatorBasePortFromEnv(),
+			ExecutionRegions:    regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
 		}); err != nil {
 			log.Fatal(err)
 		}
@@ -85,4 +88,16 @@ func runSmoke(ctx context.Context, args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: lecrev <devstack|smoke>")
+}
+
+func coordinatorBasePortFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("LECREV_COORDINATOR_BASE_PORT"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Fatalf("parse LECREV_COORDINATOR_BASE_PORT: %v", err)
+	}
+	return value
 }

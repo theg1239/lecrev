@@ -41,6 +41,25 @@ func (a *testAdmin) DrainHost(_ context.Context, hostID, reason string) error {
 	return nil
 }
 
+func TestHealthz(t *testing.T) {
+	t.Parallel()
+
+	handler := New(memstore.New(), artifact.NewMemoryStore(), build.New(memstore.New(), artifact.NewMemoryStore()), scheduler.New(memstore.New(), nil))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected healthz status %d, got %d", http.StatusOK, resp.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode healthz payload: %v", err)
+	}
+	if payload["status"] != "healthy" || payload["ok"] != true {
+		t.Fatalf("unexpected healthz payload: %+v", payload)
+	}
+}
+
 func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 	t.Parallel()
 

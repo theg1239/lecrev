@@ -102,9 +102,9 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 	}
 
 	if err := metaStore.PutAPIKey(ctx, &domain.APIKey{
-		KeyHash:     apikey.Hash("dev-root-key"),
+		KeyHash:     apikey.Hash(cfg.BootstrapAdminAPIKey),
 		TenantID:    "tenant-dev",
-		Description: "local development root key",
+		Description: "bootstrap admin key",
 		IsAdmin:     true,
 		CreatedAt:   time.Now().UTC(),
 	}); err != nil {
@@ -146,7 +146,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 	stack := &EmbeddedStack{
 		Handler: controlHandler,
 		Regions: append([]string(nil), cfg.ExecutionRegions...),
-		APIKey:  "dev-root-key",
+		APIKey:  cfg.BootstrapAdminAPIKey,
 		Objects: objectStore,
 		cancel:  cancel,
 		close:   cleanup,

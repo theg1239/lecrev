@@ -1,0 +1,16 @@
+[Unit]
+Description=NATS Server with JetStream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lecrev
+Group=lecrev
+ExecStart=/usr/local/bin/nats-server -js -sd /var/lib/nats -a 127.0.0.1 -p 4222
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
