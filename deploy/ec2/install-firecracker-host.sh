@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-  exec sudo "$0" "$@"
+  exec sudo bash "$0" "$@"
 fi
 
 APP_USER="${APP_USER:-lecrev}"
@@ -26,7 +26,7 @@ case "$(uname -m)" in
     ;;
 esac
 
-dnf install -y curl jq tar gzip xz e2fsprogs rsync coreutils findutils
+dnf install -y jq tar gzip xz e2fsprogs rsync coreutils findutils
 
 install -d -m 0755 "${INSTALL_DIR}" /etc/lecrev "${STATE_DIR}" "${WORKSPACE_DIR}" "${SNAPSHOT_DIR}" "${CHROOT_BASE_DIR}"
 
@@ -68,7 +68,7 @@ if [[ -n "${snapshot_editor_bin}" ]]; then
   install -m 0755 "${snapshot_editor_bin}" "${INSTALL_DIR}/snapshot-editor"
 fi
 
-kernel_listing="$(curl -fsSL "https://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${ci_version}/${FIRECRACKER_ARCH}/vmlinux-&list-type=2")"
+kernel_listing="$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min?prefix=firecracker-ci/${ci_version}/${FIRECRACKER_ARCH}/vmlinux-&list-type=2")"
 kernel_key="$(grep -oE "firecracker-ci/${ci_version}/${FIRECRACKER_ARCH}/vmlinux-[0-9]+\\.[0-9]+\\.[0-9]+" <<<"${kernel_listing}" | sort -V | tail -n 1)"
 if [[ -z "${kernel_key}" ]]; then
   echo "failed to discover Firecracker CI kernel for ${ci_version}/${FIRECRACKER_ARCH}" >&2

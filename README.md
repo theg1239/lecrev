@@ -152,7 +152,7 @@ bash deploy/ec2/build-firecracker-rootfs.sh
 bash deploy/ec2/check-firecracker-host.sh
 ```
 
-The Linux Firecracker path now keeps a host-local snapshot cache under `LECREV_FIRECRACKER_SNAPSHOT_DIR`. It boots a clean guest runner as PID 1, creates a blank host-local snapshot for prep work, proactively builds per-function snapshots once versions become ready, and later invocations restore those snapshots directly when warm capacity exists.
+The Linux Firecracker path now keeps a host-local snapshot cache under `LECREV_FIRECRACKER_SNAPSHOT_DIR`. It boots a clean guest runner as PID 1, creates a blank host-local snapshot for prep work, proactively builds per-function snapshots for snapshot-safe workloads once versions become ready, and later invocations restore those snapshots directly when warm capacity exists.
 
 For `networkPolicy=full`, configure a host tap device and guest network tuple as well:
 

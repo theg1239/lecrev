@@ -56,6 +56,7 @@ ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no ec2-user@"${HOST}" "\
   fi && \
   sudo nginx -t && \
   sudo systemctl daemon-reload && \
-  sudo systemctl enable --now nats-server nginx lecrev"
+  sudo systemctl enable nats-server nginx lecrev && \
+  sudo systemctl restart nats-server nginx lecrev"
 
 echo "deployed lecrev to ${HOST}"

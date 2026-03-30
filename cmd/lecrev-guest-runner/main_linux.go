@@ -23,14 +23,15 @@ import (
 )
 
 const preparedRoot = "/var/lib/lecrev/functions"
+const guestNodeBinary = "/usr/local/bin/node"
 
 func main() {
+	if err := mountGuestFilesystems(); err != nil {
+		log.Printf("guest runner mount setup failed: %v", err)
+	}
 	port, err := guestPort()
 	if err != nil {
 		log.Fatal(err)
-	}
-	if err := mountGuestFilesystems(); err != nil {
-		log.Printf("guest runner mount setup failed: %v", err)
 	}
 	if err := serve(port); err != nil {
 		log.Fatal(err)
@@ -191,7 +192,7 @@ func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInv
 			Timeout:    time.Duration(request.TimeoutMillis) * time.Millisecond,
 			Region:     request.Region,
 			HostID:     request.HostID,
-			NodeBinary: "node",
+			NodeBinary: guestNodeBinary,
 		})
 	} else {
 		result, err = nodeexec.ExecuteBundle(context.Background(), nodeexec.Request{
@@ -205,7 +206,7 @@ func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInv
 			Timeout:        time.Duration(request.TimeoutMillis) * time.Millisecond,
 			Region:         request.Region,
 			HostID:         request.HostID,
-			NodeBinary:     "node",
+			NodeBinary:     guestNodeBinary,
 		})
 	}
 	if result == nil {

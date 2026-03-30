@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-  exec sudo "$0" "$@"
+  exec sudo bash "$0" "$@"
 fi
 
 APP_USER="${APP_USER:-lecrev}"
@@ -61,19 +61,13 @@ copy_with_parents() {
   fi
   local dest_path="${STAGE_DIR}${source_path}"
   mkdir -p "$(dirname "${dest_path}")"
-  if [[ -L "${source_path}" ]]; then
-    cp -a "${source_path}" "${dest_path}"
-    local resolved
-    resolved="$(readlink -f "${source_path}")"
-    if [[ "${resolved}" != "${source_path}" ]]; then
-      copy_with_parents "${resolved}"
-    fi
-    return 0
-  fi
-  cp -a "${source_path}" "${dest_path}"
+  cp -L -p "${source_path}" "${dest_path}"
 }
 
-mapfile -t deps < <(ldd "${node_real}" | awk '/=> \// { print $3 } /^\// { print $1 }' | sort -u)
+mapfile -t deps < <(ldd "${node_real}" | awk '
+  /=> \// { print $3; next }
+  /^[[:space:]]*\// { gsub(/^[[:space:]]+/, "", $1); print $1 }
+' | sort -u)
 for dep in "${deps[@]}"; do
   copy_with_parents "${dep}"
 done

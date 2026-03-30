@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-  exec sudo "$0" "$@"
+  exec sudo bash "$0" "$@"
 fi
 
 APP_USER="${APP_USER:-lecrev}"
@@ -29,7 +29,7 @@ ip link set "${TAP_DEVICE}" up
 cat >"${SYSCTL_FILE}" <<'EOF'
 net.ipv4.ip_forward=1
 EOF
-sysctl --system >/dev/null
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
 iptables -t nat -C POSTROUTING -s "${NETWORK_CIDR}" -o "${UPLINK_IFACE}" -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -s "${NETWORK_CIDR}" -o "${UPLINK_IFACE}" -j MASQUERADE
