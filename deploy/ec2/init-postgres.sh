@@ -14,8 +14,7 @@ if [[ -z "${DB_PASSWORD}" ]]; then
   exit 1
 fi
 
-pg_service="$(systemctl list-unit-files --type=service | awk '/^postgresql/ {print $1; exit}')"
-pg_service="${pg_service:-postgresql.service}"
+pg_service="${POSTGRES_SERVICE:-postgresql.service}"
 pg_unit="${pg_service%.service}"
 
 if command -v postgresql-setup >/dev/null 2>&1; then
@@ -40,7 +39,8 @@ END
 \$\$;
 SQL
 
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+db_exists="$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'")"
+if [[ "${db_exists}" != "1" ]]; then
   sudo -u postgres createdb --owner="${DB_USER}" "${DB_NAME}"
 fi
 
