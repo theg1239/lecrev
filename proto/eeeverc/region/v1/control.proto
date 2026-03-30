@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package eeeverc.region.v1;
+
+option go_package = "github.com/ishaan/eeeverc/eeeverc/region/v1;regionv1";
+
+service Coordinator {
+  rpc Control(stream AgentMessage) returns (stream CoordinatorMessage);
+}
+
+message WarmPoolMetric {
+  string function_version_id = 1;
+  int32 available = 2;
+}
+
+message RegisterHost {
+  string host_id = 1;
+  string region = 2;
+  string driver = 3;
+  int32 available_slots = 4;
+  int32 blank_warm = 5;
+  repeated WarmPoolMetric function_warm = 6;
+}
+
+message HostHeartbeat {
+  string host_id = 1;
+  string region = 2;
+  int32 available_slots = 3;
+  int32 blank_warm = 4;
+  repeated WarmPoolMetric function_warm = 5;
+}
+
+enum AssignmentState {
+  ASSIGNMENT_STATE_UNSPECIFIED = 0;
+  ASSIGNMENT_STATE_STARTING = 1;
+  ASSIGNMENT_STATE_RUNNING = 2;
+  ASSIGNMENT_STATE_SUCCEEDED = 3;
+  ASSIGNMENT_STATE_FAILED = 4;
+}
+
+message AssignmentUpdate {
+  string host_id = 1;
+  string region = 2;
+  string attempt_id = 3;
+  string job_id = 4;
+  AssignmentState state = 5;
+  string logs = 6;
+  bytes output_json = 7;
+  string error_message = 8;
+  int32 exit_code = 9;
+}
+
+message AgentMessage {
+  oneof body {
+    RegisterHost register = 1;
+    HostHeartbeat heartbeat = 2;
+    AssignmentUpdate assignment_update = 3;
+  }
+}
+
+message Registered {
+  string host_id = 1;
+}
+
+message ExecutionAssignment {
+  string attempt_id = 1;
+  string job_id = 2;
+  string function_version_id = 3;
+  string artifact_digest = 4;
+  string entrypoint = 5;
+  bytes payload_json = 6;
+  repeated string env_refs = 7;
+  string network_policy = 8;
+  int32 timeout_sec = 9;
+}
+
+message DrainHost {
+  string host_id = 1;
+  string reason = 2;
+}
+
+message TerminateVm {
+  string host_id = 1;
+  string attempt_id = 2;
+  string reason = 3;
+}
+
+message CoordinatorMessage {
+  oneof body {
+    Registered registered = 1;
+    ExecutionAssignment assignment = 2;
+    DrainHost drain = 3;
+    TerminateVm terminate = 4;
+  }
+}
