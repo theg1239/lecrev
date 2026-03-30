@@ -25,8 +25,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${TMP_DIR}/lecrev" ./cmd/lecr
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${TMP_DIR}/lecrev-guest-runner" ./cmd/lecrev-guest-runner
 
 cp deploy/ec2/lecrev-node-agent.service "${TMP_DIR}/"
+cp deploy/ec2/lecrev-firecracker-network.service "${TMP_DIR}/"
 cp deploy/ec2/build-firecracker-rootfs.sh "${TMP_DIR}/"
 cp deploy/ec2/check-firecracker-host.sh "${TMP_DIR}/"
+cp deploy/ec2/configure-firecracker-network.sh "${TMP_DIR}/"
 
 ssh "${SSH_ARGS[@]}" ec2-user@"${HOST}" "rm -rf '${REMOTE_TMP}' && mkdir -p '${REMOTE_TMP}'"
 tar -C "${TMP_DIR}" -cf - . | ssh "${SSH_ARGS[@]}" ec2-user@"${HOST}" "tar -C '${REMOTE_TMP}' -xf -"
@@ -36,11 +38,15 @@ ssh "${SSH_ARGS[@]}" ec2-user@"${HOST}" "\
   sudo install -m 0755 '${REMOTE_TMP}/lecrev' /opt/lecrev/bin/lecrev && \
   sudo install -m 0755 '${REMOTE_TMP}/lecrev-guest-runner' /opt/lecrev/bin/lecrev-guest-runner && \
   sudo install -m 0644 '${REMOTE_TMP}/lecrev-node-agent.service' /etc/systemd/system/lecrev-node-agent.service && \
+  sudo install -m 0644 '${REMOTE_TMP}/lecrev-firecracker-network.service' /etc/systemd/system/lecrev-firecracker-network.service && \
   sudo install -m 0755 '${REMOTE_TMP}/build-firecracker-rootfs.sh' /usr/local/bin/lecrev-build-firecracker-rootfs && \
   sudo install -m 0755 '${REMOTE_TMP}/check-firecracker-host.sh' /usr/local/bin/lecrev-check-firecracker-host && \
+  sudo install -m 0755 '${REMOTE_TMP}/configure-firecracker-network.sh' /usr/local/bin/lecrev-configure-firecracker-network && \
+  sudo systemctl daemon-reload && \
+  sudo systemctl enable lecrev-firecracker-network && \
+  sudo systemctl restart lecrev-firecracker-network && \
   sudo APP_USER=lecrev bash /usr/local/bin/lecrev-build-firecracker-rootfs && \
   sudo APP_USER=lecrev bash /usr/local/bin/lecrev-check-firecracker-host && \
-  sudo systemctl daemon-reload && \
   sudo systemctl enable lecrev-node-agent && \
   sudo systemctl restart lecrev-node-agent"
 

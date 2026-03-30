@@ -1,7 +1,7 @@
 [Unit]
 Description=Lecrev Execution Host Node Agent
-After=network-online.target
-Wants=network-online.target
+After=network-online.target lecrev-firecracker-network.service
+Wants=network-online.target lecrev-firecracker-network.service
 
 [Service]
 Type=simple

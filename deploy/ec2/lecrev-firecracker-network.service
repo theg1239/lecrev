@@ -1,0 +1,14 @@
+[Unit]
+Description=Lecrev Firecracker Network Bootstrap
+After=network-online.target
+Wants=network-online.target
+Before=lecrev-node-agent.service
+
+[Service]
+Type=oneshot
+Environment=APP_USER=lecrev
+ExecStart=/usr/local/bin/lecrev-configure-firecracker-network
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

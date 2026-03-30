@@ -49,6 +49,7 @@ Important files:
 
 Main services:
 
+- `lecrev-firecracker-network`
 - `lecrev-node-agent`
 
 Important files:

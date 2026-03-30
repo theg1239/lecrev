@@ -109,6 +109,7 @@ For a private-only execution host, pass its private IP or private DNS name and s
 
 That deploys:
 
+- `lecrev-firecracker-network`
 - `lecrev node-agent`
 - `lecrev-guest-runner`
 - the Firecracker rootfs rebuild helper
@@ -133,6 +134,7 @@ ssh -i /path/to/key.pem ec2-user@<execution-host> 'sudo APP_USER=lecrev /usr/loc
 Important current constraint:
 
 - `configure-firecracker-network.sh` still provisions a single static `tap0`, so keep `LECREV_EXECUTION_HOST_SLOTS=1` if you need `networkPolicy=full`.
+- the execution-host deployment now installs `lecrev-firecracker-network.service` so `tap0` is recreated after reboots before the node-agent starts.
 - Set `LECREV_PUBLIC_BASE_URL` on the control plane so created HTTP trigger URLs use the real external origin instead of the incoming request host header.
 
 For an operational runbook with start, stop, restart, verification, and function URL commands, see [RUNBOOK.md](RUNBOOK.md).
