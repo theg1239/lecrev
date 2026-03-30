@@ -281,6 +281,16 @@ func TestCreateFunctionVersionQueuesAsyncBuildAndMarksReady(t *testing.T) {
 			if job.State != "succeeded" {
 				t.Fatalf("expected succeeded build job, got %s", job.State)
 			}
+			if strings.TrimSpace(job.LogsKey) == "" {
+				t.Fatal("expected build logs key after async build")
+			}
+			logs, err := objects.Get(context.Background(), job.LogsKey)
+			if err != nil {
+				t.Fatalf("get build logs: %v", err)
+			}
+			if !strings.Contains(string(logs), "build job") {
+				t.Fatalf("expected build logs to contain lifecycle entries, got %q", string(logs))
+			}
 			if latest.ArtifactDigest == "" {
 				t.Fatal("expected artifact digest after async build")
 			}
@@ -339,6 +349,20 @@ await fs.copyFile(path.join(root, 'src/index.mjs'), path.join(root, 'dist/index.
 	}
 	if version.ArtifactDigest == "" {
 		t.Fatal("expected artifact digest for git source build")
+	}
+	buildJob, err := meta.GetBuildJob(context.Background(), version.BuildJobID)
+	if err != nil {
+		t.Fatalf("get build job: %v", err)
+	}
+	if strings.TrimSpace(buildJob.LogsKey) == "" {
+		t.Fatal("expected build logs key for git source build")
+	}
+	buildLogs, err := objects.Get(context.Background(), buildJob.LogsKey)
+	if err != nil {
+		t.Fatalf("get git build logs: %v", err)
+	}
+	if !strings.Contains(string(buildLogs), "git clone") {
+		t.Fatalf("expected git build logs to include clone step, got %q", string(buildLogs))
 	}
 
 	artifactMeta, err := meta.GetArtifact(context.Background(), version.ArtifactDigest)
@@ -414,6 +438,16 @@ func TestAsyncBuildFailsWhenArtifactExceedsLimit(t *testing.T) {
 			}
 			if !strings.Contains(job.Error, "exceeds limit") {
 				t.Fatalf("expected size-limit error, got %q", job.Error)
+			}
+			if strings.TrimSpace(job.LogsKey) == "" {
+				t.Fatal("expected build logs key for failed oversized build")
+			}
+			logs, err := objects.Get(context.Background(), job.LogsKey)
+			if err != nil {
+				t.Fatalf("get oversized build logs: %v", err)
+			}
+			if !strings.Contains(string(logs), "exceeds limit") {
+				t.Fatalf("expected oversized build logs to contain failure, got %q", string(logs))
 			}
 			return
 		}

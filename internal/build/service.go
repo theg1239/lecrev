@@ -301,26 +301,31 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
 		return err
 	}
+	recorder := newBuildRecorder(s.now)
+	recorder.Printf("build job %s started for function version %s in region %s", buildJob.ID, version.ID, buildJob.TargetRegion)
+	recorder.Printf("source type=%s runtime=%s entrypoint=%s", req.Source.Type, req.Runtime, req.Entrypoint)
 
-	bundle, startup, err := s.prepareBundle(ctx, req)
+	bundle, startup, err := s.prepareBundle(ctx, req, recorder)
 	if err != nil {
-		return s.markBuildFailed(ctx, version, buildJob, err)
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
 	if len(bundle) > maxArtifactSizeBytes {
-		return s.markBuildFailed(ctx, version, buildJob, fmt.Errorf("artifact size %d exceeds limit of %d bytes", len(bundle), maxArtifactSizeBytes))
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, fmt.Errorf("artifact size %d exceeds limit of %d bytes", len(bundle), maxArtifactSizeBytes))
 	}
 
 	sum := sha256.Sum256(bundle)
 	digest := hex.EncodeToString(sum[:])
 	bundleKey := fmt.Sprintf("artifacts/%s/bundle.tgz", digest)
 	startupKey := fmt.Sprintf("artifacts/%s/startup.json", digest)
+	recorder.Printf("prepared immutable bundle digest=%s sizeBytes=%d", digest, len(bundle))
 
 	if err := s.objects.Put(ctx, bundleKey, bundle); err != nil {
-		return s.markBuildFailed(ctx, version, buildJob, err)
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
 	if err := s.objects.Put(ctx, startupKey, startup); err != nil {
-		return s.markBuildFailed(ctx, version, buildJob, err)
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
+	recorder.Printf("uploaded bundle to %s and startup metadata to %s", bundleKey, startupKey)
 
 	now := s.now()
 	artifactMeta := &domain.Artifact{
@@ -333,17 +338,22 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	}
 	for _, region := range req.Regions {
 		artifactMeta.Regions[region] = now
+		recorder.Printf("marked artifact available in region %s", region)
 	}
 	if err := s.store.PutArtifact(ctx, artifactMeta); err != nil {
-		return s.markBuildFailed(ctx, version, buildJob, err)
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
 
 	version.ArtifactDigest = digest
 	version.State = domain.FunctionStateReady
 	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
-		return s.markBuildFailed(ctx, version, buildJob, err)
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
 
+	recorder.Printf("build job %s completed successfully", buildJob.ID)
+	if err := s.archiveBuildLogs(ctx, buildJob, recorder); err != nil {
+		recorder.Printf("build log archival failed: %v", err)
+	}
 	buildJob.State = "succeeded"
 	buildJob.Error = ""
 	buildJob.UpdatedAt = s.now()
@@ -362,6 +372,16 @@ func (s *Service) markBuildFailed(ctx context.Context, version *domain.FunctionV
 		return putErr
 	}
 	return err
+}
+
+func (s *Service) markBuildFailedWithLogs(ctx context.Context, version *domain.FunctionVersion, buildJob *domain.BuildJob, recorder *buildRecorder, err error) error {
+	if recorder != nil {
+		recorder.Printf("build job %s failed: %v", buildJob.ID, err)
+		if archiveErr := s.archiveBuildLogs(ctx, buildJob, recorder); archiveErr != nil {
+			err = fmt.Errorf("%w (build log archival failed: %v)", err, archiveErr)
+		}
+	}
+	return s.markBuildFailed(ctx, version, buildJob, err)
 }
 
 func pickBuildRegion(targetRegions []string) string {
@@ -399,7 +419,7 @@ func deployRequestHash(req domain.DeployRequest) (string, error) {
 	})
 }
 
-func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) ([]byte, []byte, error) {
+func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) ([]byte, []byte, error) {
 	functionManifest, err := json.MarshalIndent(map[string]any{
 		"name":          req.Name,
 		"runtime":       req.Runtime,
@@ -425,11 +445,13 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 
 	switch req.Source.Type {
 	case domain.SourceTypeBundle:
+		recorder.Printf("validating bundle source")
 		files := make(map[string][]byte)
 		for name, content := range req.Source.InlineFiles {
 			files[name] = []byte(content)
 		}
 		if req.Source.BundleBase64 != "" {
+			recorder.Printf("decoding bundleBase64 payload")
 			decoded, err := base64.StdEncoding.DecodeString(req.Source.BundleBase64)
 			if err != nil {
 				return nil, nil, err
@@ -442,6 +464,7 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 			if err := artifact.ExtractTarGz(decoded, tmpDir); err != nil {
 				return nil, nil, err
 			}
+			recorder.Printf("extracted uploaded bundle archive for smoke validation")
 			bundle, err := artifact.BundleFromDirectory(tmpDir, map[string][]byte{
 				"function.json": functionManifest,
 				"startup.json":  startup,
@@ -450,14 +473,16 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 		}
 		files["function.json"] = functionManifest
 		files["startup.json"] = startup
+		recorder.Printf("packaging inline source files into immutable bundle")
 		bundle, err := artifact.BundleFromFiles(files)
 		return bundle, startup, err
 	case domain.SourceTypeGit:
-		root, cleanup, err := s.prepareGitWorkspace(ctx, req)
+		root, cleanup, err := s.prepareGitWorkspace(ctx, req, recorder)
 		if err != nil {
 			return nil, nil, err
 		}
 		defer cleanup()
+		recorder.Printf("packaging prepared git workspace from %s", root)
 		bundle, err := artifact.BundleFromDirectory(root, map[string][]byte{
 			"function.json": functionManifest,
 			"startup.json":  startup,
@@ -473,7 +498,7 @@ type packageManifest struct {
 	Scripts        map[string]string `json:"scripts"`
 }
 
-func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest) (string, func(), error) {
+func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (string, func(), error) {
 	if strings.TrimSpace(req.Source.GitURL) == "" {
 		return "", nil, fmt.Errorf("gitUrl is required for git source")
 	}
@@ -489,7 +514,7 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 		cloneArgs = append(cloneArgs, "--branch", req.Source.GitRef)
 	}
 	cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
-	if err := runCommand(ctx, "", "git", cloneArgs...); err != nil {
+	if err := runCommand(ctx, recorder, "", "git", cloneArgs...); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("git clone failed: %w", err)
 	}
@@ -499,7 +524,8 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 		cleanup()
 		return "", nil, err
 	}
-	if err := prepareNodeWorkspace(ctx, root); err != nil {
+	recorder.Printf("resolved build root to %s", root)
+	if err := prepareNodeWorkspace(ctx, recorder, root); err != nil {
 		cleanup()
 		return "", nil, err
 	}
@@ -536,10 +562,11 @@ func resolveBuildRoot(repoRoot, subPath string) (string, error) {
 	return root, nil
 }
 
-func prepareNodeWorkspace(ctx context.Context, root string) error {
+func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root string) error {
 	pkgPath := filepath.Join(root, "package.json")
 	rawPkg, err := os.ReadFile(pkgPath)
 	if errors.Is(err, os.ErrNotExist) {
+		recorder.Printf("package.json not present; skipping npm install/build")
 		return nil
 	}
 	if err != nil {
@@ -563,16 +590,17 @@ func prepareNodeWorkspace(ctx context.Context, root string) error {
 	if !hasBuildScript {
 		installArgs = append(installArgs, "--omit=dev")
 	}
-	if err := runCommand(ctx, root, "npm", installArgs...); err != nil {
+	if err := runCommand(ctx, recorder, root, "npm", installArgs...); err != nil {
 		return fmt.Errorf("install npm dependencies: %w", err)
 	}
 	if !hasBuildScript {
+		recorder.Printf("no build script detected; skipping npm build")
 		return nil
 	}
-	if err := runCommand(ctx, root, "npm", "run", "build", "--if-present"); err != nil {
+	if err := runCommand(ctx, recorder, root, "npm", "run", "build", "--if-present"); err != nil {
 		return fmt.Errorf("run npm build: %w", err)
 	}
-	if err := runCommand(ctx, root, "npm", "prune", "--omit=dev"); err != nil {
+	if err := runCommand(ctx, recorder, root, "npm", "prune", "--omit=dev"); err != nil {
 		return fmt.Errorf("prune npm devDependencies: %w", err)
 	}
 	return nil
@@ -614,12 +642,67 @@ func verifyEntrypoint(root, entrypoint string) error {
 	return nil
 }
 
-func runCommand(ctx context.Context, dir, name string, args ...string) error {
+func (s *Service) archiveBuildLogs(ctx context.Context, buildJob *domain.BuildJob, recorder *buildRecorder) error {
+	if recorder == nil {
+		return nil
+	}
+	key := artifact.BuildLogsKey(buildJob.ID)
+	if err := s.objects.Put(ctx, key, recorder.Bytes()); err != nil {
+		return err
+	}
+	buildJob.LogsKey = key
+	return nil
+}
+
+type buildRecorder struct {
+	now     func() time.Time
+	builder strings.Builder
+}
+
+func newBuildRecorder(now func() time.Time) *buildRecorder {
+	return &buildRecorder{now: now}
+}
+
+func (r *buildRecorder) Printf(format string, args ...any) {
+	if r == nil {
+		return
+	}
+	timestamp := time.Now().UTC()
+	if r.now != nil {
+		timestamp = r.now()
+	}
+	r.builder.WriteString("[")
+	r.builder.WriteString(timestamp.Format(time.RFC3339))
+	r.builder.WriteString("] ")
+	r.builder.WriteString(fmt.Sprintf(format, args...))
+	if !strings.HasSuffix(format, "\n") {
+		r.builder.WriteString("\n")
+	}
+}
+
+func (r *buildRecorder) Bytes() []byte {
+	if r == nil {
+		return nil
+	}
+	return []byte(r.builder.String())
+}
+
+func runCommand(ctx context.Context, recorder *buildRecorder, dir, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	if recorder != nil {
+		if dir != "" {
+			recorder.Printf("$ (cd %s && %s %s)", dir, name, strings.Join(args, " "))
+		} else {
+			recorder.Printf("$ %s %s", name, strings.Join(args, " "))
+		}
+	}
 	output, err := cmd.CombinedOutput()
+	if recorder != nil && len(output) > 0 {
+		recorder.Printf("%s", strings.TrimSpace(string(output)))
+	}
 	if err != nil {
 		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}

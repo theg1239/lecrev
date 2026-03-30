@@ -408,10 +408,14 @@ func TestBuildJobInspectionAndInvokeBlockedUntilReady(t *testing.T) {
 		FunctionVersionID: "fn-building",
 		TargetRegion:      "ap-south-1",
 		State:             "running",
+		LogsKey:           "builds/build-1/logs.txt",
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("put build job: %v", err)
+	}
+	if err := objects.Put(context.Background(), "builds/build-1/logs.txt", []byte("build started\n")); err != nil {
+		t.Fatalf("put build logs: %v", err)
 	}
 
 	handler := New(meta, objects, builder, sched)
@@ -429,6 +433,23 @@ func TestBuildJobInspectionAndInvokeBlockedUntilReady(t *testing.T) {
 	}
 	if buildJob.State != "running" {
 		t.Fatalf("expected running build job state, got %s", buildJob.State)
+	}
+	if buildJob.LogsKey != "builds/build-1/logs.txt" {
+		t.Fatalf("expected build logs key to round-trip, got %s", buildJob.LogsKey)
+	}
+
+	buildLogsReq := httptest.NewRequest(http.MethodGet, "/v1/build-jobs/build-1/logs", nil)
+	buildLogsReq.Header.Set("X-API-Key", "dev-root-key")
+	buildLogsResp := httptest.NewRecorder()
+	handler.ServeHTTP(buildLogsResp, buildLogsReq)
+	if buildLogsResp.Code != http.StatusOK {
+		t.Fatalf("expected build logs status %d, got %d: %s", http.StatusOK, buildLogsResp.Code, buildLogsResp.Body.String())
+	}
+	if got := buildLogsResp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("expected build logs content type text/plain; charset=utf-8, got %s", got)
+	}
+	if body := buildLogsResp.Body.String(); body != "build started\n" {
+		t.Fatalf("unexpected build logs body %q", body)
 	}
 
 	invokeReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-building/invoke", bytes.NewBufferString(`{"payload":{"hello":"world"}}`))

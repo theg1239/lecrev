@@ -215,6 +215,13 @@ curl -sS http://localhost:8080/v1/functions/<version-id> \
   -H 'X-API-Key: dev-root-key'
 ```
 
+Fetch archived build logs:
+
+```bash
+curl -sS http://localhost:8080/v1/build-jobs/<build-job-id>/logs \
+  -H 'X-API-Key: dev-root-key'
+```
+
 Invoke the returned function version:
 
 ```bash

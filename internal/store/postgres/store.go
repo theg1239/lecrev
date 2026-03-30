@@ -300,16 +300,17 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 
 func (s *Store) PutBuildJob(ctx context.Context, job *domain.BuildJob) error {
 	_, err := s.pool.Exec(ctx, `
-		insert into build_jobs (id, function_version_id, target_region, state, error, request, created_at, updated_at)
-		values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+		insert into build_jobs (id, function_version_id, target_region, state, error, logs_key, request, created_at, updated_at)
+		values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
 		on conflict (id) do update set
 			function_version_id = excluded.function_version_id,
 			target_region = excluded.target_region,
 			state = excluded.state,
 			error = excluded.error,
+			logs_key = excluded.logs_key,
 			request = excluded.request,
 			updated_at = excluded.updated_at
-	`, job.ID, job.FunctionVersionID, nullableText(job.TargetRegion), job.State, nullableText(job.Error), normalizeRawJSON(job.Request), job.CreatedAt, job.UpdatedAt)
+	`, job.ID, job.FunctionVersionID, nullableText(job.TargetRegion), job.State, nullableText(job.Error), nullableText(job.LogsKey), normalizeRawJSON(job.Request), job.CreatedAt, job.UpdatedAt)
 	return err
 }
 
@@ -317,11 +318,11 @@ func (s *Store) GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob
 	var job domain.BuildJob
 	var rawRequest []byte
 	if err := s.pool.QueryRow(ctx, `
-		select id, function_version_id, coalesce(target_region, ''), state, coalesce(error, ''), request, created_at, updated_at
+		select id, function_version_id, coalesce(target_region, ''), state, coalesce(error, ''), coalesce(logs_key, ''), request, created_at, updated_at
 		from build_jobs
 		where id = $1
 	`, jobID).Scan(
-		&job.ID, &job.FunctionVersionID, &job.TargetRegion, &job.State, &job.Error, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
+		&job.ID, &job.FunctionVersionID, &job.TargetRegion, &job.State, &job.Error, &job.LogsKey, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
 	); err != nil {
 		return nil, mapNotFound(err)
 	}

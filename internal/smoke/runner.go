@@ -29,6 +29,7 @@ type Config struct {
 
 type Result struct {
 	BuildJob       domain.BuildJob        `json:"buildJob"`
+	BuildLogs      string                 `json:"buildLogs"`
 	Version        domain.FunctionVersion `json:"version"`
 	Job            domain.ExecutionJob    `json:"job"`
 	ArchivedLogs   string                 `json:"archivedLogs"`
@@ -100,6 +101,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	buildJob, version, err := waitForBuildReady(runCtx, cfg, version.ID, version.BuildJobID)
 	if err != nil {
 		return nil, err
+	}
+	buildLogs, err := doRaw(runCtx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodGet, "/v1/build-jobs/"+buildJob.ID+"/logs", http.StatusOK)
+	if err != nil {
+		return nil, fmt.Errorf("get build logs: %w", err)
 	}
 
 	payload := json.RawMessage(`{"hello":"world","smoke":true}`)
@@ -182,6 +187,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	return &Result{
 		BuildJob:       buildJob,
+		BuildLogs:      string(buildLogs),
 		Version:        version,
 		Job:            job,
 		ArchivedLogs:   string(archivedLogs),

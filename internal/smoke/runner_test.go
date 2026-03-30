@@ -47,6 +47,12 @@ func TestRunEmbeddedStackEndToEnd(t *testing.T) {
 	if result.Job.Result == nil {
 		t.Fatal("expected terminal job result")
 	}
+	if strings.TrimSpace(result.BuildJob.LogsKey) == "" {
+		t.Fatal("expected build logs key to be recorded")
+	}
+	if strings.TrimSpace(result.BuildLogs) == "" {
+		t.Fatal("expected archived build logs to be returned")
+	}
 	if result.Job.Result.Region == "" {
 		t.Fatal("expected result region to be recorded")
 	}
@@ -164,6 +170,20 @@ await fs.copyFile(path.join(root, 'src/index.mjs'), path.join(root, 'dist/index.
 	}, version.ID, version.BuildJobID)
 	if err != nil {
 		t.Fatalf("wait for git build ready: %v", err)
+	}
+	var buildJob domain.BuildJob
+	if err := doJSON(ctx, client, "http://embedded.lecrev", stack.APIKey, http.MethodGet, "/v1/build-jobs/"+version.BuildJobID, nil, http.StatusOK, &buildJob); err != nil {
+		t.Fatalf("get git build job: %v", err)
+	}
+	if strings.TrimSpace(buildJob.LogsKey) == "" {
+		t.Fatal("expected git build logs key")
+	}
+	buildLogs, err := doRaw(ctx, client, "http://embedded.lecrev", stack.APIKey, http.MethodGet, "/v1/build-jobs/"+buildJob.ID+"/logs", http.StatusOK)
+	if err != nil {
+		t.Fatalf("fetch git build logs: %v", err)
+	}
+	if !strings.Contains(string(buildLogs), "git clone") {
+		t.Fatalf("expected git build logs to include clone step, got %q", string(buildLogs))
 	}
 
 	payload := json.RawMessage(`{"hello":"git"}`)

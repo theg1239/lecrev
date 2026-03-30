@@ -133,6 +133,7 @@ type BuildJob struct {
 	TargetRegion      string    `json:"targetRegion,omitempty"`
 	State             string    `json:"state"`
 	Error             string    `json:"error,omitempty"`
+	LogsKey           string    `json:"logsKey,omitempty"`
 	Request           []byte    `json:"-"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`

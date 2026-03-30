@@ -53,6 +53,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Use(srv.authMiddleware)
 		r.Post("/projects/{projectID}/functions", srv.createFunction)
 		r.Get("/build-jobs/{jobID}", srv.getBuildJob)
+		r.Get("/build-jobs/{jobID}/logs", srv.getBuildJobLogs)
 		r.Post("/functions/{versionID}/invoke", srv.invokeFunction)
 		r.Get("/jobs/{jobID}", srv.getJob)
 		r.Get("/jobs/{jobID}/logs", srv.getJobLogs)
@@ -180,22 +181,30 @@ func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getBuildJob(w http.ResponseWriter, r *http.Request) {
-	jobID := chi.URLParam(r, "jobID")
-	job, err := s.store.GetBuildJob(r.Context(), jobID)
+	job, _, err := s.authorizedBuildJob(r.Context(), chi.URLParam(r, "jobID"))
 	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	version, err := s.store.GetFunctionVersion(r.Context(), job.FunctionVersionID)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) getBuildJobLogs(w http.ResponseWriter, r *http.Request) {
+	job, _, err := s.authorizedBuildJob(r.Context(), chi.URLParam(r, "jobID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if strings.TrimSpace(job.LogsKey) == "" {
+		writeServiceError(w, domain.ErrBuildLogsNotReady)
+		return
+	}
+	data, err := s.objects.Get(r.Context(), job.LogsKey)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeRaw(w, http.StatusOK, "text/plain; charset=utf-8", data)
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
@@ -463,7 +472,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, domain.ErrFunctionVersionNotReady), errors.Is(err, domain.ErrExecutionResultNotReady):
+	case errors.Is(err, domain.ErrFunctionVersionNotReady), errors.Is(err, domain.ErrBuildLogsNotReady), errors.Is(err, domain.ErrExecutionResultNotReady):
 		status = http.StatusConflict
 	case errors.Is(err, domain.ErrIdempotencyConflict), errors.Is(err, domain.ErrIdempotencyInProgress), errors.Is(err, store.ErrAlreadyExists):
 		status = http.StatusConflict
@@ -567,6 +576,21 @@ func (s *Server) authorizedJob(ctx context.Context, jobID string) (*domain.Execu
 		return nil, err
 	}
 	return job, nil
+}
+
+func (s *Server) authorizedBuildJob(ctx context.Context, jobID string) (*domain.BuildJob, *domain.FunctionVersion, error) {
+	job, err := s.store.GetBuildJob(ctx, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	version, err := s.store.GetFunctionVersion(ctx, job.FunctionVersionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.authorizeProject(ctx, version.ProjectID); err != nil {
+		return nil, nil, err
+	}
+	return job, version, nil
 }
 
 func jobResultKey(job *domain.ExecutionJob, kind string) (string, error) {

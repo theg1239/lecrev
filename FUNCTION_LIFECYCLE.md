@@ -62,6 +62,7 @@ Step-by-step:
 6. Uploads artifact to S3.
 7. Replicates artifact to target execution regions.
 8. Marks function version as ready.
+9. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
 
 ### B) Bundle source deploy
 
@@ -71,6 +72,7 @@ Step-by-step:
 4. Uploads to S3.
 5. Replicates to target regions.
 6. Marks function version as ready.
+7. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
 
 Builder isolation notes:
 
