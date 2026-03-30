@@ -107,6 +107,13 @@ bash deploy/ec2/deploy-execution-host.sh <execution-host> /path/to/key.pem
 
 For a private-only execution host, pass its private IP or private DNS name and set `LECREV_SSH_PROXY_JUMP` to the control-plane host.
 
+Before removing the execution host public IP, make sure the worker still has private access to artifact storage. In this AWS setup, that means either:
+
+- an S3 gateway VPC endpoint attached to the subnet route table, or
+- NAT egress for the worker subnet
+
+Without one of those, the node-agent blocks on S3 bucket checks at startup and cannot fetch execution artifacts.
+
 That deploys:
 
 - `lecrev-firecracker-network`

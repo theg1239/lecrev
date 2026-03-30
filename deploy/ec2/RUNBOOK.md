@@ -284,6 +284,18 @@ Recommended target state:
 - control plane keeps the public ingress
 - execution host has no public IP
 - execution host SSH allows access only from the control-plane security group or SSM
+- execution host reaches S3 privately through a gateway endpoint or NAT
+
+If the execution host subnet does not have NAT, create an S3 gateway endpoint before removing the worker public IP:
+
+```bash
+aws ec2 create-vpc-endpoint \
+  --region "${AWS_REGION}" \
+  --vpc-id <vpc-id> \
+  --service-name "com.amazonaws.${AWS_REGION}.s3" \
+  --vpc-endpoint-type Gateway \
+  --route-table-ids <route-table-id>
+```
 
 Allow SSH from the control-plane security group to the execution-host security group:
 
