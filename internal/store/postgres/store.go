@@ -950,6 +950,10 @@ func (s *Store) ReplaceWarmPoolsForHost(ctx context.Context, region, hostID stri
 		if _, err := tx.Exec(ctx, `
 			insert into warm_pools (region, host_id, function_version_id, blank_warm, function_warm, updated_at)
 			values ($1, $2, $3, $4, $5, $6)
+			on conflict (region, host_id, function_version_id) do update
+			set blank_warm = excluded.blank_warm,
+			    function_warm = excluded.function_warm,
+			    updated_at = excluded.updated_at
 		`, pool.Region, pool.HostID, pool.FunctionVersionID, pool.BlankWarm, pool.FunctionWarm, pool.UpdatedAt); err != nil {
 			return err
 		}
