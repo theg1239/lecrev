@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -377,27 +378,11 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 		bundle, err := artifact.BundleFromFiles(files)
 		return bundle, startup, err
 	case domain.SourceTypeGit:
-		tmpDir, err := os.MkdirTemp("", "lecrev-git-*")
+		root, cleanup, err := s.prepareGitWorkspace(ctx, req)
 		if err != nil {
 			return nil, nil, err
 		}
-		defer os.RemoveAll(tmpDir)
-		if req.Source.GitURL == "" {
-			return nil, nil, fmt.Errorf("gitUrl is required for git source")
-		}
-		cloneArgs := []string{"clone", "--depth", "1"}
-		if req.Source.GitRef != "" {
-			cloneArgs = append(cloneArgs, "--branch", req.Source.GitRef)
-		}
-		cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
-		cmd := exec.CommandContext(ctx, "git", cloneArgs...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return nil, nil, fmt.Errorf("git clone failed: %w: %s", err, string(output))
-		}
-		root := tmpDir
-		if req.Source.SubPath != "" {
-			root = filepath.Join(tmpDir, req.Source.SubPath)
-		}
+		defer cleanup()
 		bundle, err := artifact.BundleFromDirectory(root, map[string][]byte{
 			"function.json": functionManifest,
 			"startup.json":  startup,
@@ -406,4 +391,162 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 	default:
 		return nil, nil, fmt.Errorf("unsupported source type %q", req.Source.Type)
 	}
+}
+
+type packageManifest struct {
+	PackageManager string            `json:"packageManager"`
+	Scripts        map[string]string `json:"scripts"`
+}
+
+func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest) (string, func(), error) {
+	if strings.TrimSpace(req.Source.GitURL) == "" {
+		return "", nil, fmt.Errorf("gitUrl is required for git source")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "lecrev-git-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
+
+	cloneArgs := []string{"clone", "--depth", "1"}
+	if req.Source.GitRef != "" {
+		cloneArgs = append(cloneArgs, "--branch", req.Source.GitRef)
+	}
+	cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
+	if err := runCommand(ctx, "", "git", cloneArgs...); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("git clone failed: %w", err)
+	}
+
+	root, err := resolveBuildRoot(tmpDir, req.Source.SubPath)
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := prepareNodeWorkspace(ctx, root); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := verifyEntrypoint(root, req.Entrypoint); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return root, cleanup, nil
+}
+
+func resolveBuildRoot(repoRoot, subPath string) (string, error) {
+	root := repoRoot
+	if strings.TrimSpace(subPath) != "" {
+		repoAbs, err := filepath.Abs(repoRoot)
+		if err != nil {
+			return "", err
+		}
+		candidate, err := filepath.Abs(filepath.Join(repoRoot, filepath.FromSlash(subPath)))
+		if err != nil {
+			return "", err
+		}
+		if candidate != repoAbs && !strings.HasPrefix(candidate, repoAbs+string(os.PathSeparator)) {
+			return "", fmt.Errorf("subPath %q escapes repository root", subPath)
+		}
+		root = candidate
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve build root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("build root %q is not a directory", root)
+	}
+	return root, nil
+}
+
+func prepareNodeWorkspace(ctx context.Context, root string) error {
+	pkgPath := filepath.Join(root, "package.json")
+	rawPkg, err := os.ReadFile(pkgPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read package.json: %w", err)
+	}
+
+	var pkg packageManifest
+	if err := json.Unmarshal(rawPkg, &pkg); err != nil {
+		return fmt.Errorf("decode package.json: %w", err)
+	}
+
+	if err := validatePackageManager(root, pkg.PackageManager); err != nil {
+		return err
+	}
+
+	hasBuildScript := strings.TrimSpace(pkg.Scripts["build"]) != ""
+	installArgs := []string{"install"}
+	if hasNpmLockfile(root) {
+		installArgs[0] = "ci"
+	}
+	if !hasBuildScript {
+		installArgs = append(installArgs, "--omit=dev")
+	}
+	if err := runCommand(ctx, root, "npm", installArgs...); err != nil {
+		return fmt.Errorf("install npm dependencies: %w", err)
+	}
+	if !hasBuildScript {
+		return nil
+	}
+	if err := runCommand(ctx, root, "npm", "run", "build", "--if-present"); err != nil {
+		return fmt.Errorf("run npm build: %w", err)
+	}
+	if err := runCommand(ctx, root, "npm", "prune", "--omit=dev"); err != nil {
+		return fmt.Errorf("prune npm devDependencies: %w", err)
+	}
+	return nil
+}
+
+func validatePackageManager(root, packageManager string) error {
+	if strings.TrimSpace(packageManager) != "" && !strings.HasPrefix(packageManager, "npm@") && packageManager != "npm" {
+		return fmt.Errorf("unsupported package manager %q: only npm-based git builds are currently supported", packageManager)
+	}
+	for _, unsupported := range []string{"pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"} {
+		if _, err := os.Stat(filepath.Join(root, unsupported)); err == nil {
+			return fmt.Errorf("unsupported lockfile %q: only npm-based git builds are currently supported", unsupported)
+		}
+	}
+	return nil
+}
+
+func hasNpmLockfile(root string) bool {
+	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func verifyEntrypoint(root, entrypoint string) error {
+	if strings.TrimSpace(entrypoint) == "" {
+		return fmt.Errorf("entrypoint is required")
+	}
+	target := filepath.Join(root, filepath.FromSlash(entrypoint))
+	info, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("verify entrypoint %q: %w", entrypoint, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("entrypoint %q resolved to a directory", entrypoint)
+	}
+	return nil
+}
+
+func runCommand(ctx context.Context, dir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }

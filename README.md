@@ -165,6 +165,34 @@ curl -sS http://localhost:8080/v1/projects/demo/functions \
 JSON
 ```
 
+Deploy from a git repository:
+
+```bash
+curl -sS http://localhost:8080/v1/projects/demo/functions \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev-root-key' \
+  -d @- <<'JSON'
+{
+  "name": "git-echo",
+  "runtime": "node22",
+  "entrypoint": "dist/index.mjs",
+  "memoryMb": 128,
+  "timeoutSec": 10,
+  "networkPolicy": "full",
+  "regions": ["ap-south-1", "ap-south-2", "ap-southeast-1"],
+  "maxRetries": 2,
+  "source": {
+    "type": "git",
+    "gitUrl": "file:///absolute/path/to/repo",
+    "gitRef": "main",
+    "subPath": "."
+  }
+}
+JSON
+```
+
+The current git build path is npm-based: the build worker clones the repository, installs dependencies, runs `npm run build` when a build script is present, prunes dev dependencies, verifies the declared entrypoint exists, then packages the resulting workspace into the immutable execution artifact.
+
 Poll the build job or function version until it becomes ready:
 
 ```bash

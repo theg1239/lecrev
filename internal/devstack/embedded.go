@@ -164,6 +164,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		}()
 	}
 
+	run("global-scheduler", func() error { return schedulerService.Run(ctx) })
 	for _, region := range localRegions {
 		region := region
 		run("build-consumer-"+region.name, func() error {
