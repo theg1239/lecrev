@@ -34,7 +34,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${TMP_DIR}/lecrev" ./cmd/lecr
 
 cp deploy/ec2/lecrev-control-plane.service "${TMP_DIR}/"
 cp deploy/ec2/nats-server.service "${TMP_DIR}/"
-cp deploy/ec2/nginx.lecrev.conf "${TMP_DIR}/"
+cp deploy/ec2/nginx.lecrev.http.conf.tmpl "${TMP_DIR}/"
+cp deploy/ec2/nginx.lecrev.https.conf.tmpl "${TMP_DIR}/"
+cp deploy/ec2/render-control-plane-nginx.sh "${TMP_DIR}/"
+cp deploy/ec2/provision-control-plane-tls.sh "${TMP_DIR}/"
 mkdir -p "${TMP_DIR}/frontend-dist"
 cp -R "${FRONTEND_DIR}/dist/." "${TMP_DIR}/frontend-dist/"
 
@@ -49,10 +52,15 @@ ssh "${SSH_ARGS[@]}" ec2-user@"${HOST}" "\
   sudo install -o lecrev -g lecrev -m 0755 '${REMOTE_TMP}/lecrev' /opt/lecrev/bin/lecrev && \
   sudo install -m 0644 '${REMOTE_TMP}/lecrev-control-plane.service' /etc/systemd/system/lecrev-control-plane.service && \
   sudo install -m 0644 '${REMOTE_TMP}/nats-server.service' /etc/systemd/system/nats-server.service && \
-  sudo install -m 0644 '${REMOTE_TMP}/nginx.lecrev.conf' /etc/nginx/conf.d/lecrev.conf && \
+  sudo install -o root -g root -m 0644 '${REMOTE_TMP}/nginx.lecrev.http.conf.tmpl' /etc/lecrev/nginx.lecrev.http.conf.tmpl && \
+  sudo install -o root -g root -m 0644 '${REMOTE_TMP}/nginx.lecrev.https.conf.tmpl' /etc/lecrev/nginx.lecrev.https.conf.tmpl && \
+  sudo install -o root -g root -m 0755 '${REMOTE_TMP}/render-control-plane-nginx.sh' /usr/local/bin/lecrev-render-control-plane-nginx && \
+  sudo install -o root -g root -m 0755 '${REMOTE_TMP}/provision-control-plane-tls.sh' /usr/local/bin/lecrev-provision-control-plane-tls && \
   sudo rm -rf /var/www/lecrev/* && \
+  sudo mkdir -p /var/www/certbot && \
   sudo cp -R '${REMOTE_TMP}/frontend-dist/.' /var/www/lecrev/ && \
   sudo chown -R nginx:nginx /var/www/lecrev && \
+  sudo /usr/local/bin/lecrev-render-control-plane-nginx && \
   sudo nginx -t && \
   sudo systemctl daemon-reload && \
   sudo systemctl enable nats-server nginx lecrev-control-plane && \

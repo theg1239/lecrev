@@ -54,6 +54,12 @@ Deploy the control plane and frontend:
 bash deploy/ec2/deploy-control-plane.sh <control-plane-host> /path/to/key.pem /absolute/path/to/frontend-repo
 ```
 
+Then provision Let's Encrypt certificates once the frontend, API, and function hostnames all resolve to the control-plane IP:
+
+```bash
+ssh -i /path/to/key.pem ec2-user@<control-plane-host> 'sudo /usr/local/bin/lecrev-provision-control-plane-tls'
+```
+
 If you need to hop through a bastion or the public control-plane host, set:
 
 ```bash
@@ -66,6 +72,7 @@ That deploys:
 - `nats-server`
 - `nginx`
 - the frontend static bundle
+- TLS-ready nginx templates plus the certbot helper scripts
 
 ### 2. Build-worker EC2
 
@@ -159,6 +166,7 @@ Control plane:
 curl -sS http://<control-plane-host>/healthz
 curl -sS http://<control-plane-host>/metrics
 curl -sS http://<control-plane-host>/v1/regions -H 'X-API-Key: <bootstrap-api-key>'
+curl -I https://<frontend-host>
 ```
 
 Build worker:
@@ -180,6 +188,8 @@ Important current constraint:
 - the execution-host deployment now installs `lecrev-firecracker-network.service` so `tap0` is recreated after reboots before the node-agent starts.
 - Set `LECREV_PUBLIC_BASE_URL` on the control plane so created HTTP trigger URLs use the real external origin instead of the incoming request host header.
 - Set `LECREV_S3_BUCKET` on each execution host to the bucket mapped for that host's region in `LECREV_S3_REGION_BUCKETS`.
+- Set `LECREV_FRONTEND_HOST`, `LECREV_API_HOST`, `LECREV_FUNCTIONS_HOST`, `LECREV_TLS_CERT_NAME`, and `LECREV_ACME_EMAIL` on the control plane before running the TLS provisioner.
+- Keep `LECREV_S3_REGION_BUCKETS` on the build worker; the control plane only needs its local `LECREV_S3_BUCKET`.
 
 For an operational runbook with start, stop, restart, verification, and function URL commands, see [RUNBOOK.md](RUNBOOK.md).
 

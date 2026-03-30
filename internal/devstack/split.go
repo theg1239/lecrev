@@ -41,11 +41,6 @@ func RunControlPlane(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer closeObjectStore()
-	artifactReplicator, closeReplicator, err := buildArtifactReplicator(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer closeReplicator()
 	secretProvider, err := buildSecretsProvider(ctx, cfg)
 	if err != nil {
 		return err
@@ -53,7 +48,6 @@ func RunControlPlane(ctx context.Context, cfg Config) error {
 	secretResolver := secrets.NewScopedResolver(metaStore, secretProvider)
 	secretsProxy := secrets.NewProxyHandler(secretResolver, cfg.SecretsProxyToken)
 	builder := build.New(metaStore, objectStore)
-	builder.SetArtifactReplicator(artifactReplicator)
 	buildBus, closeBuildBus, err := buildBuildBus(cfg)
 	if err != nil {
 		return err

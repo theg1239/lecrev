@@ -18,6 +18,9 @@ export CONTROL_PLANE_PUBLIC_HOST='<control-plane-public-ip-or-dns>'
 export CONTROL_PLANE_PRIVATE_HOST='<control-plane-private-ip>'
 export BUILD_HOST_PRIVATE='<build-host-private-ip>'
 export EXECUTION_HOST_PRIVATE='<execution-host-private-ip>'
+export FRONTEND_HOST='lecrev.example.com'
+export API_HOST='api.lecrev.example.com'
+export FUNCTIONS_HOST='functions.lecrev.example.com'
 export SSH_KEY_PATH='/absolute/path/to/key.pem'
 export FRONTEND_DIR='/absolute/path/to/frontend-repo'
 export LECREV_SSH_PROXY_JUMP="ec2-user@${CONTROL_PLANE_PUBLIC_HOST}"
@@ -46,6 +49,10 @@ Important files:
 - gRPC certs: `/etc/lecrev/grpc/*.pem`
 - binary: `/opt/lecrev/bin/lecrev`
 - static frontend: `/var/www/lecrev`
+- nginx renderer: `/usr/local/bin/lecrev-render-control-plane-nginx`
+- TLS provisioner: `/usr/local/bin/lecrev-provision-control-plane-tls`
+
+The control plane should keep only its local `LECREV_S3_BUCKET`. Do not set `LECREV_S3_REGION_BUCKETS` there; that mapping belongs on the build worker.
 
 ## 3. Build-worker host layout
 
@@ -89,6 +96,13 @@ Redeploy the control plane and frontend:
 ```bash
 cd /Users/ishaan/eeeverc
 bash deploy/ec2/deploy-control-plane.sh "${CONTROL_PLANE_PUBLIC_HOST}" "${SSH_KEY_PATH}" "${FRONTEND_DIR}"
+```
+
+Issue or renew the Let's Encrypt certificate set after the domains resolve:
+
+```bash
+ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
+  'sudo /usr/local/bin/lecrev-provision-control-plane-tls'
 ```
 
 Redeploy the execution host over the private address:
@@ -183,6 +197,9 @@ ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
 
 ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
   'sudo journalctl -u nginx -n 100 --no-pager'
+
+ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
+  'sudo /usr/local/bin/lecrev-render-control-plane-nginx && sudo nginx -t'
 ```
 
 Build-worker logs:
@@ -219,6 +236,7 @@ Public health:
 ```bash
 curl -sS "http://${CONTROL_PLANE_PUBLIC_HOST}/healthz"
 curl -sS "http://${CONTROL_PLANE_PUBLIC_HOST}/metrics"
+curl -I "https://${FRONTEND_HOST}"
 ```
 
 Region and host inventory:
