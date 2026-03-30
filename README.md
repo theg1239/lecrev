@@ -202,6 +202,8 @@ Current deploy admission caps in the implementation:
 - retries: `0` to `5`
 - env refs: up to `64`
 - archived execution artifact size: up to `10 MiB`
+- execution logs: up to `1 MiB`
+- execution output payload: up to `1 MiB`
 
 Poll the build job or function version until it becomes ready:
 

@@ -2,7 +2,9 @@ package nodeagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +36,11 @@ type Service struct {
 	blankWarm      int
 	functionWarm   map[string]int
 }
+
+const (
+	maxExecutionLogBytes    = 1 << 20
+	maxExecutionOutputBytes = 1 << 20
+)
 
 type EmbeddedCoordinator interface {
 	UpdateEmbeddedHeartbeat(ctx context.Context, msg *regionv1.HostHeartbeat) error
@@ -240,28 +247,38 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		Region:         s.region,
 		HostID:         s.hostID,
 	})
+	logs := ""
+	var output []byte
+	exitCode := 1
+	var limitErr error
+	if result != nil {
+		logs, output, limitErr = enforceExecutionResultLimits(result.Logs, result.Output)
+		exitCode = result.ExitCode
+	}
 	if execErr != nil {
 		stopRunningHeartbeats()
-		logs := ""
-		var output []byte
-		exitCode := 1
-		if result != nil {
-			logs = result.Logs
-			output = result.Output
-			exitCode = result.ExitCode
-		}
-		errMsg := execErr.Error()
+		errMsg := combineErrorMessages(execErr, limitErr)
 		if archiveErr := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); archiveErr != nil {
 			errMsg = fmt.Sprintf("%s; archive execution artifacts: %v", errMsg, archiveErr)
 		}
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, exitCode)
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, terminalExitCode(exitCode))
 		releaseSlot()
 		sendHeartbeat()
 		return
 	}
 	stopRunningHeartbeats()
-	if err := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, result.Logs, result.Output); err != nil {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, result.Logs, result.Output, fmt.Sprintf("archive execution artifacts: %v", err), result.ExitCode)
+	if limitErr != nil {
+		errMsg := limitErr.Error()
+		if archiveErr := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); archiveErr != nil {
+			errMsg = fmt.Sprintf("%s; archive execution artifacts: %v", errMsg, archiveErr)
+		}
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, terminalExitCode(exitCode))
+		releaseSlot()
+		sendHeartbeat()
+		return
+	}
+	if err := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); err != nil {
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, fmt.Sprintf("archive execution artifacts: %v", err), terminalExitCode(exitCode))
 		releaseSlot()
 		sendHeartbeat()
 		return
@@ -271,7 +288,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		s.functionWarm[msg.FunctionVersionId] = 1
 		s.mu.Unlock()
 	}
-	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, result.Logs, result.Output, "", result.ExitCode)
+	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, logs, output, "", exitCode)
 	releaseSlot()
 	sendHeartbeat()
 }
@@ -288,6 +305,49 @@ func (s *Service) archiveExecutionArtifacts(ctx context.Context, jobID, attemptI
 		normalizedOutput = append([]byte(nil), output...)
 	}
 	return s.objects.Put(ctx, artifact.ExecutionOutputKey(jobID, attemptID), normalizedOutput)
+}
+
+func enforceExecutionResultLimits(logs string, output []byte) (string, []byte, error) {
+	normalizedLogs := []byte(logs)
+	errs := make([]string, 0, 2)
+	if len(normalizedLogs) > maxExecutionLogBytes {
+		normalizedLogs = append([]byte(nil), normalizedLogs[:maxExecutionLogBytes]...)
+		errs = append(errs, fmt.Sprintf("execution logs exceeded limit of %d bytes", maxExecutionLogBytes))
+	} else {
+		normalizedLogs = append([]byte(nil), normalizedLogs...)
+	}
+
+	var normalizedOutput []byte
+	if len(output) > maxExecutionOutputBytes {
+		errs = append(errs, fmt.Sprintf("execution output exceeded limit of %d bytes", maxExecutionOutputBytes))
+	} else if len(output) > 0 {
+		normalizedOutput = append([]byte(nil), output...)
+	}
+
+	if len(errs) > 0 {
+		return string(normalizedLogs), normalizedOutput, errors.New(strings.Join(errs, "; "))
+	}
+	return string(normalizedLogs), normalizedOutput, nil
+}
+
+func combineErrorMessages(primary error, secondary error) string {
+	if primary == nil && secondary == nil {
+		return ""
+	}
+	if primary == nil {
+		return secondary.Error()
+	}
+	if secondary == nil {
+		return primary.Error()
+	}
+	return primary.Error() + "; " + secondary.Error()
+}
+
+func terminalExitCode(exitCode int) int {
+	if exitCode == 0 {
+		return 1
+	}
+	return exitCode
 }
 
 func (s *Service) assignmentHeartbeatLoop(ctx context.Context, sendRunningHeartbeat func()) {

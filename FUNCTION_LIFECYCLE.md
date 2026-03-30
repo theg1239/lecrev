@@ -183,6 +183,8 @@ Current v1 implementation caps:
 - retries: `0` to `5`
 - env refs: up to `64`
 - artifact size: `10 MiB`
+- execution logs: `1 MiB`
+- execution output payload: `1 MiB`
 
 ## 13) Observability flow
 
