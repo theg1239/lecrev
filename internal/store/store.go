@@ -22,6 +22,7 @@ type Store interface {
 	PutFunctionVersion(ctx context.Context, version *domain.FunctionVersion) error
 	GetFunctionVersion(ctx context.Context, versionID string) (*domain.FunctionVersion, error)
 	PutBuildJob(ctx context.Context, job *domain.BuildJob) error
+	GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob, error)
 	PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	UpdateExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	GetExecutionJob(ctx context.Context, jobID string) (*domain.ExecutionJob, error)

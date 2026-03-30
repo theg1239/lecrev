@@ -23,7 +23,9 @@ const (
 type FunctionState string
 
 const (
-	FunctionStateReady FunctionState = "ready"
+	FunctionStateBuilding FunctionState = "building"
+	FunctionStateReady    FunctionState = "ready"
+	FunctionStateFailed   FunctionState = "failed"
 )
 
 type JobState string
@@ -117,6 +119,7 @@ type FunctionVersion struct {
 	Regions        []string      `json:"regions"`
 	EnvRefs        []string      `json:"envRefs"`
 	MaxRetries     int           `json:"maxRetries"`
+	BuildJobID     string        `json:"buildJobId,omitempty"`
 	SourceType     SourceType    `json:"sourceType"`
 	ArtifactDigest string        `json:"artifactDigest"`
 	State          FunctionState `json:"state"`
@@ -126,8 +129,10 @@ type FunctionVersion struct {
 type BuildJob struct {
 	ID                string    `json:"id"`
 	FunctionVersionID string    `json:"functionVersionId"`
+	TargetRegion      string    `json:"targetRegion,omitempty"`
 	State             string    `json:"state"`
 	Error             string    `json:"error,omitempty"`
+	Request           []byte    `json:"-"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
 }

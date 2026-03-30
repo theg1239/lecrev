@@ -230,9 +230,9 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 	_, err = s.pool.Exec(ctx, `
 		insert into function_versions (
 			id, project_id, name, runtime, entrypoint, memory_mb, timeout_sec, network_policy,
-			regions, env_refs, max_retries, artifact_digest, source_type, state, created_at
+			regions, env_refs, max_retries, build_job_id, artifact_digest, source_type, state, created_at
 		)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16)
 		on conflict (id) do update set
 			project_id = excluded.project_id,
 			name = excluded.name,
@@ -244,12 +244,13 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 			regions = excluded.regions,
 			env_refs = excluded.env_refs,
 			max_retries = excluded.max_retries,
+			build_job_id = excluded.build_job_id,
 			artifact_digest = excluded.artifact_digest,
 			source_type = excluded.source_type,
 			state = excluded.state
 	`, version.ID, version.ProjectID, version.Name, version.Runtime, version.Entrypoint, version.MemoryMB,
 		version.TimeoutSec, string(version.NetworkPolicy), regions, envRefs, version.MaxRetries,
-		version.ArtifactDigest, string(version.SourceType), string(version.State), version.CreatedAt)
+		nullableText(version.BuildJobID), version.ArtifactDigest, string(version.SourceType), string(version.State), version.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -274,13 +275,13 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 	var state string
 	if err := s.pool.QueryRow(ctx, `
 		select id, project_id, name, runtime, entrypoint, memory_mb, timeout_sec, network_policy,
-		       regions, env_refs, max_retries, artifact_digest, source_type, state, created_at
+		       regions, env_refs, max_retries, coalesce(build_job_id, ''), artifact_digest, source_type, state, created_at
 		from function_versions
 		where id = $1
 	`, versionID).Scan(
 		&version.ID, &version.ProjectID, &version.Name, &version.Runtime, &version.Entrypoint,
 		&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvRefs,
-		&version.MaxRetries, &version.ArtifactDigest, &sourceType, &state, &version.CreatedAt,
+		&version.MaxRetries, &version.BuildJobID, &version.ArtifactDigest, &sourceType, &state, &version.CreatedAt,
 	); err != nil {
 		return nil, mapNotFound(err)
 	}
@@ -298,15 +299,33 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 
 func (s *Store) PutBuildJob(ctx context.Context, job *domain.BuildJob) error {
 	_, err := s.pool.Exec(ctx, `
-		insert into build_jobs (id, function_version_id, state, error, created_at, updated_at)
-		values ($1, $2, $3, $4, $5, $6)
+		insert into build_jobs (id, function_version_id, target_region, state, error, request, created_at, updated_at)
+		values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
 		on conflict (id) do update set
 			function_version_id = excluded.function_version_id,
+			target_region = excluded.target_region,
 			state = excluded.state,
 			error = excluded.error,
+			request = excluded.request,
 			updated_at = excluded.updated_at
-	`, job.ID, job.FunctionVersionID, job.State, nullableText(job.Error), job.CreatedAt, job.UpdatedAt)
+	`, job.ID, job.FunctionVersionID, nullableText(job.TargetRegion), job.State, nullableText(job.Error), normalizeRawJSON(job.Request), job.CreatedAt, job.UpdatedAt)
 	return err
+}
+
+func (s *Store) GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob, error) {
+	var job domain.BuildJob
+	var rawRequest []byte
+	if err := s.pool.QueryRow(ctx, `
+		select id, function_version_id, coalesce(target_region, ''), state, coalesce(error, ''), request, created_at, updated_at
+		from build_jobs
+		where id = $1
+	`, jobID).Scan(
+		&job.ID, &job.FunctionVersionID, &job.TargetRegion, &job.State, &job.Error, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
+	); err != nil {
+		return nil, mapNotFound(err)
+	}
+	job.Request = append([]byte(nil), rawRequest...)
+	return &job, nil
 }
 
 func (s *Store) PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error {

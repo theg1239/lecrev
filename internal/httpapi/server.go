@@ -2,8 +2,8 @@ package httpapi
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +49,7 @@ func New(store store.Store, builder *build.Service, scheduler *scheduler.Service
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
 		r.Post("/projects/{projectID}/functions", srv.createFunction)
+		r.Get("/build-jobs/{jobID}", srv.getBuildJob)
 		r.Post("/functions/{versionID}/invoke", srv.invokeFunction)
 		r.Get("/jobs/{jobID}", srv.getJob)
 		r.Get("/functions/{versionID}", srv.getFunction)
@@ -149,6 +150,10 @@ func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	if version.State != domain.FunctionStateReady {
+		writeServiceError(w, domain.ErrFunctionVersionNotReady)
+		return
+	}
 	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
 		writeServiceError(w, err)
 		return
@@ -167,6 +172,25 @@ func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) getBuildJob(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "jobID")
+	job, err := s.store.GetBuildJob(r.Context(), jobID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	version, err := s.store.GetFunctionVersion(r.Context(), job.FunctionVersionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
@@ -401,6 +425,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, domain.ErrFunctionVersionNotReady):
+		status = http.StatusConflict
 	case errors.Is(err, domain.ErrIdempotencyConflict), errors.Is(err, domain.ErrIdempotencyInProgress), errors.Is(err, store.ErrAlreadyExists):
 		status = http.StatusConflict
 	default:

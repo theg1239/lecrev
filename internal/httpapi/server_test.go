@@ -284,6 +284,72 @@ func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
 	}
 }
 
+func TestBuildJobInspectionAndInvokeBlockedUntilReady(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	builder := build.New(meta, artifact.NewMemoryStore())
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:            "fn-building",
+		ProjectID:     "demo",
+		Name:          "echo",
+		Runtime:       "node22",
+		Entrypoint:    "index.mjs",
+		Regions:       []string{"ap-south-1"},
+		BuildJobID:    "build-1",
+		SourceType:    domain.SourceTypeBundle,
+		State:         domain.FunctionStateBuilding,
+		CreatedAt:     now,
+		NetworkPolicy: domain.NetworkPolicyFull,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutBuildJob(context.Background(), &domain.BuildJob{
+		ID:                "build-1",
+		FunctionVersionID: "fn-building",
+		TargetRegion:      "ap-south-1",
+		State:             "running",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatalf("put build job: %v", err)
+	}
+
+	handler := New(meta, builder, sched)
+
+	buildReq := httptest.NewRequest(http.MethodGet, "/v1/build-jobs/build-1", nil)
+	buildReq.Header.Set("X-API-Key", "dev-root-key")
+	buildResp := httptest.NewRecorder()
+	handler.ServeHTTP(buildResp, buildReq)
+	if buildResp.Code != http.StatusOK {
+		t.Fatalf("expected build job status %d, got %d: %s", http.StatusOK, buildResp.Code, buildResp.Body.String())
+	}
+	var buildJob domain.BuildJob
+	if err := json.Unmarshal(buildResp.Body.Bytes(), &buildJob); err != nil {
+		t.Fatalf("decode build job: %v", err)
+	}
+	if buildJob.State != "running" {
+		t.Fatalf("expected running build job state, got %s", buildJob.State)
+	}
+
+	invokeReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-building/invoke", bytes.NewBufferString(`{"payload":{"hello":"world"}}`))
+	invokeReq.Header.Set("Content-Type", "application/json")
+	invokeReq.Header.Set("X-API-Key", "dev-root-key")
+	invokeResp := httptest.NewRecorder()
+	handler.ServeHTTP(invokeResp, invokeReq)
+	if invokeResp.Code != http.StatusConflict {
+		t.Fatalf("expected invoke conflict status %d, got %d: %s", http.StatusConflict, invokeResp.Code, invokeResp.Body.String())
+	}
+}
+
 func TestAuthRejectsInvalidAndDisabledAPIKeys(t *testing.T) {
 	t.Parallel()
 

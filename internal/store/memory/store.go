@@ -182,8 +182,19 @@ func (s *Store) GetFunctionVersion(_ context.Context, versionID string) (*domain
 func (s *Store) PutBuildJob(_ context.Context, job *domain.BuildJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.buildJobs[job.ID] = *job
+	s.buildJobs[job.ID] = cloneBuildJob(*job)
 	return nil
+}
+
+func (s *Store) GetBuildJob(_ context.Context, jobID string) (*domain.BuildJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	job, ok := s.buildJobs[jobID]
+	if !ok {
+		return nil, fmt.Errorf("%w: build job %q", store.ErrNotFound, jobID)
+	}
+	cp := cloneBuildJob(job)
+	return &cp, nil
 }
 
 func (s *Store) PutExecutionJob(_ context.Context, job *domain.ExecutionJob) error {
@@ -442,6 +453,12 @@ func cloneFunctionVersion(v domain.FunctionVersion) domain.FunctionVersion {
 	cp := v
 	cp.Regions = append([]string(nil), v.Regions...)
 	cp.EnvRefs = append([]string(nil), v.EnvRefs...)
+	return cp
+}
+
+func cloneBuildJob(job domain.BuildJob) domain.BuildJob {
+	cp := job
+	cp.Request = append([]byte(nil), job.Request...)
 	return cp
 }
 

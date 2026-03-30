@@ -6,8 +6,9 @@ import (
 )
 
 var (
-	ErrIdempotencyConflict   = errors.New("idempotency key reused with different request")
-	ErrIdempotencyInProgress = errors.New("idempotent request already in progress")
+	ErrIdempotencyConflict     = errors.New("idempotency key reused with different request")
+	ErrIdempotencyInProgress   = errors.New("idempotent request already in progress")
+	ErrFunctionVersionNotReady = errors.New("function version not ready")
 )
 
 type IdempotencyStatus string

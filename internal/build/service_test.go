@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/domain"
@@ -120,4 +121,67 @@ func TestCreateFunctionVersionRejectsIdempotencyKeyReuseWithDifferentPayload(t *
 	if !errors.Is(err, domain.ErrIdempotencyConflict) {
 		t.Fatalf("expected idempotency conflict, got %v", err)
 	}
+}
+
+func TestCreateFunctionVersionQueuesAsyncBuildAndMarksReady(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	bus := NewMemoryBus(16)
+	svc := New(meta, objects)
+	svc.SetBuildBus(bus)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = svc.RunBuildConsumer(ctx, "ap-south-1", "builder-ap-south-1")
+	}()
+
+	version, err := svc.CreateFunctionVersion(ctx, domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "echo",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		Regions:    []string{"ap-south-1"},
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create function version: %v", err)
+	}
+	if version.State != domain.FunctionStateBuilding {
+		t.Fatalf("expected initial state %s, got %s", domain.FunctionStateBuilding, version.State)
+	}
+	if version.BuildJobID == "" {
+		t.Fatal("expected build job id to be set")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		latest, err := meta.GetFunctionVersion(context.Background(), version.ID)
+		if err != nil {
+			t.Fatalf("get function version: %v", err)
+		}
+		if latest.State == domain.FunctionStateReady {
+			job, err := meta.GetBuildJob(context.Background(), version.BuildJobID)
+			if err != nil {
+				t.Fatalf("get build job: %v", err)
+			}
+			if job.State != "succeeded" {
+				t.Fatalf("expected succeeded build job, got %s", job.State)
+			}
+			if latest.ArtifactDigest == "" {
+				t.Fatal("expected artifact digest after async build")
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for async build to complete")
 }

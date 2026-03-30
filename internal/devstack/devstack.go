@@ -144,6 +144,12 @@ func runNetworked(ctx context.Context, cfg Config) error {
 	secretResolver := secrets.NewScopedResolver(metaStore, secretProvider)
 	secretsProxy := secrets.NewProxyHandler(secretResolver, cfg.SecretsProxyToken)
 	builder := build.New(metaStore, objectStore)
+	buildBus, closeBuildBus, err := buildBuildBus(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeBuildBus()
+	builder.SetBuildBus(buildBus)
 	executionBus, closeBus, err := buildExecutionBus(cfg)
 	if err != nil {
 		return err
@@ -216,6 +222,9 @@ func runNetworked(ctx context.Context, cfg Config) error {
 
 	for _, region := range localRegions {
 		region := region
+		run("build-consumer-"+region.name, func() error {
+			return builder.RunBuildConsumer(ctx, region.name, "builder-"+sanitizeRegionToken(region.name))
+		})
 		run("coordinator-"+region.name, func() error { return region.svc.Listen(ctx, region.addr, grpcServerOptions...) })
 		run("queue-consumer-"+region.name, func() error {
 			return region.svc.RunExecutionConsumer(ctx, "coordinator-"+sanitizeRegionToken(region.name))
@@ -271,6 +280,22 @@ func buildExecutionBus(cfg Config) (dispatch.ExecutionBus, func(), error) {
 		return bus, func() { _ = bus.Close() }, nil
 	}
 	bus, err := dispatch.NewNATS(cfg.NATSURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := bus.EnsureStream(); err != nil {
+		_ = bus.Close()
+		return nil, nil, err
+	}
+	return bus, func() { _ = bus.Close() }, nil
+}
+
+func buildBuildBus(cfg Config) (build.BuildBus, func(), error) {
+	if strings.TrimSpace(cfg.NATSURL) == "" {
+		bus := build.NewMemoryBus(256)
+		return bus, func() { _ = bus.Close() }, nil
+	}
+	bus, err := build.NewNATSBus(cfg.NATSURL)
 	if err != nil {
 		return nil, nil, err
 	}

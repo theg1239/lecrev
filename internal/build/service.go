@@ -25,6 +25,7 @@ import (
 type Service struct {
 	store   store.Store
 	objects artifact.Store
+	bus     BuildBus
 	now     func() time.Time
 }
 
@@ -34,6 +35,19 @@ func New(store store.Store, objects artifact.Store) *Service {
 		objects: objects,
 		now:     func() time.Time { return time.Now().UTC() },
 	}
+}
+
+func (s *Service) SetBuildBus(bus BuildBus) {
+	s.bus = bus
+}
+
+func (s *Service) RunBuildConsumer(ctx context.Context, region, consumer string) error {
+	if s.bus == nil {
+		return nil
+	}
+	return s.bus.ConsumeBuild(ctx, region, consumer, func(ctx context.Context, assignment BuildAssignment) error {
+		return s.ProcessBuildJob(ctx, assignment.BuildJobID)
+	})
 }
 
 func (s *Service) CreateFunctionVersion(ctx context.Context, req domain.DeployRequest) (*domain.FunctionVersion, error) {
@@ -96,8 +110,30 @@ func (s *Service) replayFunctionVersion(ctx context.Context, projectID, key, req
 }
 
 func (s *Service) createFunctionVersion(ctx context.Context, req domain.DeployRequest) (*domain.FunctionVersion, error) {
+	req, err := normalizeDeployRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	version, buildJob, err := s.initializeBuild(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if s.bus != nil {
+		if err := s.bus.PublishBuild(ctx, buildJob.TargetRegion, BuildAssignment{BuildJobID: buildJob.ID}); err != nil {
+			_ = s.markBuildFailed(ctx, version, buildJob, fmt.Errorf("publish build job: %w", err))
+			return nil, err
+		}
+		return version, nil
+	}
+	if err := s.ProcessBuildJob(ctx, buildJob.ID); err != nil {
+		return nil, err
+	}
+	return s.store.GetFunctionVersion(ctx, version.ID)
+}
+
+func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, error) {
 	if req.ProjectID == "" {
-		return nil, fmt.Errorf("projectId is required")
+		return domain.DeployRequest{}, fmt.Errorf("projectId is required")
 	}
 	if req.Runtime == "" {
 		req.Runtime = "node22"
@@ -113,29 +149,89 @@ func (s *Service) createFunctionVersion(ctx context.Context, req domain.DeployRe
 	}
 	normalizedRegions, err := regions.NormalizeExecutionRegions(req.Regions)
 	if err != nil {
-		return nil, err
+		return domain.DeployRequest{}, err
 	}
 	req.Regions = normalizedRegions
+	return req, nil
+}
 
+func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest) (*domain.FunctionVersion, *domain.BuildJob, error) {
+	now := s.now()
 	versionID := uuid.NewString()
+	buildJobID := uuid.NewString()
+	requestPayload, err := json.Marshal(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	version := &domain.FunctionVersion{
+		ID:             versionID,
+		ProjectID:      req.ProjectID,
+		Name:           req.Name,
+		Runtime:        req.Runtime,
+		Entrypoint:     req.Entrypoint,
+		MemoryMB:       req.MemoryMB,
+		TimeoutSec:     req.TimeoutSec,
+		NetworkPolicy:  req.NetworkPolicy,
+		Regions:        append([]string(nil), req.Regions...),
+		EnvRefs:        append([]string(nil), req.EnvRefs...),
+		MaxRetries:     req.MaxRetries,
+		BuildJobID:     buildJobID,
+		SourceType:     req.Source.Type,
+		ArtifactDigest: "",
+		State:          domain.FunctionStateBuilding,
+		CreatedAt:      now,
+	}
+	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
+		return nil, nil, err
+	}
+
 	buildJob := &domain.BuildJob{
-		ID:                uuid.NewString(),
+		ID:                buildJobID,
 		FunctionVersionID: versionID,
-		State:             "running",
-		CreatedAt:         s.now(),
-		UpdatedAt:         s.now(),
+		TargetRegion:      pickBuildRegion(req.Regions),
+		State:             "queued",
+		Request:           requestPayload,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	return version, buildJob, nil
+}
+
+func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error {
+	buildJob, err := s.store.GetBuildJob(ctx, buildJobID)
+	if err != nil {
+		return err
+	}
+	if buildJob.State == "succeeded" {
+		return nil
+	}
+	version, err := s.store.GetFunctionVersion(ctx, buildJob.FunctionVersionID)
+	if err != nil {
+		return err
+	}
+
+	var req domain.DeployRequest
+	if err := json.Unmarshal(buildJob.Request, &req); err != nil {
+		return s.markBuildFailed(ctx, version, buildJob, fmt.Errorf("decode build request: %w", err))
+	}
+	req, err = normalizeDeployRequest(req)
+	if err != nil {
+		return s.markBuildFailed(ctx, version, buildJob, err)
+	}
+
+	buildJob.State = "running"
+	buildJob.Error = ""
+	buildJob.UpdatedAt = s.now()
+	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
+		return err
 	}
 
 	bundle, startup, err := s.prepareBundle(ctx, req)
 	if err != nil {
-		buildJob.State = "failed"
-		buildJob.Error = err.Error()
-		buildJob.UpdatedAt = s.now()
-		_ = s.store.PutBuildJob(ctx, buildJob)
-		return nil, err
+		return s.markBuildFailed(ctx, version, buildJob, err)
 	}
 
 	sum := sha256.Sum256(bundle)
@@ -144,10 +240,10 @@ func (s *Service) createFunctionVersion(ctx context.Context, req domain.DeployRe
 	startupKey := fmt.Sprintf("artifacts/%s/startup.json", digest)
 
 	if err := s.objects.Put(ctx, bundleKey, bundle); err != nil {
-		return nil, err
+		return s.markBuildFailed(ctx, version, buildJob, err)
 	}
 	if err := s.objects.Put(ctx, startupKey, startup); err != nil {
-		return nil, err
+		return s.markBuildFailed(ctx, version, buildJob, err)
 	}
 
 	now := s.now()
@@ -163,37 +259,40 @@ func (s *Service) createFunctionVersion(ctx context.Context, req domain.DeployRe
 		artifactMeta.Regions[region] = now
 	}
 	if err := s.store.PutArtifact(ctx, artifactMeta); err != nil {
-		return nil, err
+		return s.markBuildFailed(ctx, version, buildJob, err)
 	}
 
-	version := &domain.FunctionVersion{
-		ID:             versionID,
-		ProjectID:      req.ProjectID,
-		Name:           req.Name,
-		Runtime:        req.Runtime,
-		Entrypoint:     req.Entrypoint,
-		MemoryMB:       req.MemoryMB,
-		TimeoutSec:     req.TimeoutSec,
-		NetworkPolicy:  req.NetworkPolicy,
-		Regions:        append([]string(nil), req.Regions...),
-		EnvRefs:        append([]string(nil), req.EnvRefs...),
-		MaxRetries:     req.MaxRetries,
-		SourceType:     req.Source.Type,
-		ArtifactDigest: digest,
-		State:          domain.FunctionStateReady,
-		CreatedAt:      now,
-	}
+	version.ArtifactDigest = digest
+	version.State = domain.FunctionStateReady
 	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
-		return nil, err
+		return s.markBuildFailed(ctx, version, buildJob, err)
 	}
 
 	buildJob.State = "succeeded"
+	buildJob.Error = ""
 	buildJob.UpdatedAt = s.now()
-	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
-		return nil, err
-	}
+	return s.store.PutBuildJob(ctx, buildJob)
+}
 
-	return version, nil
+func (s *Service) markBuildFailed(ctx context.Context, version *domain.FunctionVersion, buildJob *domain.BuildJob, err error) error {
+	buildJob.State = "failed"
+	buildJob.Error = err.Error()
+	buildJob.UpdatedAt = s.now()
+	version.State = domain.FunctionStateFailed
+	if putErr := s.store.PutFunctionVersion(ctx, version); putErr != nil {
+		return putErr
+	}
+	if putErr := s.store.PutBuildJob(ctx, buildJob); putErr != nil {
+		return putErr
+	}
+	return err
+}
+
+func pickBuildRegion(targetRegions []string) string {
+	if len(targetRegions) == 0 {
+		return regions.DefaultPrimary()
+	}
+	return targetRegions[0]
 }
 
 func deployRequestHash(req domain.DeployRequest) (string, error) {

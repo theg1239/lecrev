@@ -28,6 +28,7 @@ type Config struct {
 }
 
 type Result struct {
+	BuildJob  domain.BuildJob        `json:"buildJob"`
 	Version   domain.FunctionVersion `json:"version"`
 	Job       domain.ExecutionJob    `json:"job"`
 	Attempts  []domain.Attempt       `json:"attempts"`
@@ -91,6 +92,13 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err := doJSON(runCtx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodPost, "/v1/projects/"+cfg.ProjectID+"/functions", deployReq, http.StatusCreated, &version); err != nil {
 		return nil, fmt.Errorf("deploy function: %w", err)
 	}
+	if strings.TrimSpace(version.BuildJobID) == "" {
+		return nil, fmt.Errorf("deployed function version %s did not include a build job id", version.ID)
+	}
+	buildJob, version, err := waitForBuildReady(runCtx, cfg, version.ID, version.BuildJobID)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := json.RawMessage(`{"hello":"world","smoke":true}`)
 	invokeReq := map[string]any{
@@ -151,6 +159,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	return &Result{
+		BuildJob:  buildJob,
 		Version:   version,
 		Job:       job,
 		Attempts:  attempts,
@@ -159,6 +168,32 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		Hosts:     hosts,
 		WarmPools: warmPools,
 	}, nil
+}
+
+func waitForBuildReady(ctx context.Context, cfg Config, versionID, buildJobID string) (domain.BuildJob, domain.FunctionVersion, error) {
+	ticker := time.NewTicker(cfg.PollInterval)
+	defer ticker.Stop()
+	for {
+		var buildJob domain.BuildJob
+		if err := doJSON(ctx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodGet, "/v1/build-jobs/"+buildJobID, nil, http.StatusOK, &buildJob); err != nil {
+			return domain.BuildJob{}, domain.FunctionVersion{}, fmt.Errorf("get build job: %w", err)
+		}
+		var version domain.FunctionVersion
+		if err := doJSON(ctx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodGet, "/v1/functions/"+versionID, nil, http.StatusOK, &version); err != nil {
+			return domain.BuildJob{}, domain.FunctionVersion{}, fmt.Errorf("get function version: %w", err)
+		}
+		switch version.State {
+		case domain.FunctionStateReady:
+			return buildJob, version, nil
+		case domain.FunctionStateFailed:
+			return domain.BuildJob{}, domain.FunctionVersion{}, fmt.Errorf("build job %s failed: %s", buildJob.ID, buildJob.Error)
+		}
+		select {
+		case <-ctx.Done():
+			return domain.BuildJob{}, domain.FunctionVersion{}, fmt.Errorf("wait for build job %s: %w", buildJobID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func waitForJob(ctx context.Context, cfg Config, jobID string) (domain.ExecutionJob, error) {

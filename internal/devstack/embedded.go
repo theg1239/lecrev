@@ -76,14 +76,24 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 	secretResolver := secrets.NewScopedResolver(metaStore, secretProvider)
 	secretsProxy := secrets.NewProxyHandler(secretResolver, cfg.SecretsProxyToken)
 	builder := build.New(metaStore, objectStore)
-	executionBus, cleanupBus, err := buildExecutionBus(cfg)
+	buildBus, closeBuildBus, err := buildBuildBus(cfg)
 	if err != nil {
 		cancel()
 		cleanupObjects()
 		cleanupStore()
 		return nil, err
 	}
+	builder.SetBuildBus(buildBus)
+	executionBus, cleanupBus, err := buildExecutionBus(cfg)
+	if err != nil {
+		cancel()
+		_ = buildBus.Close()
+		cleanupObjects()
+		cleanupStore()
+		return nil, err
+	}
 	cleanup := func() {
+		closeBuildBus()
 		cleanupBus()
 		cleanupObjects()
 		cleanupStore()
@@ -153,6 +163,9 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 
 	for _, region := range localRegions {
 		region := region
+		run("build-consumer-"+region.name, func() error {
+			return builder.RunBuildConsumer(ctx, region.name, "embedded-builder-"+sanitizeRegionToken(region.name))
+		})
 		run("queue-consumer-"+region.name, func() error {
 			return region.svc.RunExecutionConsumer(ctx, "embedded-"+sanitizeRegionToken(region.name))
 		})
