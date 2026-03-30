@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/ishaan/eeeverc/internal/domain"
-	"github.com/ishaan/eeeverc/internal/store"
+	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Store struct {

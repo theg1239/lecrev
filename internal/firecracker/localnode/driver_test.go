@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ishaan/eeeverc/internal/artifact"
-	"github.com/ishaan/eeeverc/internal/firecracker"
+	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/firecracker"
 )
 
 func TestExecuteNodeHandler(t *testing.T) {

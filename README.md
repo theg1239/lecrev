@@ -1,6 +1,6 @@
-# eeeverc
+# lecrev
 
-`eeeverc` is a Firecracker-first serverless compute platform scaffold. This repo implements:
+`lecrev` is a Firecracker-first serverless compute platform scaffold. This repo implements:
 
 - a control-plane HTTP API for deploy and invoke flows
 - a regional coordinator to host control stream over gRPC
@@ -87,28 +87,28 @@ docker compose -f deploy/local/docker-compose.yml up -d
 Start the whole stack:
 
 ```bash
-go run ./cmd/eeeverc devstack
+go run ./cmd/lecrev devstack
 ```
 
 To run the control plane against Postgres instead of the in-memory store:
 
 ```bash
-export EEEVERC_POSTGRES_DSN='postgres://eeeverc:eeeverc@localhost:5432/eeeverc?sslmode=disable'
-go run ./cmd/eeeverc devstack
+export LECREV_POSTGRES_DSN='postgres://lecrev:lecrev@localhost:5432/lecrev?sslmode=disable'
+go run ./cmd/lecrev devstack
 ```
 
 Optional local infrastructure adapters:
 
 ```bash
-export EEEVERC_NATS_URL='nats://localhost:4222'
-export EEEVERC_S3_REGION='ap-south-1'
-export EEEVERC_S3_ENDPOINT='http://localhost:9000'
-export EEEVERC_S3_ACCESS_KEY='minioadmin'
-export EEEVERC_S3_SECRET_KEY='minioadmin'
-export EEEVERC_S3_BUCKET='eeeverc-artifacts'
-export EEEVERC_SECRETS_BACKEND='memory'
-export EEEVERC_ENABLE_MTLS='true'
-go run ./cmd/eeeverc devstack
+export LECREV_NATS_URL='nats://localhost:4222'
+export LECREV_S3_REGION='ap-south-1'
+export LECREV_S3_ENDPOINT='http://localhost:9000'
+export LECREV_S3_ACCESS_KEY='minioadmin'
+export LECREV_S3_SECRET_KEY='minioadmin'
+export LECREV_S3_BUCKET='lecrev-artifacts'
+export LECREV_SECRETS_BACKEND='memory'
+export LECREV_ENABLE_MTLS='true'
+go run ./cmd/lecrev devstack
 ```
 
 This boots:
@@ -207,7 +207,7 @@ curl -sS http://localhost:8080/v1/functions/<version-id>/triggers/webhook \
 curl -sS http://localhost:8080/v1/triggers/webhook/<token> \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: delivery-123' \
-  -d '{"event":"push","repository":"eeeverc"}'
+  -d '{"event":"push","repository":"lecrev"}'
 ```
 
 Webhook deliveries are public token-authenticated endpoints. Management operations for creating and listing triggers stay behind the normal API key middleware.

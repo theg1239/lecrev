@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ishaan/eeeverc/internal/devstack"
-	"github.com/ishaan/eeeverc/internal/regions"
+	"github.com/theg1239/lecrev/internal/devstack"
+	"github.com/theg1239/lecrev/internal/regions"
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 	case "devstack":
 		if err := devstack.Run(ctx, devstack.Config{
 			APIAddr:          ":8080",
-			ExecutionRegions: regions.ParseCSV(os.Getenv("EEEVERC_EXECUTION_REGIONS")),
+			ExecutionRegions: regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
 		}); err != nil {
 			log.Fatal(err)
 		}
@@ -36,5 +36,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: eeeverc devstack")
+	fmt.Fprintln(os.Stderr, "usage: lecrev devstack")
 }

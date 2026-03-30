@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/ishaan/eeeverc/internal/domain"
-	"github.com/ishaan/eeeverc/internal/store"
+	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Retryer interface {

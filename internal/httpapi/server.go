@@ -13,10 +13,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/ishaan/eeeverc/internal/build"
-	"github.com/ishaan/eeeverc/internal/domain"
-	"github.com/ishaan/eeeverc/internal/scheduler"
-	"github.com/ishaan/eeeverc/internal/store"
+	"github.com/theg1239/lecrev/internal/build"
+	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/scheduler"
+	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Server struct {

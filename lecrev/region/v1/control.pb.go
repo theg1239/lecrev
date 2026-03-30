@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        (unknown)
-// source: eeeverc/region/v1/control.proto
+// source: lecrev/region/v1/control.proto
 
 package regionv1
 
@@ -60,11 +60,11 @@ func (x AssignmentState) String() string {
 }
 
 func (AssignmentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_eeeverc_region_v1_control_proto_enumTypes[0].Descriptor()
+	return file_lecrev_region_v1_control_proto_enumTypes[0].Descriptor()
 }
 
 func (AssignmentState) Type() protoreflect.EnumType {
-	return &file_eeeverc_region_v1_control_proto_enumTypes[0]
+	return &file_lecrev_region_v1_control_proto_enumTypes[0]
 }
 
 func (x AssignmentState) Number() protoreflect.EnumNumber {
@@ -73,7 +73,7 @@ func (x AssignmentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AssignmentState.Descriptor instead.
 func (AssignmentState) EnumDescriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{0}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
 type WarmPoolMetric struct {
@@ -86,7 +86,7 @@ type WarmPoolMetric struct {
 
 func (x *WarmPoolMetric) Reset() {
 	*x = WarmPoolMetric{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[0]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -98,7 +98,7 @@ func (x *WarmPoolMetric) String() string {
 func (*WarmPoolMetric) ProtoMessage() {}
 
 func (x *WarmPoolMetric) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[0]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -111,7 +111,7 @@ func (x *WarmPoolMetric) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WarmPoolMetric.ProtoReflect.Descriptor instead.
 func (*WarmPoolMetric) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{0}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *WarmPoolMetric) GetFunctionVersionId() string {
@@ -142,7 +142,7 @@ type RegisterHost struct {
 
 func (x *RegisterHost) Reset() {
 	*x = RegisterHost{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[1]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -154,7 +154,7 @@ func (x *RegisterHost) String() string {
 func (*RegisterHost) ProtoMessage() {}
 
 func (x *RegisterHost) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[1]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -167,7 +167,7 @@ func (x *RegisterHost) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterHost.ProtoReflect.Descriptor instead.
 func (*RegisterHost) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{1}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *RegisterHost) GetHostId() string {
@@ -225,7 +225,7 @@ type HostHeartbeat struct {
 
 func (x *HostHeartbeat) Reset() {
 	*x = HostHeartbeat{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[2]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -237,7 +237,7 @@ func (x *HostHeartbeat) String() string {
 func (*HostHeartbeat) ProtoMessage() {}
 
 func (x *HostHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[2]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -250,7 +250,7 @@ func (x *HostHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostHeartbeat.ProtoReflect.Descriptor instead.
 func (*HostHeartbeat) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{2}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *HostHeartbeat) GetHostId() string {
@@ -294,7 +294,7 @@ type AssignmentUpdate struct {
 	Region        string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
 	AttemptId     string                 `protobuf:"bytes,3,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
 	JobId         string                 `protobuf:"bytes,4,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	State         AssignmentState        `protobuf:"varint,5,opt,name=state,proto3,enum=eeeverc.region.v1.AssignmentState" json:"state,omitempty"`
+	State         AssignmentState        `protobuf:"varint,5,opt,name=state,proto3,enum=lecrev.region.v1.AssignmentState" json:"state,omitempty"`
 	Logs          string                 `protobuf:"bytes,6,opt,name=logs,proto3" json:"logs,omitempty"`
 	OutputJson    []byte                 `protobuf:"bytes,7,opt,name=output_json,json=outputJson,proto3" json:"output_json,omitempty"`
 	ErrorMessage  string                 `protobuf:"bytes,8,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
@@ -305,7 +305,7 @@ type AssignmentUpdate struct {
 
 func (x *AssignmentUpdate) Reset() {
 	*x = AssignmentUpdate{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[3]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -317,7 +317,7 @@ func (x *AssignmentUpdate) String() string {
 func (*AssignmentUpdate) ProtoMessage() {}
 
 func (x *AssignmentUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[3]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -330,7 +330,7 @@ func (x *AssignmentUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignmentUpdate.ProtoReflect.Descriptor instead.
 func (*AssignmentUpdate) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{3}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *AssignmentUpdate) GetHostId() string {
@@ -410,7 +410,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[4]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -422,7 +422,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[4]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -435,7 +435,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *AgentMessage) GetBody() isAgentMessage_Body {
@@ -503,7 +503,7 @@ type Registered struct {
 
 func (x *Registered) Reset() {
 	*x = Registered{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[5]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -515,7 +515,7 @@ func (x *Registered) String() string {
 func (*Registered) ProtoMessage() {}
 
 func (x *Registered) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[5]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -528,7 +528,7 @@ func (x *Registered) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Registered.ProtoReflect.Descriptor instead.
 func (*Registered) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{5}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Registered) GetHostId() string {
@@ -555,7 +555,7 @@ type ExecutionAssignment struct {
 
 func (x *ExecutionAssignment) Reset() {
 	*x = ExecutionAssignment{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[6]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +567,7 @@ func (x *ExecutionAssignment) String() string {
 func (*ExecutionAssignment) ProtoMessage() {}
 
 func (x *ExecutionAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[6]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +580,7 @@ func (x *ExecutionAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionAssignment.ProtoReflect.Descriptor instead.
 func (*ExecutionAssignment) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ExecutionAssignment) GetAttemptId() string {
@@ -656,7 +656,7 @@ type DrainHost struct {
 
 func (x *DrainHost) Reset() {
 	*x = DrainHost{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[7]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -668,7 +668,7 @@ func (x *DrainHost) String() string {
 func (*DrainHost) ProtoMessage() {}
 
 func (x *DrainHost) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[7]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -681,7 +681,7 @@ func (x *DrainHost) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainHost.ProtoReflect.Descriptor instead.
 func (*DrainHost) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{7}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DrainHost) GetHostId() string {
@@ -709,7 +709,7 @@ type TerminateVm struct {
 
 func (x *TerminateVm) Reset() {
 	*x = TerminateVm{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[8]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -721,7 +721,7 @@ func (x *TerminateVm) String() string {
 func (*TerminateVm) ProtoMessage() {}
 
 func (x *TerminateVm) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[8]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -734,7 +734,7 @@ func (x *TerminateVm) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminateVm.ProtoReflect.Descriptor instead.
 func (*TerminateVm) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{8}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *TerminateVm) GetHostId() string {
@@ -773,7 +773,7 @@ type CoordinatorMessage struct {
 
 func (x *CoordinatorMessage) Reset() {
 	*x = CoordinatorMessage{}
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[9]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -785,7 +785,7 @@ func (x *CoordinatorMessage) String() string {
 func (*CoordinatorMessage) ProtoMessage() {}
 
 func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_eeeverc_region_v1_control_proto_msgTypes[9]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -798,7 +798,7 @@ func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CoordinatorMessage.ProtoReflect.Descriptor instead.
 func (*CoordinatorMessage) Descriptor() ([]byte, []int) {
-	return file_eeeverc_region_v1_control_proto_rawDescGZIP(), []int{9}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CoordinatorMessage) GetBody() isCoordinatorMessage_Body {
@@ -872,130 +872,50 @@ func (*CoordinatorMessage_Drain) isCoordinatorMessage_Body() {}
 
 func (*CoordinatorMessage_Terminate) isCoordinatorMessage_Body() {}
 
-var File_eeeverc_region_v1_control_proto protoreflect.FileDescriptor
+var File_lecrev_region_v1_control_proto protoreflect.FileDescriptor
 
-const file_eeeverc_region_v1_control_proto_rawDesc = "" +
-	"\n" +
-	"\x1feeeverc/region/v1/control.proto\x12\x11eeeverc.region.v1\"^\n" +
-	"\x0eWarmPoolMetric\x12.\n" +
-	"\x13function_version_id\x18\x01 \x01(\tR\x11functionVersionId\x12\x1c\n" +
-	"\tavailable\x18\x02 \x01(\x05R\tavailable\"\xe7\x01\n" +
-	"\fRegisterHost\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
-	"\x06region\x18\x02 \x01(\tR\x06region\x12\x16\n" +
-	"\x06driver\x18\x03 \x01(\tR\x06driver\x12'\n" +
-	"\x0favailable_slots\x18\x04 \x01(\x05R\x0eavailableSlots\x12\x1d\n" +
-	"\n" +
-	"blank_warm\x18\x05 \x01(\x05R\tblankWarm\x12F\n" +
-	"\rfunction_warm\x18\x06 \x03(\v2!.eeeverc.region.v1.WarmPoolMetricR\ffunctionWarm\"\xd0\x01\n" +
-	"\rHostHeartbeat\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
-	"\x06region\x18\x02 \x01(\tR\x06region\x12'\n" +
-	"\x0favailable_slots\x18\x03 \x01(\x05R\x0eavailableSlots\x12\x1d\n" +
-	"\n" +
-	"blank_warm\x18\x04 \x01(\x05R\tblankWarm\x12F\n" +
-	"\rfunction_warm\x18\x05 \x03(\v2!.eeeverc.region.v1.WarmPoolMetricR\ffunctionWarm\"\xaa\x02\n" +
-	"\x10AssignmentUpdate\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
-	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1d\n" +
-	"\n" +
-	"attempt_id\x18\x03 \x01(\tR\tattemptId\x12\x15\n" +
-	"\x06job_id\x18\x04 \x01(\tR\x05jobId\x128\n" +
-	"\x05state\x18\x05 \x01(\x0e2\".eeeverc.region.v1.AssignmentStateR\x05state\x12\x12\n" +
-	"\x04logs\x18\x06 \x01(\tR\x04logs\x12\x1f\n" +
-	"\voutput_json\x18\a \x01(\fR\n" +
-	"outputJson\x12#\n" +
-	"\rerror_message\x18\b \x01(\tR\ferrorMessage\x12\x1b\n" +
-	"\texit_code\x18\t \x01(\x05R\bexitCode\"\xeb\x01\n" +
-	"\fAgentMessage\x12=\n" +
-	"\bregister\x18\x01 \x01(\v2\x1f.eeeverc.region.v1.RegisterHostH\x00R\bregister\x12@\n" +
-	"\theartbeat\x18\x02 \x01(\v2 .eeeverc.region.v1.HostHeartbeatH\x00R\theartbeat\x12R\n" +
-	"\x11assignment_update\x18\x03 \x01(\v2#.eeeverc.region.v1.AssignmentUpdateH\x00R\x10assignmentUpdateB\x06\n" +
-	"\x04body\"%\n" +
-	"\n" +
-	"Registered\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\"\xca\x02\n" +
-	"\x13ExecutionAssignment\x12\x1d\n" +
-	"\n" +
-	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n" +
-	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12.\n" +
-	"\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\x12'\n" +
-	"\x0fartifact_digest\x18\x04 \x01(\tR\x0eartifactDigest\x12\x1e\n" +
-	"\n" +
-	"entrypoint\x18\x05 \x01(\tR\n" +
-	"entrypoint\x12!\n" +
-	"\fpayload_json\x18\x06 \x01(\fR\vpayloadJson\x12\x19\n" +
-	"\benv_refs\x18\a \x03(\tR\aenvRefs\x12%\n" +
-	"\x0enetwork_policy\x18\b \x01(\tR\rnetworkPolicy\x12\x1f\n" +
-	"\vtimeout_sec\x18\t \x01(\x05R\n" +
-	"timeoutSec\"<\n" +
-	"\tDrainHost\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"]\n" +
-	"\vTerminateVm\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1d\n" +
-	"\n" +
-	"attempt_id\x18\x02 \x01(\tR\tattemptId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\x9d\x02\n" +
-	"\x12CoordinatorMessage\x12?\n" +
-	"\n" +
-	"registered\x18\x01 \x01(\v2\x1d.eeeverc.region.v1.RegisteredH\x00R\n" +
-	"registered\x12H\n" +
-	"\n" +
-	"assignment\x18\x02 \x01(\v2&.eeeverc.region.v1.ExecutionAssignmentH\x00R\n" +
-	"assignment\x124\n" +
-	"\x05drain\x18\x03 \x01(\v2\x1c.eeeverc.region.v1.DrainHostH\x00R\x05drain\x12>\n" +
-	"\tterminate\x18\x04 \x01(\v2\x1e.eeeverc.region.v1.TerminateVmH\x00R\tterminateB\x06\n" +
-	"\x04body*\xad\x01\n" +
-	"\x0fAssignmentState\x12 \n" +
-	"\x1cASSIGNMENT_STATE_UNSPECIFIED\x10\x00\x12\x1d\n" +
-	"\x19ASSIGNMENT_STATE_STARTING\x10\x01\x12\x1c\n" +
-	"\x18ASSIGNMENT_STATE_RUNNING\x10\x02\x12\x1e\n" +
-	"\x1aASSIGNMENT_STATE_SUCCEEDED\x10\x03\x12\x1b\n" +
-	"\x17ASSIGNMENT_STATE_FAILED\x10\x042d\n" +
-	"\vCoordinator\x12U\n" +
-	"\aControl\x12\x1f.eeeverc.region.v1.AgentMessage\x1a%.eeeverc.region.v1.CoordinatorMessage(\x010\x01B6Z4github.com/ishaan/eeeverc/eeeverc/region/v1;regionv1b\x06proto3"
+const file_lecrev_region_v1_control_proto_rawDesc = "\n\x1elecrev/region/v1/control.proto\x12\x10lecrev.region.v1\"^\n\x0eWarmPoolMetric\x12.\n\x13function_version_id\x18\x01 \x01(\tR\x11functionVersionId\x12\x1c\n\tavailable\x18\x02 \x01(\x05R\tavailable\"\xe6\x01\n\fRegisterHost\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06region\x18\x02 \x01(\tR\x06region\x12\x16\n\x06driver\x18\x03 \x01(\tR\x06driver\x12'\n\x0favailable_slots\x18\x04 \x01(\x05R\x0eavailableSlots\x12\x1d\n\nblank_warm\x18\x05 \x01(\x05R\tblankWarm\x12E\n\rfunction_warm\x18\x06 \x03(\v2 .lecrev.region.v1.WarmPoolMetricR\ffunctionWarm\"\xcf\x01\n\rHostHeartbeat\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06region\x18\x02 \x01(\tR\x06region\x12'\n\x0favailable_slots\x18\x03 \x01(\x05R\x0eavailableSlots\x12\x1d\n\nblank_warm\x18\x04 \x01(\x05R\tblankWarm\x12E\n\rfunction_warm\x18\x05 \x03(\v2 .lecrev.region.v1.WarmPoolMetricR\ffunctionWarm\"\xa9\x02\n\x10AssignmentUpdate\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06region\x18\x02 \x01(\tR\x06region\x12\x1d\n\nattempt_id\x18\x03 \x01(\tR\tattemptId\x12\x15\n\x06job_id\x18\x04 \x01(\tR\x05jobId\x127\n\x05state\x18\x05 \x01(\x0e2!.lecrev.region.v1.AssignmentStateR\x05state\x12\x12\n\x04logs\x18\x06 \x01(\tR\x04logs\x12\x1f\n\voutput_json\x18\a \x01(\fR\noutputJson\x12#\n\rerror_message\x18\b \x01(\tR\ferrorMessage\x12\x1b\n\texit_code\x18\t \x01(\x05R\bexitCode\"\xe8\x01\n\fAgentMessage\x12<\n\bregister\x18\x01 \x01(\v2\x1e.lecrev.region.v1.RegisterHostH\x00R\bregister\x12?\n\theartbeat\x18\x02 \x01(\v2\x1f.lecrev.region.v1.HostHeartbeatH\x00R\theartbeat\x12Q\n\x11assignment_update\x18\x03 \x01(\v2\".lecrev.region.v1.AssignmentUpdateH\x00R\x10assignmentUpdateB\x06\n\x04body\"%\n\nRegistered\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\"\xca\x02\n\x13ExecutionAssignment\x12\x1d\n\nattempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n\x06job_id\x18\x02 \x01(\tR\x05jobId\x12.\n\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\x12'\n\x0fartifact_digest\x18\x04 \x01(\tR\x0eartifactDigest\x12\x1e\n\nentrypoint\x18\x05 \x01(\tR\nentrypoint\x12!\n\fpayload_json\x18\x06 \x01(\fR\vpayloadJson\x12\x19\n\benv_refs\x18\a \x03(\tR\aenvRefs\x12%\n\x0enetwork_policy\x18\b \x01(\tR\rnetworkPolicy\x12\x1f\n\vtimeout_sec\x18\t \x01(\x05R\ntimeoutSec\"<\n\tDrainHost\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"]\n\vTerminateVm\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1d\n\nattempt_id\x18\x02 \x01(\tR\tattemptId\x12\x16\n\x06reason\x18\x03 \x01(\tR\x06reason\"\x99\x02\n\x12CoordinatorMessage\x12>\n\nregistered\x18\x01 \x01(\v2\x1c.lecrev.region.v1.RegisteredH\x00R\nregistered\x12G\n\nassignment\x18\x02 \x01(\v2%.lecrev.region.v1.ExecutionAssignmentH\x00R\nassignment\x123\n\x05drain\x18\x03 \x01(\v2\x1b.lecrev.region.v1.DrainHostH\x00R\x05drain\x12=\n\tterminate\x18\x04 \x01(\v2\x1d.lecrev.region.v1.TerminateVmH\x00R\tterminateB\x06\n\x04body*\xad\x01\n\x0fAssignmentState\x12 \n\x1cASSIGNMENT_STATE_UNSPECIFIED\x10\x00\x12\x1d\n\x19ASSIGNMENT_STATE_STARTING\x10\x01\x12\x1c\n\x18ASSIGNMENT_STATE_RUNNING\x10\x02\x12\x1e\n\x1aASSIGNMENT_STATE_SUCCEEDED\x10\x03\x12\x1b\n\x17ASSIGNMENT_STATE_FAILED\x10\x042b\n\vCoordinator\x12S\n\aControl\x12\x1e.lecrev.region.v1.AgentMessage\x1a$.lecrev.region.v1.CoordinatorMessage(\x010\x01B6Z4github.com/theg1239/lecrev/lecrev/region/v1;regionv1b\x06proto3"
 
 var (
-	file_eeeverc_region_v1_control_proto_rawDescOnce sync.Once
-	file_eeeverc_region_v1_control_proto_rawDescData []byte
+	file_lecrev_region_v1_control_proto_rawDescOnce sync.Once
+	file_lecrev_region_v1_control_proto_rawDescData []byte
 )
 
-func file_eeeverc_region_v1_control_proto_rawDescGZIP() []byte {
-	file_eeeverc_region_v1_control_proto_rawDescOnce.Do(func() {
-		file_eeeverc_region_v1_control_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_eeeverc_region_v1_control_proto_rawDesc), len(file_eeeverc_region_v1_control_proto_rawDesc)))
+func file_lecrev_region_v1_control_proto_rawDescGZIP() []byte {
+	file_lecrev_region_v1_control_proto_rawDescOnce.Do(func() {
+		file_lecrev_region_v1_control_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_lecrev_region_v1_control_proto_rawDesc), len(file_lecrev_region_v1_control_proto_rawDesc)))
 	})
-	return file_eeeverc_region_v1_control_proto_rawDescData
+	return file_lecrev_region_v1_control_proto_rawDescData
 }
 
-var file_eeeverc_region_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_eeeverc_region_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_eeeverc_region_v1_control_proto_goTypes = []any{
-	(AssignmentState)(0),        // 0: eeeverc.region.v1.AssignmentState
-	(*WarmPoolMetric)(nil),      // 1: eeeverc.region.v1.WarmPoolMetric
-	(*RegisterHost)(nil),        // 2: eeeverc.region.v1.RegisterHost
-	(*HostHeartbeat)(nil),       // 3: eeeverc.region.v1.HostHeartbeat
-	(*AssignmentUpdate)(nil),    // 4: eeeverc.region.v1.AssignmentUpdate
-	(*AgentMessage)(nil),        // 5: eeeverc.region.v1.AgentMessage
-	(*Registered)(nil),          // 6: eeeverc.region.v1.Registered
-	(*ExecutionAssignment)(nil), // 7: eeeverc.region.v1.ExecutionAssignment
-	(*DrainHost)(nil),           // 8: eeeverc.region.v1.DrainHost
-	(*TerminateVm)(nil),         // 9: eeeverc.region.v1.TerminateVm
-	(*CoordinatorMessage)(nil),  // 10: eeeverc.region.v1.CoordinatorMessage
+var file_lecrev_region_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_lecrev_region_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_lecrev_region_v1_control_proto_goTypes = []any{
+	(AssignmentState)(0),        // 0: lecrev.region.v1.AssignmentState
+	(*WarmPoolMetric)(nil),      // 1: lecrev.region.v1.WarmPoolMetric
+	(*RegisterHost)(nil),        // 2: lecrev.region.v1.RegisterHost
+	(*HostHeartbeat)(nil),       // 3: lecrev.region.v1.HostHeartbeat
+	(*AssignmentUpdate)(nil),    // 4: lecrev.region.v1.AssignmentUpdate
+	(*AgentMessage)(nil),        // 5: lecrev.region.v1.AgentMessage
+	(*Registered)(nil),          // 6: lecrev.region.v1.Registered
+	(*ExecutionAssignment)(nil), // 7: lecrev.region.v1.ExecutionAssignment
+	(*DrainHost)(nil),           // 8: lecrev.region.v1.DrainHost
+	(*TerminateVm)(nil),         // 9: lecrev.region.v1.TerminateVm
+	(*CoordinatorMessage)(nil),  // 10: lecrev.region.v1.CoordinatorMessage
 }
-var file_eeeverc_region_v1_control_proto_depIdxs = []int32{
-	1,  // 0: eeeverc.region.v1.RegisterHost.function_warm:type_name -> eeeverc.region.v1.WarmPoolMetric
-	1,  // 1: eeeverc.region.v1.HostHeartbeat.function_warm:type_name -> eeeverc.region.v1.WarmPoolMetric
-	0,  // 2: eeeverc.region.v1.AssignmentUpdate.state:type_name -> eeeverc.region.v1.AssignmentState
-	2,  // 3: eeeverc.region.v1.AgentMessage.register:type_name -> eeeverc.region.v1.RegisterHost
-	3,  // 4: eeeverc.region.v1.AgentMessage.heartbeat:type_name -> eeeverc.region.v1.HostHeartbeat
-	4,  // 5: eeeverc.region.v1.AgentMessage.assignment_update:type_name -> eeeverc.region.v1.AssignmentUpdate
-	6,  // 6: eeeverc.region.v1.CoordinatorMessage.registered:type_name -> eeeverc.region.v1.Registered
-	7,  // 7: eeeverc.region.v1.CoordinatorMessage.assignment:type_name -> eeeverc.region.v1.ExecutionAssignment
-	8,  // 8: eeeverc.region.v1.CoordinatorMessage.drain:type_name -> eeeverc.region.v1.DrainHost
-	9,  // 9: eeeverc.region.v1.CoordinatorMessage.terminate:type_name -> eeeverc.region.v1.TerminateVm
-	5,  // 10: eeeverc.region.v1.Coordinator.Control:input_type -> eeeverc.region.v1.AgentMessage
-	10, // 11: eeeverc.region.v1.Coordinator.Control:output_type -> eeeverc.region.v1.CoordinatorMessage
+var file_lecrev_region_v1_control_proto_depIdxs = []int32{
+	1,  // 0: lecrev.region.v1.RegisterHost.function_warm:type_name -> lecrev.region.v1.WarmPoolMetric
+	1,  // 1: lecrev.region.v1.HostHeartbeat.function_warm:type_name -> lecrev.region.v1.WarmPoolMetric
+	0,  // 2: lecrev.region.v1.AssignmentUpdate.state:type_name -> lecrev.region.v1.AssignmentState
+	2,  // 3: lecrev.region.v1.AgentMessage.register:type_name -> lecrev.region.v1.RegisterHost
+	3,  // 4: lecrev.region.v1.AgentMessage.heartbeat:type_name -> lecrev.region.v1.HostHeartbeat
+	4,  // 5: lecrev.region.v1.AgentMessage.assignment_update:type_name -> lecrev.region.v1.AssignmentUpdate
+	6,  // 6: lecrev.region.v1.CoordinatorMessage.registered:type_name -> lecrev.region.v1.Registered
+	7,  // 7: lecrev.region.v1.CoordinatorMessage.assignment:type_name -> lecrev.region.v1.ExecutionAssignment
+	8,  // 8: lecrev.region.v1.CoordinatorMessage.drain:type_name -> lecrev.region.v1.DrainHost
+	9,  // 9: lecrev.region.v1.CoordinatorMessage.terminate:type_name -> lecrev.region.v1.TerminateVm
+	5,  // 10: lecrev.region.v1.Coordinator.Control:input_type -> lecrev.region.v1.AgentMessage
+	10, // 11: lecrev.region.v1.Coordinator.Control:output_type -> lecrev.region.v1.CoordinatorMessage
 	11, // [11:12] is the sub-list for method output_type
 	10, // [10:11] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
@@ -1003,17 +923,17 @@ var file_eeeverc_region_v1_control_proto_depIdxs = []int32{
 	0,  // [0:10] is the sub-list for field type_name
 }
 
-func init() { file_eeeverc_region_v1_control_proto_init() }
-func file_eeeverc_region_v1_control_proto_init() {
-	if File_eeeverc_region_v1_control_proto != nil {
+func init() { file_lecrev_region_v1_control_proto_init() }
+func file_lecrev_region_v1_control_proto_init() {
+	if File_lecrev_region_v1_control_proto != nil {
 		return
 	}
-	file_eeeverc_region_v1_control_proto_msgTypes[4].OneofWrappers = []any{
+	file_lecrev_region_v1_control_proto_msgTypes[4].OneofWrappers = []any{
 		(*AgentMessage_Register)(nil),
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_AssignmentUpdate)(nil),
 	}
-	file_eeeverc_region_v1_control_proto_msgTypes[9].OneofWrappers = []any{
+	file_lecrev_region_v1_control_proto_msgTypes[9].OneofWrappers = []any{
 		(*CoordinatorMessage_Registered)(nil),
 		(*CoordinatorMessage_Assignment)(nil),
 		(*CoordinatorMessage_Drain)(nil),
@@ -1023,18 +943,18 @@ func file_eeeverc_region_v1_control_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_eeeverc_region_v1_control_proto_rawDesc), len(file_eeeverc_region_v1_control_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lecrev_region_v1_control_proto_rawDesc), len(file_lecrev_region_v1_control_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_eeeverc_region_v1_control_proto_goTypes,
-		DependencyIndexes: file_eeeverc_region_v1_control_proto_depIdxs,
-		EnumInfos:         file_eeeverc_region_v1_control_proto_enumTypes,
-		MessageInfos:      file_eeeverc_region_v1_control_proto_msgTypes,
+		GoTypes:           file_lecrev_region_v1_control_proto_goTypes,
+		DependencyIndexes: file_lecrev_region_v1_control_proto_depIdxs,
+		EnumInfos:         file_lecrev_region_v1_control_proto_enumTypes,
+		MessageInfos:      file_lecrev_region_v1_control_proto_msgTypes,
 	}.Build()
-	File_eeeverc_region_v1_control_proto = out.File
-	file_eeeverc_region_v1_control_proto_goTypes = nil
-	file_eeeverc_region_v1_control_proto_depIdxs = nil
+	File_lecrev_region_v1_control_proto = out.File
+	file_lecrev_region_v1_control_proto_goTypes = nil
+	file_lecrev_region_v1_control_proto_depIdxs = nil
 }

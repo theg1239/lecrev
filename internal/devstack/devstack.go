@@ -12,21 +12,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ishaan/eeeverc/internal/artifact"
-	"github.com/ishaan/eeeverc/internal/build"
-	"github.com/ishaan/eeeverc/internal/coordinator"
-	"github.com/ishaan/eeeverc/internal/dispatch"
-	"github.com/ishaan/eeeverc/internal/firecracker/localnode"
-	"github.com/ishaan/eeeverc/internal/httpapi"
-	"github.com/ishaan/eeeverc/internal/nodeagent"
-	"github.com/ishaan/eeeverc/internal/recovery"
-	"github.com/ishaan/eeeverc/internal/regions"
-	"github.com/ishaan/eeeverc/internal/scheduler"
-	"github.com/ishaan/eeeverc/internal/secrets"
-	"github.com/ishaan/eeeverc/internal/store"
-	memstore "github.com/ishaan/eeeverc/internal/store/memory"
-	pgstore "github.com/ishaan/eeeverc/internal/store/postgres"
-	"github.com/ishaan/eeeverc/internal/transport"
+	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/build"
+	"github.com/theg1239/lecrev/internal/coordinator"
+	"github.com/theg1239/lecrev/internal/dispatch"
+	"github.com/theg1239/lecrev/internal/firecracker/localnode"
+	"github.com/theg1239/lecrev/internal/httpapi"
+	"github.com/theg1239/lecrev/internal/nodeagent"
+	"github.com/theg1239/lecrev/internal/recovery"
+	"github.com/theg1239/lecrev/internal/regions"
+	"github.com/theg1239/lecrev/internal/scheduler"
+	"github.com/theg1239/lecrev/internal/secrets"
+	"github.com/theg1239/lecrev/internal/store"
+	memstore "github.com/theg1239/lecrev/internal/store/memory"
+	pgstore "github.com/theg1239/lecrev/internal/store/postgres"
+	"github.com/theg1239/lecrev/internal/transport"
 
 	"google.golang.org/grpc"
 )
@@ -57,42 +57,42 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.CoordinatorBasePort = 9091
 	}
 	if cfg.PostgresDSN == "" {
-		cfg.PostgresDSN = strings.TrimSpace(os.Getenv("EEEVERC_POSTGRES_DSN"))
+		cfg.PostgresDSN = strings.TrimSpace(os.Getenv("LECREV_POSTGRES_DSN"))
 	}
 	if cfg.NATSURL == "" {
-		cfg.NATSURL = strings.TrimSpace(os.Getenv("EEEVERC_NATS_URL"))
+		cfg.NATSURL = strings.TrimSpace(os.Getenv("LECREV_NATS_URL"))
 	}
 	if cfg.S3Region == "" {
-		cfg.S3Region = strings.TrimSpace(os.Getenv("EEEVERC_S3_REGION"))
+		cfg.S3Region = strings.TrimSpace(os.Getenv("LECREV_S3_REGION"))
 	}
 	if cfg.S3Endpoint == "" {
-		cfg.S3Endpoint = strings.TrimSpace(os.Getenv("EEEVERC_S3_ENDPOINT"))
+		cfg.S3Endpoint = strings.TrimSpace(os.Getenv("LECREV_S3_ENDPOINT"))
 	}
 	if cfg.S3AccessKey == "" {
-		cfg.S3AccessKey = strings.TrimSpace(os.Getenv("EEEVERC_S3_ACCESS_KEY"))
+		cfg.S3AccessKey = strings.TrimSpace(os.Getenv("LECREV_S3_ACCESS_KEY"))
 	}
 	if cfg.S3SecretKey == "" {
-		cfg.S3SecretKey = strings.TrimSpace(os.Getenv("EEEVERC_S3_SECRET_KEY"))
+		cfg.S3SecretKey = strings.TrimSpace(os.Getenv("LECREV_S3_SECRET_KEY"))
 	}
 	if cfg.S3Bucket == "" {
-		cfg.S3Bucket = strings.TrimSpace(os.Getenv("EEEVERC_S3_BUCKET"))
+		cfg.S3Bucket = strings.TrimSpace(os.Getenv("LECREV_S3_BUCKET"))
 	}
 	if cfg.SecretsBackend == "" {
-		cfg.SecretsBackend = strings.TrimSpace(os.Getenv("EEEVERC_SECRETS_BACKEND"))
+		cfg.SecretsBackend = strings.TrimSpace(os.Getenv("LECREV_SECRETS_BACKEND"))
 	}
 	if cfg.AWSRegion == "" {
-		cfg.AWSRegion = strings.TrimSpace(os.Getenv("EEEVERC_AWS_REGION"))
+		cfg.AWSRegion = strings.TrimSpace(os.Getenv("LECREV_AWS_REGION"))
 	}
 	if cfg.AWSAccessKey == "" {
-		cfg.AWSAccessKey = strings.TrimSpace(os.Getenv("EEEVERC_AWS_ACCESS_KEY_ID"))
+		cfg.AWSAccessKey = strings.TrimSpace(os.Getenv("LECREV_AWS_ACCESS_KEY_ID"))
 	}
 	if cfg.AWSSecretKey == "" {
-		cfg.AWSSecretKey = strings.TrimSpace(os.Getenv("EEEVERC_AWS_SECRET_ACCESS_KEY"))
+		cfg.AWSSecretKey = strings.TrimSpace(os.Getenv("LECREV_AWS_SECRET_ACCESS_KEY"))
 	}
-	if raw := strings.TrimSpace(os.Getenv("EEEVERC_ENABLE_MTLS")); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {
 		enabled, err := strconv.ParseBool(raw)
 		if err != nil {
-			return fmt.Errorf("parse EEEVERC_ENABLE_MTLS: %w", err)
+			return fmt.Errorf("parse LECREV_ENABLE_MTLS: %w", err)
 		}
 		cfg.EnableMTLS = enabled
 	} else if !cfg.EnableMTLS {

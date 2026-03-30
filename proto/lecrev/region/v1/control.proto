@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package eeeverc.region.v1;
+package lecrev.region.v1;
 
-option go_package = "github.com/ishaan/eeeverc/eeeverc/region/v1;regionv1";
+option go_package = "github.com/theg1239/lecrev/lecrev/region/v1;regionv1";
 
 service Coordinator {
   rpc Control(stream AgentMessage) returns (stream CoordinatorMessage);

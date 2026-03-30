@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ishaan/eeeverc/internal/artifact"
-	"github.com/ishaan/eeeverc/internal/firecracker"
+	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/firecracker"
 )
 
 type Driver struct{}
@@ -25,7 +25,7 @@ func New() *Driver {
 func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
 	startedAt := time.Now().UTC()
 
-	workspace, err := os.MkdirTemp("", "eeeverc-run-*")
+	workspace, err := os.MkdirTemp("", "lecrev-run-*")
 	if err != nil {
 		return nil, err
 	}
@@ -35,9 +35,9 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 		return nil, err
 	}
 
-	payloadPath := filepath.Join(workspace, "__eeeverc_payload.json")
-	resultPath := filepath.Join(workspace, "__eeeverc_result.json")
-	wrapperPath := filepath.Join(workspace, "__eeeverc_invoke.mjs")
+	payloadPath := filepath.Join(workspace, "__lecrev_payload.json")
+	resultPath := filepath.Join(workspace, "__lecrev_result.json")
+	wrapperPath := filepath.Join(workspace, "__lecrev_invoke.mjs")
 
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`null`)
@@ -70,7 +70,7 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), "EEEVERC_CONTEXT="+string(contextJSON))
+	cmd.Env = append(os.Environ(), "LECREV_CONTEXT="+string(contextJSON))
 	for key, value := range req.Env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
@@ -137,7 +137,7 @@ import { pathToFileURL } from 'node:url';
 
 const [payloadPath, entrypointPath, resultPath] = process.argv.slice(2);
 const payload = JSON.parse(await fs.readFile(payloadPath, 'utf8'));
-const context = JSON.parse(process.env.EEEVERC_CONTEXT ?? '{}');
+const context = JSON.parse(process.env.LECREV_CONTEXT ?? '{}');
 const mod = await import(pathToFileURL(path.resolve(entrypointPath)).href);
 if (typeof mod.handler !== 'function') {
   throw new Error('entrypoint must export an async handler(event, context)');

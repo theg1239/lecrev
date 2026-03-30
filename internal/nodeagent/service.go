@@ -8,12 +8,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	regionv1 "github.com/ishaan/eeeverc/eeeverc/region/v1"
+	regionv1 "github.com/theg1239/lecrev/lecrev/region/v1"
 
-	"github.com/ishaan/eeeverc/internal/artifact"
-	"github.com/ishaan/eeeverc/internal/firecracker"
-	"github.com/ishaan/eeeverc/internal/secrets"
-	"github.com/ishaan/eeeverc/internal/store"
+	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/firecracker"
+	"github.com/theg1239/lecrev/internal/secrets"
+	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Service struct {

@@ -15,11 +15,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ishaan/eeeverc/internal/artifact"
-	"github.com/ishaan/eeeverc/internal/domain"
-	"github.com/ishaan/eeeverc/internal/idempotency"
-	"github.com/ishaan/eeeverc/internal/regions"
-	"github.com/ishaan/eeeverc/internal/store"
+	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/idempotency"
+	"github.com/theg1239/lecrev/internal/regions"
+	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Service struct {
@@ -259,7 +259,7 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 			if err != nil {
 				return nil, nil, err
 			}
-			tmpDir, err := os.MkdirTemp("", "eeeverc-bundle-*")
+			tmpDir, err := os.MkdirTemp("", "lecrev-bundle-*")
 			if err != nil {
 				return nil, nil, err
 			}
@@ -278,7 +278,7 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest) (
 		bundle, err := artifact.BundleFromFiles(files)
 		return bundle, startup, err
 	case domain.SourceTypeGit:
-		tmpDir, err := os.MkdirTemp("", "eeeverc-git-*")
+		tmpDir, err := os.MkdirTemp("", "lecrev-git-*")
 		if err != nil {
 			return nil, nil, err
 		}

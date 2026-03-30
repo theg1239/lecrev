@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ishaan/eeeverc/internal/domain"
-	memstore "github.com/ishaan/eeeverc/internal/store/memory"
+	"github.com/theg1239/lecrev/internal/domain"
+	memstore "github.com/theg1239/lecrev/internal/store/memory"
 )
 
 type fakeRetryer struct {

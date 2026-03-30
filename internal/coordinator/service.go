@@ -11,11 +11,11 @@ import (
 
 	"google.golang.org/grpc"
 
-	regionv1 "github.com/ishaan/eeeverc/eeeverc/region/v1"
+	regionv1 "github.com/theg1239/lecrev/lecrev/region/v1"
 
-	"github.com/ishaan/eeeverc/internal/dispatch"
-	"github.com/ishaan/eeeverc/internal/domain"
-	"github.com/ishaan/eeeverc/internal/store"
+	"github.com/theg1239/lecrev/internal/dispatch"
+	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Service struct {

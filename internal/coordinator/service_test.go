@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	regionv1 "github.com/ishaan/eeeverc/eeeverc/region/v1"
+	regionv1 "github.com/theg1239/lecrev/lecrev/region/v1"
 
-	"github.com/ishaan/eeeverc/internal/domain"
-	memstore "github.com/ishaan/eeeverc/internal/store/memory"
+	"github.com/theg1239/lecrev/internal/domain"
+	memstore "github.com/theg1239/lecrev/internal/store/memory"
 )
 
 func TestHandleAssignmentUpdateRecordsCost(t *testing.T) {

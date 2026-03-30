@@ -28,7 +28,7 @@ func GenerateDevMTLS(hosts []string, ips []net.IP) (*CredentialsBundle, error) {
 	caTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			CommonName: "eeeverc-dev-ca",
+			CommonName: "lecrev-dev-ca",
 		},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
@@ -45,11 +45,11 @@ func GenerateDevMTLS(hosts []string, ips []net.IP) (*CredentialsBundle, error) {
 		return nil, err
 	}
 
-	serverCert, err := issueLeaf(caCert, caKey, "eeeverc-dev-server", hosts, ips, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	serverCert, err := issueLeaf(caCert, caKey, "lecrev-dev-server", hosts, ips, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
 	if err != nil {
 		return nil, err
 	}
-	clientCert, err := issueLeaf(caCert, caKey, "eeeverc-dev-client", nil, nil, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	clientCert, err := issueLeaf(caCert, caKey, "lecrev-dev-client", nil, nil, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
 	if err != nil {
 		return nil, err
 	}

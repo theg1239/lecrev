@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             (unknown)
-// source: eeeverc/region/v1/control.proto
+// source: lecrev/region/v1/control.proto
 
 package regionv1
 
@@ -19,7 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Coordinator_Control_FullMethodName = "/eeeverc.region.v1.Coordinator/Control"
+	Coordinator_Control_FullMethodName = "/lecrev.region.v1.Coordinator/Control"
 )
 
 // CoordinatorClient is the client API for Coordinator service.
@@ -98,7 +98,7 @@ type Coordinator_ControlServer = grpc.BidiStreamingServer[AgentMessage, Coordina
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Coordinator_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "eeeverc.region.v1.Coordinator",
+	ServiceName: "lecrev.region.v1.Coordinator",
 	HandlerType: (*CoordinatorServer)(nil),
 	Methods:     []grpc.MethodDesc{},
 	Streams: []grpc.StreamDesc{
@@ -109,5 +109,5 @@ var Coordinator_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "eeeverc/region/v1/control.proto",
+	Metadata: "lecrev/region/v1/control.proto",
 }

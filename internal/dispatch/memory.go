@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ishaan/eeeverc/internal/domain"
+	"github.com/theg1239/lecrev/internal/domain"
 )
 
 type MemoryBus struct {

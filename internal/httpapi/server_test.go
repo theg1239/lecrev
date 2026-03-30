@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ishaan/eeeverc/internal/artifact"
-	"github.com/ishaan/eeeverc/internal/build"
-	"github.com/ishaan/eeeverc/internal/domain"
-	"github.com/ishaan/eeeverc/internal/scheduler"
-	memstore "github.com/ishaan/eeeverc/internal/store/memory"
+	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/build"
+	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/scheduler"
+	memstore "github.com/theg1239/lecrev/internal/store/memory"
 )
 
 type testDispatcher struct {
@@ -85,7 +85,7 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 		t.Fatal("expected webhook token to be generated")
 	}
 
-	invokeBody := []byte(`{"repository":"eeeverc","event":"push"}`)
+	invokeBody := []byte(`{"repository":"lecrev","event":"push"}`)
 	invokeReq1 := httptest.NewRequest(http.MethodPost, "/v1/triggers/webhook/"+trigger.Token, bytes.NewReader(invokeBody))
 	invokeReq1.Header.Set("Content-Type", "application/json")
 	invokeReq1.Header.Set("Idempotency-Key", "webhook-delivery-1")

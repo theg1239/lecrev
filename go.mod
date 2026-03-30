@@ -1,4 +1,4 @@
-module github.com/ishaan/eeeverc
+module github.com/theg1239/lecrev
 
 go 1.25.0
 
