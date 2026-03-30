@@ -769,6 +769,126 @@ func TestProjectOverviewEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeploymentSummaryEndpoints(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+
+	handler := New(meta, objects, builder, sched)
+
+	createReq := func(projectID string, body string) domain.FunctionVersion {
+		req := httptest.NewRequest(http.MethodPost, "/v1/projects/"+projectID+"/functions", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "tenant-key")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("expected create function status %d, got %d: %s", http.StatusCreated, resp.Code, resp.Body.String())
+		}
+		var version domain.FunctionVersion
+		if err := json.Unmarshal(resp.Body.Bytes(), &version); err != nil {
+			t.Fatalf("decode function version: %v", err)
+		}
+		return version
+	}
+
+	demoVersion := createReq("demo", `{
+		"name":"demo-echo",
+		"environment":"staging",
+		"runtime":"node22",
+		"entrypoint":"index.mjs",
+		"regions":["ap-south-1"],
+		"source":{"type":"bundle","inlineFiles":{"index.mjs":"export async function handler(){ return { ok: true }; }"}}
+	}`)
+	opsVersion := createReq("ops", `{
+		"name":"ops-echo",
+		"environment":"production",
+		"runtime":"node22",
+		"entrypoint":"index.mjs",
+		"regions":["ap-south-2"],
+		"source":{"type":"bundle","inlineFiles":{"index.mjs":"export async function handler(){ return { ok: true }; }"}}
+	}`)
+
+	now := time.Now().UTC()
+	if err := meta.PutExecutionJob(context.Background(), &domain.ExecutionJob{
+		ID:                "job-demo-active",
+		FunctionVersionID: demoVersion.ID,
+		ProjectID:         "demo",
+		TargetRegion:      "ap-south-1",
+		State:             domain.JobStateSucceeded,
+		MaxRetries:        1,
+		AttemptCount:      1,
+		LastAttemptID:     "attempt-demo-active",
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			LogsKey:    "jobs/job-demo-active/logs.txt",
+			OutputKey:  "jobs/job-demo-active/output.json",
+			HostID:     "host-ap-south-1-a",
+			Region:     "ap-south-1",
+			StartedAt:  now.Add(-5 * time.Second),
+			FinishedAt: now,
+		},
+		CreatedAt: now.Add(-5 * time.Second),
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("put demo execution job: %v", err)
+	}
+
+	projectReq := httptest.NewRequest(http.MethodGet, "/v1/projects/demo/deployments?status=active&environment=staging", nil)
+	projectReq.Header.Set("X-API-Key", "tenant-key")
+	projectResp := httptest.NewRecorder()
+	handler.ServeHTTP(projectResp, projectReq)
+	if projectResp.Code != http.StatusOK {
+		t.Fatalf("expected project deployments status %d, got %d: %s", http.StatusOK, projectResp.Code, projectResp.Body.String())
+	}
+	var projectDeployments []deploymentSummary
+	if err := json.Unmarshal(projectResp.Body.Bytes(), &projectDeployments); err != nil {
+		t.Fatalf("decode project deployments: %v", err)
+	}
+	if len(projectDeployments) != 1 {
+		t.Fatalf("expected 1 project deployment, got %d: %+v", len(projectDeployments), projectDeployments)
+	}
+	if projectDeployments[0].FunctionVersionID != demoVersion.ID ||
+		projectDeployments[0].Environment != "staging" ||
+		projectDeployments[0].Status != "active" ||
+		projectDeployments[0].Build == nil ||
+		projectDeployments[0].Build.State != "succeeded" ||
+		projectDeployments[0].LastJob == nil ||
+		projectDeployments[0].LastJob.State != domain.JobStateSucceeded {
+		t.Fatalf("unexpected project deployment payload: %+v", projectDeployments[0])
+	}
+
+	allReq := httptest.NewRequest(http.MethodGet, "/v1/deployments?status=ready&environment=production", nil)
+	allReq.Header.Set("X-API-Key", "tenant-key")
+	allResp := httptest.NewRecorder()
+	handler.ServeHTTP(allResp, allReq)
+	if allResp.Code != http.StatusOK {
+		t.Fatalf("expected deployments status %d, got %d: %s", http.StatusOK, allResp.Code, allResp.Body.String())
+	}
+	var deployments []deploymentSummary
+	if err := json.Unmarshal(allResp.Body.Bytes(), &deployments); err != nil {
+		t.Fatalf("decode deployments: %v", err)
+	}
+	if len(deployments) != 1 {
+		t.Fatalf("expected 1 tenant deployment, got %d: %+v", len(deployments), deployments)
+	}
+	if deployments[0].FunctionVersionID != opsVersion.ID ||
+		deployments[0].ProjectID != "ops" ||
+		deployments[0].Environment != "production" ||
+		deployments[0].Status != "ready" ||
+		deployments[0].Build == nil ||
+		deployments[0].Build.State != "succeeded" ||
+		deployments[0].LastJob != nil {
+		t.Fatalf("unexpected tenant deployment payload: %+v", deployments[0])
+	}
+}
+
 func TestWriteServiceErrorMapsQuotaErrorsToTooManyRequests(t *testing.T) {
 	t.Parallel()
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,9 +56,11 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
 		r.Options("/*", srv.handlePreflight)
+		r.Get("/deployments", srv.listDeployments)
 		r.Get("/projects", srv.listProjects)
 		r.Get("/projects/{projectID}", srv.getProject)
 		r.Get("/projects/{projectID}/overview", srv.getProjectOverview)
+		r.Get("/projects/{projectID}/deployments", srv.listProjectDeployments)
 		r.Get("/projects/{projectID}/functions", srv.listProjectFunctions)
 		r.Get("/projects/{projectID}/build-jobs", srv.listProjectBuildJobs)
 		r.Get("/projects/{projectID}/jobs", srv.listProjectJobs)
@@ -140,6 +143,12 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("decode source: %v", err), http.StatusBadRequest)
 		return
 	}
+	if environment := strings.ToLower(strings.TrimSpace(body.Environment)); environment != "" {
+		if source.Metadata == nil {
+			source.Metadata = make(map[string]string)
+		}
+		source.Metadata["environment"] = environment
+	}
 	version, err := s.builder.CreateFunctionVersion(ctx, domain.DeployRequest{
 		ProjectID:      projectID,
 		Name:           body.Name,
@@ -161,6 +170,15 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, version)
 }
 
+func (s *Server) listDeployments(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.store.ListProjectsByTenant(r.Context(), tenantIDFromContext(r.Context()))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	s.listDeploymentsForProjects(w, r, projects)
+}
+
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	limit, err := queryLimit(r, defaultProjectListLimit)
 	if err != nil {
@@ -176,6 +194,52 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		projects = projects[:limit]
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+func (s *Server) listDeploymentsForProjects(w http.ResponseWriter, r *http.Request, projects []domain.Project) {
+	limit, err := queryLimit(r, defaultProjectListLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	statusFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	environmentFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("environment")))
+
+	deployments := make([]deploymentSummary, 0)
+	for _, project := range projects {
+		versions, err := s.store.ListFunctionVersionsByProject(r.Context(), project.ID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		buildJobs, err := s.store.ListBuildJobsByProject(r.Context(), project.ID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		jobs, err := s.store.ListExecutionJobsByProject(r.Context(), project.ID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		deployments = append(deployments, summarizeDeployments(project, versions, buildJobs, jobs)...)
+	}
+
+	deployments = filterDeploymentSummaries(deployments, statusFilter, environmentFilter)
+	sortDeployments(deployments)
+	if len(deployments) > limit {
+		deployments = deployments[:limit]
+	}
+	writeJSON(w, http.StatusOK, deployments)
+}
+
+func (s *Server) listProjectDeployments(w http.ResponseWriter, r *http.Request) {
+	project, err := s.authorizedProject(r.Context(), chi.URLParam(r, "projectID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	s.listDeploymentsForProjects(w, r, []domain.Project{*project})
 }
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +854,77 @@ func summarizeExecutionJobs(items []domain.ExecutionJob) []executionJobSummary {
 	return summaries
 }
 
+func summarizeDeployments(project domain.Project, versions []domain.FunctionVersion, buildJobs []domain.BuildJob, jobs []domain.ExecutionJob) []deploymentSummary {
+	buildByVersionID := make(map[string]domain.BuildJob, len(buildJobs))
+	for _, job := range buildJobs {
+		if _, exists := buildByVersionID[job.FunctionVersionID]; exists {
+			continue
+		}
+		buildByVersionID[job.FunctionVersionID] = job
+	}
+	jobByVersionID := make(map[string]domain.ExecutionJob, len(jobs))
+	for _, job := range jobs {
+		if _, exists := jobByVersionID[job.FunctionVersionID]; exists {
+			continue
+		}
+		jobByVersionID[job.FunctionVersionID] = job
+	}
+
+	summaries := make([]deploymentSummary, 0, len(versions))
+	for _, version := range versions {
+		var (
+			buildSummary *buildJobSummary
+			jobSummary   *executionJobSummary
+			environment  string
+			branch       string
+			gitURL       string
+			updatedAt    = version.CreatedAt
+		)
+
+		if buildJob, ok := buildByVersionID[version.ID]; ok {
+			summary := summarizeBuildJobs([]domain.BuildJob{buildJob})[0]
+			buildSummary = &summary
+			if buildJob.UpdatedAt.After(updatedAt) {
+				updatedAt = buildJob.UpdatedAt
+			}
+			if request, ok := decodeDeploymentRequest(buildJob.Request); ok {
+				environment = deploymentEnvironment(request.Source)
+				branch = strings.TrimSpace(request.Source.GitRef)
+				gitURL = strings.TrimSpace(request.Source.GitURL)
+			}
+		}
+
+		if job, ok := jobByVersionID[version.ID]; ok {
+			summary := summarizeExecutionJobs([]domain.ExecutionJob{job})[0]
+			jobSummary = &summary
+			if job.UpdatedAt.After(updatedAt) {
+				updatedAt = job.UpdatedAt
+			}
+		}
+
+		summaries = append(summaries, deploymentSummary{
+			ID:                version.ID,
+			ProjectID:         project.ID,
+			ProjectName:       project.Name,
+			FunctionVersionID: version.ID,
+			Name:              version.Name,
+			Runtime:           version.Runtime,
+			SourceType:        version.SourceType,
+			Environment:       environment,
+			Branch:            branch,
+			GitURL:            gitURL,
+			Status:            deploymentStatus(version, buildSummary, jobSummary),
+			FunctionState:     version.State,
+			Regions:           append([]string(nil), version.Regions...),
+			Build:             buildSummary,
+			LastJob:           jobSummary,
+			CreatedAt:         version.CreatedAt,
+			UpdatedAt:         updatedAt,
+		})
+	}
+	return summaries
+}
+
 func countBuildJobsByState(items []domain.BuildJob) map[string]int {
 	counts := make(map[string]int)
 	for _, item := range items {
@@ -804,6 +939,74 @@ func countExecutionJobsByState(items []domain.ExecutionJob) map[string]int {
 		counts[string(item.State)]++
 	}
 	return counts
+}
+
+func deploymentStatus(version domain.FunctionVersion, build *buildJobSummary, job *executionJobSummary) string {
+	switch {
+	case version.State == domain.FunctionStateFailed:
+		return "failed"
+	case build != nil && (build.State == "failed" || strings.TrimSpace(build.Error) != ""):
+		return "failed"
+	case job != nil && (job.State == domain.JobStateFailed || strings.TrimSpace(job.Error) != ""):
+		return "failed"
+	case job != nil && job.State == domain.JobStateSucceeded:
+		return "active"
+	case version.State == domain.FunctionStateReady:
+		return "ready"
+	default:
+		return "building"
+	}
+}
+
+func deploymentEnvironment(source domain.DeploySource) string {
+	if source.Metadata != nil {
+		if environment := strings.TrimSpace(source.Metadata["environment"]); environment != "" {
+			return environment
+		}
+	}
+	if source.Labels != nil {
+		if environment := strings.TrimSpace(source.Labels["environment"]); environment != "" {
+			return environment
+		}
+	}
+	return ""
+}
+
+func decodeDeploymentRequest(raw []byte) (domain.DeployRequest, bool) {
+	if len(raw) == 0 {
+		return domain.DeployRequest{}, false
+	}
+	var request domain.DeployRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return domain.DeployRequest{}, false
+	}
+	return request, true
+}
+
+func filterDeploymentSummaries(items []deploymentSummary, statusFilter, environmentFilter string) []deploymentSummary {
+	if statusFilter == "" && environmentFilter == "" {
+		return items
+	}
+	filtered := make([]deploymentSummary, 0, len(items))
+	for _, item := range items {
+		if statusFilter != "" && strings.ToLower(item.Status) != statusFilter {
+			continue
+		}
+		if environmentFilter != "" && strings.ToLower(strings.TrimSpace(item.Environment)) != environmentFilter {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func sortDeployments(items []deploymentSummary) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID > items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
 }
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {

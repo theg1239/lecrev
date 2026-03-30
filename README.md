@@ -184,6 +184,7 @@ curl -sS http://localhost:8080/v1/projects/demo/functions \
   -d @- <<'JSON'
 {
   "name": "echo",
+  "environment": "staging",
   "runtime": "node22",
   "entrypoint": "index.mjs",
   "memoryMb": 128,
@@ -211,6 +212,7 @@ curl -sS http://localhost:8080/v1/projects/demo/functions \
   -d @- <<'JSON'
 {
   "name": "git-echo",
+  "environment": "production",
   "runtime": "node22",
   "entrypoint": "dist/index.mjs",
   "memoryMb": 128,
@@ -315,6 +317,12 @@ curl -sS http://localhost:8080/v1/projects/demo \
 curl -sS 'http://localhost:8080/v1/projects/demo/overview?limit=8' \
   -H 'X-API-Key: dev-root-key'
 
+curl -sS 'http://localhost:8080/v1/deployments?limit=20' \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS 'http://localhost:8080/v1/projects/demo/deployments?status=ready&environment=staging' \
+  -H 'X-API-Key: dev-root-key'
+
 curl -sS 'http://localhost:8080/v1/projects/demo/functions?limit=20' \
   -H 'X-API-Key: dev-root-key'
 
@@ -325,7 +333,7 @@ curl -sS 'http://localhost:8080/v1/projects/demo/jobs?limit=20' \
   -H 'X-API-Key: dev-root-key'
 ```
 
-These endpoints are intended for a frontend dashboard. They return compact project, function, build-job, and execution-job summaries rather than the full archived artifacts.
+These endpoints are intended for a frontend dashboard. They return compact project, deployment, function, build-job, and execution-job summaries rather than the full archived artifacts.
 
 Inspect per-job attempts and cost records:
 

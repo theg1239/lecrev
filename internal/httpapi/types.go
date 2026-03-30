@@ -9,6 +9,7 @@ import (
 
 type createFunctionRequest struct {
 	Name           string          `json:"name"`
+	Environment    string          `json:"environment,omitempty"`
 	Runtime        string          `json:"runtime"`
 	Entrypoint     string          `json:"entrypoint"`
 	MemoryMB       int             `json:"memoryMb"`
@@ -97,4 +98,24 @@ type projectOverviewResponse struct {
 	RecentFunctions []functionVersionSummary `json:"recentFunctions"`
 	RecentBuildJobs []buildJobSummary        `json:"recentBuildJobs"`
 	RecentJobs      []executionJobSummary    `json:"recentJobs"`
+}
+
+type deploymentSummary struct {
+	ID                string               `json:"id"`
+	ProjectID         string               `json:"projectId"`
+	ProjectName       string               `json:"projectName"`
+	FunctionVersionID string               `json:"functionVersionId"`
+	Name              string               `json:"name"`
+	Runtime           string               `json:"runtime"`
+	SourceType        domain.SourceType    `json:"sourceType"`
+	Environment       string               `json:"environment,omitempty"`
+	Branch            string               `json:"branch,omitempty"`
+	GitURL            string               `json:"gitUrl,omitempty"`
+	Status            string               `json:"status"`
+	FunctionState     domain.FunctionState `json:"functionState"`
+	Regions           []string             `json:"regions"`
+	Build             *buildJobSummary     `json:"build,omitempty"`
+	LastJob           *executionJobSummary `json:"lastJob,omitempty"`
+	CreatedAt         time.Time            `json:"createdAt"`
+	UpdatedAt         time.Time            `json:"updatedAt"`
 }
