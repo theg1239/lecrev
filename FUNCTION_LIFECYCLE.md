@@ -115,12 +115,16 @@ This is the Lambda Function URL equivalent in this platform.
 
 1. Authenticated API caller creates an HTTP trigger for a ready function version.
 2. Control plane generates a stable token and returns a public URL in the form `/f/{token}`.
-3. External caller sends an HTTP request to that URL.
-4. Control plane wraps the inbound request into an execution payload with method, path, query, headers, and body.
-5. Control plane dispatches the request through the same execution-job path as normal invoke.
-6. The Function URL handler waits for terminal completion and maps the function output back to the caller:
+3. Trigger auth mode decides whether the URL is public or requires a platform API key:
+- `none`: public function URL
+- `api_key`: caller must send `X-API-Key` or `Authorization: Bearer <api-key>`
+4. External caller sends an HTTP request to that URL.
+5. Control plane wraps the inbound request into an execution payload with method, path, query, headers, and body.
+6. Control plane dispatches the request through the same execution-job path as normal invoke.
+7. The Function URL handler waits for terminal completion and maps the function output back to the caller:
 - raw JSON output returns `200 application/json`
 - structured output in the shape `{ statusCode, headers, body }` is emitted as an HTTP response directly
+- `HEAD` requests suppress the response body while preserving headers and status
 
 ## 7) Regional assignment flow
 

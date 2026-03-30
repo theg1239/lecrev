@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,33 +100,79 @@ const (
 	maxListLimit             = 200
 )
 
+var (
+	errMissingAPIKey = errors.New("missing api key")
+	errInvalidAPIKey = errors.New("invalid api key")
+)
+
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rawKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
-		if rawKey == "" {
-			http.Error(w, "missing X-API-Key", http.StatusUnauthorized)
-			return
-		}
-		keyHash := apikey.Hash(rawKey)
-		record, err := s.store.GetAPIKeyByHash(r.Context(), keyHash)
+		auth, err := s.authenticateAPIKey(r.Context(), apiKeyFromRequest(r))
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+			switch {
+			case errors.Is(err, errMissingAPIKey):
+				http.Error(w, "missing X-API-Key", http.StatusUnauthorized)
+			case errors.Is(err, errInvalidAPIKey):
 				http.Error(w, "invalid X-API-Key", http.StatusUnauthorized)
-				return
+			default:
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if record.Disabled || subtle.ConstantTimeCompare([]byte(record.KeyHash), []byte(keyHash)) != 1 {
-			http.Error(w, "invalid X-API-Key", http.StatusUnauthorized)
-			return
-		}
-		_ = s.store.TouchAPIKeyLastUsed(r.Context(), keyHash, time.Now().UTC())
-		next.ServeHTTP(w, r.WithContext(withAuthContext(r.Context(), authContext{
-			TenantID: record.TenantID,
-			IsAdmin:  record.IsAdmin,
-		})))
+		next.ServeHTTP(w, r.WithContext(withAuthContext(r.Context(), auth)))
 	})
+}
+
+func (s *Server) authenticateAPIKey(ctx context.Context, rawKey string) (authContext, error) {
+	rawKey = strings.TrimSpace(rawKey)
+	if rawKey == "" {
+		return authContext{}, errMissingAPIKey
+	}
+	keyHash := apikey.Hash(rawKey)
+	record, err := s.store.GetAPIKeyByHash(ctx, keyHash)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return authContext{}, errInvalidAPIKey
+		}
+		return authContext{}, err
+	}
+	if record.Disabled || subtle.ConstantTimeCompare([]byte(record.KeyHash), []byte(keyHash)) != 1 {
+		return authContext{}, errInvalidAPIKey
+	}
+	_ = s.store.TouchAPIKeyLastUsed(ctx, keyHash, time.Now().UTC())
+	return authContext{
+		TenantID: record.TenantID,
+		IsAdmin:  record.IsAdmin,
+	}, nil
+}
+
+func apiKeyFromRequest(r *http.Request) string {
+	if rawKey := strings.TrimSpace(r.Header.Get("X-API-Key")); rawKey != "" {
+		return rawKey
+	}
+	authz := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(authz) >= len("Bearer ") && strings.EqualFold(authz[:len("Bearer ")], "Bearer ") {
+		return strings.TrimSpace(authz[len("Bearer "):])
+	}
+	return ""
+}
+
+func (s *Server) authContextForHTTPTrigger(ctx context.Context, r *http.Request, trigger *domain.HTTPTrigger) (context.Context, error) {
+	if trigger == nil {
+		return ctx, fmt.Errorf("http trigger is required")
+	}
+	switch trigger.AuthMode {
+	case domain.HTTPTriggerAuthModeNone:
+		return ctx, nil
+	case domain.HTTPTriggerAuthModeAPIKey:
+		auth, err := s.authenticateAPIKey(ctx, apiKeyFromRequest(r))
+		if err != nil {
+			return nil, err
+		}
+		return withAuthContext(ctx, auth), nil
+	default:
+		return nil, fmt.Errorf("unsupported http trigger authMode %q", trigger.AuthMode)
+	}
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -783,10 +830,28 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "http trigger not found", http.StatusNotFound)
 		return
 	}
+	requestCtx, err := s.authContextForHTTPTrigger(r.Context(), r, trigger)
+	if err != nil {
+		switch {
+		case errors.Is(err, errMissingAPIKey):
+			http.Error(w, "missing X-API-Key", http.StatusUnauthorized)
+		case errors.Is(err, errInvalidAPIKey):
+			http.Error(w, "invalid X-API-Key", http.StatusUnauthorized)
+		default:
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		}
+		return
+	}
 	version, err := s.store.GetFunctionVersion(r.Context(), trigger.FunctionVersionID)
 	if err != nil {
 		writeServiceError(w, err)
 		return
+	}
+	if trigger.AuthMode == domain.HTTPTriggerAuthModeAPIKey {
+		if err := s.authorizeProject(requestCtx, version.ProjectID); err != nil {
+			writeServiceError(w, err)
+			return
+		}
 	}
 	if version.State != domain.FunctionStateReady {
 		http.Error(w, "function url not ready", http.StatusServiceUnavailable)
@@ -798,7 +863,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dispatchCtx, cancelDispatch := context.WithTimeout(r.Context(), 15*time.Second)
+	dispatchCtx, cancelDispatch := context.WithTimeout(requestCtx, 15*time.Second)
 	defer cancelDispatch()
 
 	job, err := s.scheduler.DispatchExecutionIdempotent(dispatchCtx, trigger.FunctionVersionID, payload, idempotencyKey(r.Header.Get("Idempotency-Key"), ""))
@@ -807,7 +872,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	waitCtx, cancelWait := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
+	waitCtx, cancelWait := context.WithTimeout(requestCtx, httpTriggerTimeout(version.TimeoutSec))
 	defer cancelWait()
 
 	job, err = s.waitForExecutionJob(waitCtx, job.ID, 100*time.Millisecond)
@@ -839,7 +904,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := writeHTTPFunctionResult(w, job.Result.Output); err != nil {
+	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"jobId":             job.ID,
 			"functionVersionId": version.ID,
@@ -1054,7 +1119,7 @@ func normalizeHTTPTriggerAuthMode(raw string) (domain.HTTPTriggerAuthMode, error
 		return domain.HTTPTriggerAuthModeNone, nil
 	}
 	switch mode {
-	case domain.HTTPTriggerAuthModeNone:
+	case domain.HTTPTriggerAuthModeNone, domain.HTTPTriggerAuthModeAPIKey:
 		return mode, nil
 	default:
 		return "", fmt.Errorf("unsupported http trigger authMode %q", raw)
@@ -1062,6 +1127,9 @@ func normalizeHTTPTriggerAuthMode(raw string) (domain.HTTPTriggerAuthMode, error
 }
 
 func publicFunctionURL(r *http.Request, token string) string {
+	if configured := strings.TrimSpace(os.Getenv("LECREV_PUBLIC_BASE_URL")); configured != "" {
+		return strings.TrimRight(configured, "/") + "/f/" + token
+	}
 	return strings.TrimRight(publicBaseURL(r), "/") + "/f/" + token
 }
 
@@ -1134,13 +1202,17 @@ func (s *Server) waitForExecutionJob(ctx context.Context, jobID string, pollInte
 	}
 }
 
-func writeHTTPFunctionResult(w http.ResponseWriter, output json.RawMessage) error {
+func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.RawMessage) error {
 	statusCode, headers, body, structured, err := decodeHTTPFunctionResult(output)
 	if err != nil {
 		return err
 	}
 	if !structured {
-		writeRaw(w, http.StatusOK, "application/json", output)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if method != http.MethodHead {
+			_, _ = w.Write(output)
+		}
 		return nil
 	}
 	for key, values := range headers {
@@ -1149,7 +1221,7 @@ func writeHTTPFunctionResult(w http.ResponseWriter, output json.RawMessage) erro
 		}
 	}
 	w.WriteHeader(statusCode)
-	if len(body) > 0 {
+	if method != http.MethodHead && len(body) > 0 {
 		_, _ = w.Write(body)
 	}
 	return nil
@@ -1570,8 +1642,8 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Idempotency-Key, Authorization")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, X-Lecrev-Job-Id, X-Lecrev-Function-Version-Id, X-Lecrev-Function-Url-Token")
 	w.Header().Set("Access-Control-Max-Age", "600")
 	w.Header().Add("Vary", "Origin")
 }

@@ -54,6 +54,12 @@ Deploy the control plane and frontend:
 bash deploy/ec2/deploy-control-plane.sh <control-plane-host> /path/to/key.pem /absolute/path/to/frontend-repo
 ```
 
+If you need to hop through a bastion or the public control-plane host, set:
+
+```bash
+export LECREV_SSH_PROXY_JUMP='ec2-user@<jump-host>'
+```
+
 That deploys:
 
 - `lecrev control-plane`
@@ -99,6 +105,8 @@ Deploy the execution host:
 bash deploy/ec2/deploy-execution-host.sh <execution-host> /path/to/key.pem
 ```
 
+For a private-only execution host, pass its private IP or private DNS name and set `LECREV_SSH_PROXY_JUMP` to the control-plane host.
+
 That deploys:
 
 - `lecrev node-agent`
@@ -125,6 +133,9 @@ ssh -i /path/to/key.pem ec2-user@<execution-host> 'sudo APP_USER=lecrev /usr/loc
 Important current constraint:
 
 - `configure-firecracker-network.sh` still provisions a single static `tap0`, so keep `LECREV_EXECUTION_HOST_SLOTS=1` if you need `networkPolicy=full`.
+- Set `LECREV_PUBLIC_BASE_URL` on the control plane so created HTTP trigger URLs use the real external origin instead of the incoming request host header.
+
+For an operational runbook with start, stop, restart, verification, and function URL commands, see [RUNBOOK.md](RUNBOOK.md).
 
 ## One-box demo deployment
 

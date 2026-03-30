@@ -46,7 +46,8 @@ type WebhookTrigger struct {
 type HTTPTriggerAuthMode string
 
 const (
-	HTTPTriggerAuthModeNone HTTPTriggerAuthMode = "none"
+	HTTPTriggerAuthModeNone   HTTPTriggerAuthMode = "none"
+	HTTPTriggerAuthModeAPIKey HTTPTriggerAuthMode = "api_key"
 )
 
 type HTTPTrigger struct {

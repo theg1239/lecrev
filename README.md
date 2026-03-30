@@ -116,6 +116,7 @@ To run the split production-shaped topology instead of the one-box `devstack`:
 ```bash
 # control-plane host
 export LECREV_API_ADDR=':8080'
+export LECREV_PUBLIC_BASE_URL='https://functions.example.com'
 export LECREV_COORDINATOR_BIND_HOST='0.0.0.0'
 go run ./cmd/lecrev control-plane
 
@@ -420,12 +421,26 @@ curl -sS http://localhost:8080/f/<token> \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: request-123' \
   -d '{"hello":"world"}'
+
+curl -sS http://localhost:8080/v1/functions/<version-id>/triggers/http \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev-root-key' \
+  -d '{"description":"private http endpoint","authMode":"api_key"}'
+
+curl -sS http://localhost:8080/f/<token> \
+  -H 'Authorization: Bearer dev-root-key' \
+  -H 'Idempotency-Key: request-456'
 ```
 
 The Function URL path waits for terminal job completion and returns either:
 
 - raw JSON output as `200 application/json`, or
 - a structured HTTP response when the function returns `{ "statusCode": ..., "headers": {...}, "body": ... }`
+
+`authMode` values:
+
+- `none`: public function URL
+- `api_key`: caller must send `X-API-Key` or `Authorization: Bearer <api-key>` and be authorized for the owning project
 
 ## Browser Clients
 
@@ -485,4 +500,4 @@ The default execution topology is APAC-only. Unsupported regions such as `us-eas
 
 The current production-oriented pieces in the repo are the metadata model, async build-job flow, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, a scoped secrets proxy in front of the backend secrets provider, Postgres migrations, optional NATS and S3 or MinIO adapters, mTLS for the coordinator-to-node-agent stream in local mode, a Linux Firecracker host driver with function snapshot restore, and a guest-runner binary for Firecracker rootfs images. The remaining major gaps to full production are policy-aware blank-warm scheduling, artifact replication automation, autoscaling, and deeper AWS host automation.
 
-For a one-box EC2 deployment using local PostgreSQL, local NATS with JetStream, S3-backed artifact storage, AWS Secrets Manager, and nginx serving the frontend plus `/v1`, see [deploy/ec2/README.md](deploy/ec2/README.md).
+For EC2 deployment details, see [deploy/ec2/README.md](deploy/ec2/README.md). For the split-host operational commands, including stop/start, redeploy, private worker access, and Function URL examples, see [deploy/ec2/RUNBOOK.md](deploy/ec2/RUNBOOK.md).

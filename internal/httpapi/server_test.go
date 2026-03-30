@@ -214,6 +214,54 @@ func TestHTTPTriggerLifecycle(t *testing.T) {
 	}
 }
 
+func TestHTTPTriggerLifecycleUsesConfiguredPublicBaseURL(t *testing.T) {
+	t.Setenv("LECREV_PUBLIC_BASE_URL", "https://functions.demo.lecrev.app")
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-public-base",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-http-public-base/triggers/http", bytes.NewBufferString(`{"description":"public echo","authMode":"none"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-API-Key", "dev-root-key")
+	createResp := httptest.NewRecorder()
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected create trigger status %d, got %d: %s", http.StatusCreated, createResp.Code, createResp.Body.String())
+	}
+	var trigger httpTriggerResponse
+	if err := json.Unmarshal(createResp.Body.Bytes(), &trigger); err != nil {
+		t.Fatalf("decode trigger: %v", err)
+	}
+	if want := "https://functions.demo.lecrev.app/f/" + trigger.Token; trigger.URL != want {
+		t.Fatalf("expected configured public base URL %s, got %s", want, trigger.URL)
+	}
+}
+
 func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 	t.Parallel()
 
@@ -328,6 +376,110 @@ func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 	}
 	if request["path"] != "/echo" {
 		t.Fatalf("expected function path /echo, got %+v", request["path"])
+	}
+}
+
+func TestHTTPTriggerInvokeAPIKeyModeRequiresAuthorizedKey(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	mustSeedAPIKey(t, meta, "other-tenant-key", "tenant-other", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-auth",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "private-http-trigger",
+		ProjectID:         "demo",
+		FunctionVersionID: "fn-http-auth",
+		AuthMode:          domain.HTTPTriggerAuthModeAPIKey,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/f/private-http-trigger", nil)
+	unauthResp := httptest.NewRecorder()
+	handler.ServeHTTP(unauthResp, unauthReq)
+	if unauthResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized status %d, got %d", http.StatusUnauthorized, unauthResp.Code)
+	}
+
+	wrongTenantReq := httptest.NewRequest(http.MethodGet, "/f/private-http-trigger", nil)
+	wrongTenantReq.Header.Set("Authorization", "Bearer other-tenant-key")
+	wrongTenantResp := httptest.NewRecorder()
+	handler.ServeHTTP(wrongTenantResp, wrongTenantReq)
+	if wrongTenantResp.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden status %d, got %d: %s", http.StatusForbidden, wrongTenantResp.Code, wrongTenantResp.Body.String())
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
+			if err == nil && len(jobs) > 0 {
+				job := jobs[0]
+				now := time.Now().UTC()
+				job.State = domain.JobStateSucceeded
+				job.TargetRegion = "ap-south-1"
+				job.AttemptCount = 1
+				job.Result = &domain.JobResult{
+					ExitCode:   0,
+					Output:     json.RawMessage(`{"statusCode":200,"headers":{"Content-Type":"application/json"},"body":{"ok":true}}`),
+					HostID:     "host-ap-south-1-a",
+					Region:     "ap-south-1",
+					StartedAt:  now,
+					FinishedAt: now,
+				}
+				_ = meta.UpdateExecutionJob(context.Background(), &job)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	authReq := httptest.NewRequest(http.MethodHead, "/f/private-http-trigger/secure", bytes.NewBufferString(`{"hello":"world"}`))
+	authReq.Header.Set("X-API-Key", "tenant-key")
+	authReq.Header.Set("Content-Type", "application/json")
+	authResp := httptest.NewRecorder()
+	handler.ServeHTTP(authResp, authReq)
+	<-done
+
+	if authResp.Code != http.StatusOK {
+		t.Fatalf("expected authenticated function url status %d, got %d: %s", http.StatusOK, authResp.Code, authResp.Body.String())
+	}
+	if authResp.Body.Len() != 0 {
+		t.Fatalf("expected HEAD response body to be empty, got %q", authResp.Body.String())
+	}
+
+	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("expected one execution job, got jobs=%d err=%v", len(jobs), err)
 	}
 }
 
