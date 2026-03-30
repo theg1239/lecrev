@@ -11,6 +11,7 @@ import (
 	regionv1 "github.com/theg1239/lecrev/lecrev/region/v1"
 
 	"github.com/theg1239/lecrev/internal/apikey"
+	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/coordinator"
 	"github.com/theg1239/lecrev/internal/domain"
@@ -27,6 +28,7 @@ type EmbeddedStack struct {
 	Handler http.Handler
 	Regions []string
 	APIKey  string
+	Objects artifact.Store
 
 	cancel context.CancelFunc
 	close  func()
@@ -145,6 +147,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		Handler: controlHandler,
 		Regions: append([]string(nil), cfg.ExecutionRegions...),
 		APIKey:  "dev-root-key",
+		Objects: objectStore,
 		cancel:  cancel,
 		close:   cleanup,
 		errCh:   make(chan error, len(localRegions)*2+1),

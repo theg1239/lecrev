@@ -97,6 +97,19 @@ func TestHandleAssignmentUpdateRecordsCost(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("success update: %v", err)
 	}
+	storedJob, err := meta.GetExecutionJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get execution job: %v", err)
+	}
+	if storedJob.Result == nil {
+		t.Fatal("expected job result to be recorded")
+	}
+	if storedJob.Result.LogsKey == "" {
+		t.Fatal("expected archived logs key on job result")
+	}
+	if storedJob.Result.OutputKey == "" {
+		t.Fatal("expected archived output key on job result")
+	}
 
 	records, err := meta.ListCostRecordsByJob(context.Background(), job.ID)
 	if err != nil {

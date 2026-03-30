@@ -2,6 +2,7 @@ package nodeagent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -241,16 +242,30 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	})
 	if execErr != nil {
 		stopRunningHeartbeats()
+		logs := ""
+		var output []byte
+		exitCode := 1
 		if result != nil {
-			emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, result.Logs, result.Output, execErr.Error(), result.ExitCode)
-		} else {
-			emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, execErr.Error(), 1)
+			logs = result.Logs
+			output = result.Output
+			exitCode = result.ExitCode
 		}
+		errMsg := execErr.Error()
+		if archiveErr := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); archiveErr != nil {
+			errMsg = fmt.Sprintf("%s; archive execution artifacts: %v", errMsg, archiveErr)
+		}
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, exitCode)
 		releaseSlot()
 		sendHeartbeat()
 		return
 	}
 	stopRunningHeartbeats()
+	if err := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, result.Logs, result.Output); err != nil {
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, result.Logs, result.Output, fmt.Sprintf("archive execution artifacts: %v", err), result.ExitCode)
+		releaseSlot()
+		sendHeartbeat()
+		return
+	}
 	if result.SnapshotEligible {
 		s.mu.Lock()
 		s.functionWarm[msg.FunctionVersionId] = 1
@@ -259,6 +274,20 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, result.Logs, result.Output, "", result.ExitCode)
 	releaseSlot()
 	sendHeartbeat()
+}
+
+func (s *Service) archiveExecutionArtifacts(ctx context.Context, jobID, attemptID, logs string, output []byte) error {
+	if s.objects == nil {
+		return fmt.Errorf("artifact store is not configured")
+	}
+	if err := s.objects.Put(ctx, artifact.ExecutionLogsKey(jobID, attemptID), []byte(logs)); err != nil {
+		return err
+	}
+	normalizedOutput := []byte("null")
+	if len(output) > 0 {
+		normalizedOutput = append([]byte(nil), output...)
+	}
+	return s.objects.Put(ctx, artifact.ExecutionOutputKey(jobID, attemptID), normalizedOutput)
 }
 
 func (s *Service) assignmentHeartbeatLoop(ctx context.Context, sendRunningHeartbeat func()) {

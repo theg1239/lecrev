@@ -141,7 +141,9 @@ type BuildJob struct {
 type JobResult struct {
 	ExitCode   int             `json:"exitCode"`
 	Logs       string          `json:"logs"`
+	LogsKey    string          `json:"logsKey,omitempty"`
 	Output     json.RawMessage `json:"output"`
+	OutputKey  string          `json:"outputKey,omitempty"`
 	HostID     string          `json:"hostId"`
 	Region     string          `json:"region"`
 	StartedAt  time.Time       `json:"startedAt"`

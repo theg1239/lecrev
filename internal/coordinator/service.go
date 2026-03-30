@@ -13,6 +13,7 @@ import (
 
 	regionv1 "github.com/theg1239/lecrev/lecrev/region/v1"
 
+	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/dispatch"
 	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/store"
@@ -373,7 +374,9 @@ func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.Assi
 		job.Result = &domain.JobResult{
 			ExitCode:   int(msg.ExitCode),
 			Logs:       msg.Logs,
+			LogsKey:    artifact.ExecutionLogsKey(msg.JobId, msg.AttemptId),
 			Output:     append([]byte(nil), msg.OutputJson...),
+			OutputKey:  artifact.ExecutionOutputKey(msg.JobId, msg.AttemptId),
 			HostID:     msg.HostId,
 			Region:     msg.Region,
 			StartedAt:  startTimeOr(now, attempt.StartedAt),
@@ -388,7 +391,9 @@ func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.Assi
 		job.Result = &domain.JobResult{
 			ExitCode:   int(msg.ExitCode),
 			Logs:       msg.Logs,
+			LogsKey:    artifact.ExecutionLogsKey(msg.JobId, msg.AttemptId),
 			Output:     append([]byte(nil), msg.OutputJson...),
+			OutputKey:  artifact.ExecutionOutputKey(msg.JobId, msg.AttemptId),
 			HostID:     msg.HostId,
 			Region:     msg.Region,
 			StartedAt:  startTimeOr(now, attempt.StartedAt),

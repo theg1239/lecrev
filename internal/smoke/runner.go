@@ -120,6 +120,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if job.Result == nil {
 		return nil, fmt.Errorf("job %s succeeded without a result", job.ID)
 	}
+	if strings.TrimSpace(job.Result.LogsKey) == "" {
+		return nil, fmt.Errorf("job %s succeeded without an archived logs key", job.ID)
+	}
+	if strings.TrimSpace(job.Result.OutputKey) == "" {
+		return nil, fmt.Errorf("job %s succeeded without an archived output key", job.ID)
+	}
 	if err := validateOutput(job.Result.Output, payload); err != nil {
 		return nil, err
 	}
