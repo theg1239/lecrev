@@ -24,7 +24,7 @@ type Service struct {
 	driver          firecracker.Driver
 	objects         artifact.Store
 	store           store.Store
-	secrets         secrets.Provider
+	secrets         secrets.ExecutionResolver
 	dialOptions     []grpc.DialOption
 
 	mu             sync.Mutex
@@ -34,7 +34,12 @@ type Service struct {
 	functionWarm   map[string]int
 }
 
-func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, store store.Store, secrets secrets.Provider, dialOptions ...grpc.DialOption) *Service {
+type EmbeddedCoordinator interface {
+	UpdateEmbeddedHeartbeat(ctx context.Context, msg *regionv1.HostHeartbeat) error
+	ApplyAssignmentUpdate(ctx context.Context, msg *regionv1.AssignmentUpdate) error
+}
+
+func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, store store.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
 	if len(dialOptions) == 0 {
 		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	}
@@ -86,7 +91,19 @@ func (s *Service) Run(ctx context.Context) error {
 		case *regionv1.CoordinatorMessage_Registered:
 			continue
 		case *regionv1.CoordinatorMessage_Assignment:
-			go s.executeAssignment(ctx, stream, body.Assignment)
+			go s.executeAssignment(ctx, body.Assignment, func(update *regionv1.AssignmentUpdate) {
+				_ = s.send(stream, &regionv1.AgentMessage{
+					Body: &regionv1.AgentMessage_AssignmentUpdate{
+						AssignmentUpdate: update,
+					},
+				})
+			}, func() {
+				_ = s.send(stream, &regionv1.AgentMessage{
+					Body: &regionv1.AgentMessage_Heartbeat{
+						Heartbeat: s.heartbeatMessage(),
+					},
+				})
+			})
 		case *regionv1.CoordinatorMessage_Drain:
 			s.mu.Lock()
 			s.availableSlots = 0
@@ -121,7 +138,34 @@ func (s *Service) heartbeatLoop(ctx context.Context, stream grpc.BidiStreamingCl
 	}
 }
 
-func (s *Service) executeAssignment(ctx context.Context, stream grpc.BidiStreamingClient[regionv1.AgentMessage, regionv1.CoordinatorMessage], msg *regionv1.ExecutionAssignment) {
+func (s *Service) RegistrationMessage() *regionv1.RegisterHost {
+	return s.registrationMessage()
+}
+
+func (s *Service) RunEmbeddedHeartbeatLoop(ctx context.Context, coordinator EmbeddedCoordinator) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := coordinator.UpdateEmbeddedHeartbeat(ctx, s.heartbeatMessage()); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (s *Service) ExecuteEmbeddedAssignment(ctx context.Context, coordinator EmbeddedCoordinator, msg *regionv1.ExecutionAssignment) {
+	s.executeAssignment(ctx, msg, func(update *regionv1.AssignmentUpdate) {
+		_ = coordinator.ApplyAssignmentUpdate(ctx, update)
+	}, func() {
+		_ = coordinator.UpdateEmbeddedHeartbeat(ctx, s.heartbeatMessage())
+	})
+}
+
+func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.ExecutionAssignment, sendUpdate func(*regionv1.AssignmentUpdate), sendHeartbeat func()) {
 	s.mu.Lock()
 	if s.availableSlots > 0 {
 		s.availableSlots--
@@ -139,46 +183,49 @@ func (s *Service) executeAssignment(ctx context.Context, stream grpc.BidiStreami
 	}
 	defer releaseSlot()
 
-	sendUpdate := func(state regionv1.AssignmentState, logs string, output []byte, errMsg string, exitCode int) {
-		_ = s.send(stream, &regionv1.AgentMessage{
-			Body: &regionv1.AgentMessage_AssignmentUpdate{
-				AssignmentUpdate: &regionv1.AssignmentUpdate{
-					HostId:       s.hostID,
-					Region:       s.region,
-					AttemptId:    msg.AttemptId,
-					JobId:        msg.JobId,
-					State:        state,
-					Logs:         logs,
-					OutputJson:   output,
-					ErrorMessage: errMsg,
-					ExitCode:     int32(exitCode),
-				},
-			},
+	emitUpdate := func(state regionv1.AssignmentState, logs string, output []byte, errMsg string, exitCode int) {
+		sendUpdate(&regionv1.AssignmentUpdate{
+			HostId:       s.hostID,
+			Region:       s.region,
+			AttemptId:    msg.AttemptId,
+			JobId:        msg.JobId,
+			State:        state,
+			Logs:         logs,
+			OutputJson:   output,
+			ErrorMessage: errMsg,
+			ExitCode:     int32(exitCode),
 		})
 	}
 
-	sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_STARTING, "", nil, "", 0)
+	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_STARTING, "", nil, "", 0)
 
 	artifactMeta, err := s.store.GetArtifact(ctx, msg.ArtifactDigest)
 	if err != nil {
-		sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
 		return
 	}
 	bundle, err := s.objects.Get(ctx, artifactMeta.BundleKey)
 	if err != nil {
-		sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
 		return
 	}
-	env, err := s.secrets.Resolve(ctx, msg.EnvRefs)
+	env, err := s.secrets.ResolveExecution(ctx, secrets.ExecutionRequest{
+		HostID:            s.hostID,
+		Region:            s.region,
+		FunctionVersionID: msg.FunctionVersionId,
+		SecretRefs:        msg.EnvRefs,
+	})
 	if err != nil {
-		sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
 		return
 	}
 
-	sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", nil, "", 0)
+	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", nil, "", 0)
 	runCtx, stopRunningHeartbeats := context.WithCancel(ctx)
 	defer stopRunningHeartbeats()
-	go s.assignmentHeartbeatLoop(runCtx, stream, msg)
+	go s.assignmentHeartbeatLoop(runCtx, func() {
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", nil, "", 0)
+	})
 
 	result, execErr := s.driver.Execute(ctx, firecracker.ExecuteRequest{
 		AttemptID:      msg.AttemptId,
@@ -195,16 +242,12 @@ func (s *Service) executeAssignment(ctx context.Context, stream grpc.BidiStreami
 	if execErr != nil {
 		stopRunningHeartbeats()
 		if result != nil {
-			sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, result.Logs, result.Output, execErr.Error(), result.ExitCode)
+			emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, result.Logs, result.Output, execErr.Error(), result.ExitCode)
 		} else {
-			sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, execErr.Error(), 1)
+			emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, execErr.Error(), 1)
 		}
 		releaseSlot()
-		_ = s.send(stream, &regionv1.AgentMessage{
-			Body: &regionv1.AgentMessage_Heartbeat{
-				Heartbeat: s.heartbeatMessage(),
-			},
-		})
+		sendHeartbeat()
 		return
 	}
 	stopRunningHeartbeats()
@@ -213,16 +256,12 @@ func (s *Service) executeAssignment(ctx context.Context, stream grpc.BidiStreami
 		s.functionWarm[msg.FunctionVersionId] = 1
 		s.mu.Unlock()
 	}
-	sendUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, result.Logs, result.Output, "", result.ExitCode)
+	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, result.Logs, result.Output, "", result.ExitCode)
 	releaseSlot()
-	_ = s.send(stream, &regionv1.AgentMessage{
-		Body: &regionv1.AgentMessage_Heartbeat{
-			Heartbeat: s.heartbeatMessage(),
-		},
-	})
+	sendHeartbeat()
 }
 
-func (s *Service) assignmentHeartbeatLoop(ctx context.Context, stream grpc.BidiStreamingClient[regionv1.AgentMessage, regionv1.CoordinatorMessage], msg *regionv1.ExecutionAssignment) {
+func (s *Service) assignmentHeartbeatLoop(ctx context.Context, sendRunningHeartbeat func()) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -230,17 +269,7 @@ func (s *Service) assignmentHeartbeatLoop(ctx context.Context, stream grpc.BidiS
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = s.send(stream, &regionv1.AgentMessage{
-				Body: &regionv1.AgentMessage_AssignmentUpdate{
-					AssignmentUpdate: &regionv1.AssignmentUpdate{
-						HostId:    s.hostID,
-						Region:    s.region,
-						AttemptId: msg.AttemptId,
-						JobId:     msg.JobId,
-						State:     regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING,
-					},
-				},
-			})
+			sendRunningHeartbeat()
 		}
 	}
 }

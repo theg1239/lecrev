@@ -92,6 +92,14 @@ Start the whole stack:
 go run ./cmd/lecrev devstack
 ```
 
+Run an end-to-end smoke check without binding any local ports:
+
+```bash
+go run ./cmd/lecrev smoke
+```
+
+This starts an embedded in-process control plane, coordinators, and node-agents, then runs a real deploy -> invoke -> poll -> inspect flow and prints the result as JSON.
+
 To run the control plane against Postgres instead of the in-memory store:
 
 ```bash
@@ -109,8 +117,15 @@ export LECREV_S3_ACCESS_KEY='minioadmin'
 export LECREV_S3_SECRET_KEY='minioadmin'
 export LECREV_S3_BUCKET='lecrev-artifacts'
 export LECREV_SECRETS_BACKEND='memory'
+export LECREV_SECRETS_PROXY_TOKEN='dev-secrets-token'
 export LECREV_ENABLE_MTLS='true'
 go run ./cmd/lecrev devstack
+```
+
+If you already have `devstack` running and want to smoke the live HTTP API instead of the embedded stack:
+
+```bash
+go run ./cmd/lecrev smoke --api http://localhost:8080
 ```
 
 This boots:
@@ -214,6 +229,33 @@ curl -sS http://localhost:8080/v1/triggers/webhook/<token> \
 
 Webhook deliveries are public token-authenticated endpoints. Management operations for creating and listing triggers stay behind the normal API key middleware.
 
+## CLI
+
+The repo currently exposes two commands:
+
+```bash
+go run ./cmd/lecrev devstack
+go run ./cmd/lecrev smoke
+```
+
+`smoke` accepts:
+
+```bash
+go run ./cmd/lecrev smoke --api http://localhost:8080 --api-key dev-root-key --project demo --regions ap-south-1,ap-south-2,ap-southeast-1
+```
+
+## Secrets Proxy
+
+Node-agents no longer resolve secrets directly from the backend provider. They call an internal secrets-proxy path at `/v1/internal/secrets/resolve` with a bearer token from `LECREV_SECRETS_PROXY_TOKEN`.
+
+The proxy validates that:
+
+- the host exists in the claimed region
+- the function version is allowed in that region
+- the requested secret refs are declared in `envRefs` for that function version
+
+Only after that does the control plane resolve the values from the configured backend such as in-memory secrets or AWS Secrets Manager.
+
 ## Protobuf
 
 Generated Go code is produced with:
@@ -237,4 +279,4 @@ This repo intentionally keeps the Firecracker boundary thin. The local `node` dr
 
 The default execution topology is APAC-only. Unsupported regions such as `us-east-1` are rejected at deploy time to keep the platform aligned with an `ap-south-1` primary and nearby failover regions.
 
-The current production-oriented pieces in the repo are the metadata model, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, Postgres migrations, optional NATS and S3 or MinIO adapters, and mTLS for the coordinator-to-node-agent stream in local mode. The remaining major gap to full production is replacing the local Node execution driver with a Linux Firecracker host driver and adding the real AWS integrations around Secrets Manager, object replication, autoscaling, and host automation.
+The current production-oriented pieces in the repo are the metadata model, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, a scoped secrets proxy in front of the backend secrets provider, Postgres migrations, optional NATS and S3 or MinIO adapters, and mTLS for the coordinator-to-node-agent stream in local mode. The remaining major gap to full production is replacing the local Node execution driver with a Linux Firecracker host driver and adding the real AWS integrations around artifact replication, autoscaling, and host automation.

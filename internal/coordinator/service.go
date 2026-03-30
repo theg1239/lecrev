@@ -32,9 +32,12 @@ type Service struct {
 }
 
 type hostSession struct {
-	host   domain.Host
-	sendCh chan *regionv1.CoordinatorMessage
+	host     domain.Host
+	sendCh   chan *regionv1.CoordinatorMessage
+	executor EmbeddedExecutor
 }
+
+type EmbeddedExecutor func(context.Context, *regionv1.ExecutionAssignment)
 
 type Retryer interface {
 	RetryExecution(ctx context.Context, jobID string) (*domain.ExecutionJob, error)
@@ -133,6 +136,9 @@ func (s *Service) DrainHost(ctx context.Context, hostID, reason string) error {
 	if err := s.persistRegion(); err != nil {
 		return err
 	}
+	if sendCh == nil {
+		return nil
+	}
 
 	msg := &regionv1.CoordinatorMessage{
 		Body: &regionv1.CoordinatorMessage_Drain{
@@ -169,20 +175,25 @@ func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignm
 		return err
 	}
 
+	execAssignment := &regionv1.ExecutionAssignment{
+		AttemptId:         assignment.AttemptID,
+		JobId:             assignment.JobID,
+		FunctionVersionId: assignment.FunctionVersionID,
+		ArtifactDigest:    assignment.ArtifactDigest,
+		Entrypoint:        assignment.Entrypoint,
+		PayloadJson:       assignment.Payload,
+		EnvRefs:           assignment.EnvRefs,
+		NetworkPolicy:     string(assignment.NetworkPolicy),
+		TimeoutSec:        int32(assignment.TimeoutSec),
+	}
 	msg := &regionv1.CoordinatorMessage{
 		Body: &regionv1.CoordinatorMessage_Assignment{
-			Assignment: &regionv1.ExecutionAssignment{
-				AttemptId:         assignment.AttemptID,
-				JobId:             assignment.JobID,
-				FunctionVersionId: assignment.FunctionVersionID,
-				ArtifactDigest:    assignment.ArtifactDigest,
-				Entrypoint:        assignment.Entrypoint,
-				PayloadJson:       assignment.Payload,
-				EnvRefs:           assignment.EnvRefs,
-				NetworkPolicy:     string(assignment.NetworkPolicy),
-				TimeoutSec:        int32(assignment.TimeoutSec),
-			},
+			Assignment: execAssignment,
 		},
+	}
+	if session.executor != nil {
+		go session.executor(context.Background(), execAssignment)
+		return nil
 	}
 
 	select {
@@ -261,6 +272,14 @@ func (s *Service) Control(stream regionv1.Coordinator_ControlServer) error {
 }
 
 func (s *Service) registerHost(msg *regionv1.RegisterHost, sendCh chan *regionv1.CoordinatorMessage) error {
+	return s.registerHostSession(context.Background(), msg, sendCh, nil)
+}
+
+func (s *Service) RegisterEmbeddedHost(ctx context.Context, msg *regionv1.RegisterHost, executor EmbeddedExecutor) error {
+	return s.registerHostSession(ctx, msg, nil, executor)
+}
+
+func (s *Service) registerHostSession(ctx context.Context, msg *regionv1.RegisterHost, sendCh chan *regionv1.CoordinatorMessage, executor EmbeddedExecutor) error {
 	host := domain.Host{
 		ID:             msg.HostId,
 		Region:         msg.Region,
@@ -272,18 +291,26 @@ func (s *Service) registerHost(msg *regionv1.RegisterHost, sendCh chan *regionv1
 		LastHeartbeat:  time.Now().UTC(),
 	}
 	s.mu.Lock()
-	s.hosts[host.ID] = &hostSession{host: host, sendCh: sendCh}
+	s.hosts[host.ID] = &hostSession{host: host, sendCh: sendCh, executor: executor}
 	s.mu.Unlock()
-	if err := s.store.PutHost(context.Background(), &host); err != nil {
+	if err := s.store.PutHost(ctx, &host); err != nil {
 		return err
 	}
-	if err := s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now())); err != nil {
+	if err := s.store.ReplaceWarmPoolsForHost(ctx, host.Region, host.ID, warmPoolsForHost(host, s.now())); err != nil {
 		return err
 	}
 	return s.persistRegion()
 }
 
 func (s *Service) updateHeartbeat(msg *regionv1.HostHeartbeat) error {
+	return s.updateHeartbeatContext(context.Background(), msg)
+}
+
+func (s *Service) UpdateEmbeddedHeartbeat(ctx context.Context, msg *regionv1.HostHeartbeat) error {
+	return s.updateHeartbeatContext(ctx, msg)
+}
+
+func (s *Service) updateHeartbeatContext(ctx context.Context, msg *regionv1.HostHeartbeat) error {
 	s.mu.Lock()
 	session, ok := s.hosts[msg.HostId]
 	if !ok {
@@ -296,13 +323,17 @@ func (s *Service) updateHeartbeat(msg *regionv1.HostHeartbeat) error {
 	session.host.LastHeartbeat = s.now()
 	host := session.host
 	s.mu.Unlock()
-	if err := s.store.UpdateHost(context.Background(), &host); err != nil {
+	if err := s.store.UpdateHost(ctx, &host); err != nil {
 		return err
 	}
-	if err := s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now())); err != nil {
+	if err := s.store.ReplaceWarmPoolsForHost(ctx, host.Region, host.ID, warmPoolsForHost(host, s.now())); err != nil {
 		return err
 	}
 	return s.persistRegion()
+}
+
+func (s *Service) ApplyAssignmentUpdate(ctx context.Context, msg *regionv1.AssignmentUpdate) error {
+	return s.handleAssignmentUpdate(ctx, msg)
 }
 
 func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.AssignmentUpdate) error {

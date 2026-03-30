@@ -17,6 +17,7 @@ import (
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/coordinator"
 	"github.com/theg1239/lecrev/internal/dispatch"
+	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/firecracker/localnode"
 	"github.com/theg1239/lecrev/internal/httpapi"
 	"github.com/theg1239/lecrev/internal/nodeagent"
@@ -24,7 +25,6 @@ import (
 	"github.com/theg1239/lecrev/internal/regions"
 	"github.com/theg1239/lecrev/internal/scheduler"
 	"github.com/theg1239/lecrev/internal/secrets"
-	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/store"
 	memstore "github.com/theg1239/lecrev/internal/store/memory"
 	pgstore "github.com/theg1239/lecrev/internal/store/postgres"
@@ -34,6 +34,7 @@ import (
 )
 
 type Config struct {
+	LoadEnv             bool
 	APIAddr             string
 	ExecutionRegions    []string
 	CoordinatorBasePort int
@@ -48,64 +49,84 @@ type Config struct {
 	AWSRegion           string
 	AWSAccessKey        string
 	AWSSecretKey        string
+	SecretsProxyToken   string
 	EnableMTLS          bool
 }
 
 func Run(ctx context.Context, cfg Config) error {
+	cfg.LoadEnv = true
+	if err := prepareConfig(&cfg); err != nil {
+		return err
+	}
+	return runNetworked(ctx, cfg)
+}
+
+func prepareConfig(cfg *Config) error {
 	if cfg.APIAddr == "" {
 		cfg.APIAddr = ":8080"
 	}
 	if cfg.CoordinatorBasePort == 0 {
 		cfg.CoordinatorBasePort = 9091
 	}
-	if cfg.PostgresDSN == "" {
+	if cfg.LoadEnv && cfg.PostgresDSN == "" {
 		cfg.PostgresDSN = strings.TrimSpace(os.Getenv("LECREV_POSTGRES_DSN"))
 	}
-	if cfg.NATSURL == "" {
+	if cfg.LoadEnv && cfg.NATSURL == "" {
 		cfg.NATSURL = strings.TrimSpace(os.Getenv("LECREV_NATS_URL"))
 	}
-	if cfg.S3Region == "" {
+	if cfg.LoadEnv && cfg.S3Region == "" {
 		cfg.S3Region = strings.TrimSpace(os.Getenv("LECREV_S3_REGION"))
 	}
-	if cfg.S3Endpoint == "" {
+	if cfg.LoadEnv && cfg.S3Endpoint == "" {
 		cfg.S3Endpoint = strings.TrimSpace(os.Getenv("LECREV_S3_ENDPOINT"))
 	}
-	if cfg.S3AccessKey == "" {
+	if cfg.LoadEnv && cfg.S3AccessKey == "" {
 		cfg.S3AccessKey = strings.TrimSpace(os.Getenv("LECREV_S3_ACCESS_KEY"))
 	}
-	if cfg.S3SecretKey == "" {
+	if cfg.LoadEnv && cfg.S3SecretKey == "" {
 		cfg.S3SecretKey = strings.TrimSpace(os.Getenv("LECREV_S3_SECRET_KEY"))
 	}
-	if cfg.S3Bucket == "" {
+	if cfg.LoadEnv && cfg.S3Bucket == "" {
 		cfg.S3Bucket = strings.TrimSpace(os.Getenv("LECREV_S3_BUCKET"))
 	}
-	if cfg.SecretsBackend == "" {
+	if cfg.LoadEnv && cfg.SecretsBackend == "" {
 		cfg.SecretsBackend = strings.TrimSpace(os.Getenv("LECREV_SECRETS_BACKEND"))
 	}
-	if cfg.AWSRegion == "" {
+	if cfg.LoadEnv && cfg.AWSRegion == "" {
 		cfg.AWSRegion = strings.TrimSpace(os.Getenv("LECREV_AWS_REGION"))
 	}
-	if cfg.AWSAccessKey == "" {
+	if cfg.LoadEnv && cfg.AWSAccessKey == "" {
 		cfg.AWSAccessKey = strings.TrimSpace(os.Getenv("LECREV_AWS_ACCESS_KEY_ID"))
 	}
-	if cfg.AWSSecretKey == "" {
+	if cfg.LoadEnv && cfg.AWSSecretKey == "" {
 		cfg.AWSSecretKey = strings.TrimSpace(os.Getenv("LECREV_AWS_SECRET_ACCESS_KEY"))
 	}
-	if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {
-		enabled, err := strconv.ParseBool(raw)
-		if err != nil {
-			return fmt.Errorf("parse LECREV_ENABLE_MTLS: %w", err)
+	if cfg.LoadEnv && cfg.SecretsProxyToken == "" {
+		cfg.SecretsProxyToken = strings.TrimSpace(os.Getenv("LECREV_SECRETS_PROXY_TOKEN"))
+	}
+	if strings.TrimSpace(cfg.SecretsProxyToken) == "" {
+		cfg.SecretsProxyToken = "dev-secrets-token"
+	}
+	if cfg.LoadEnv {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {
+			enabled, err := strconv.ParseBool(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_ENABLE_MTLS: %w", err)
+			}
+			cfg.EnableMTLS = enabled
+		} else if !cfg.EnableMTLS {
+			cfg.EnableMTLS = true
 		}
-		cfg.EnableMTLS = enabled
-	} else if !cfg.EnableMTLS {
-		cfg.EnableMTLS = true
 	}
 	normalizedRegions, err := regions.NormalizeExecutionRegions(cfg.ExecutionRegions)
 	if err != nil {
 		return err
 	}
 	cfg.ExecutionRegions = normalizedRegions
+	return nil
+}
 
+func runNetworked(ctx context.Context, cfg Config) error {
 	metaStore, cleanup, err := buildMetadataStore(ctx, cfg.PostgresDSN)
 	if err != nil {
 		return err
@@ -120,6 +141,8 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	secretResolver := secrets.NewScopedResolver(metaStore, secretProvider)
+	secretsProxy := secrets.NewProxyHandler(secretResolver, cfg.SecretsProxyToken)
 	builder := build.New(metaStore, objectStore)
 	executionBus, closeBus, err := buildExecutionBus(cfg)
 	if err != nil {
@@ -178,7 +201,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	apiHandler := httpapi.New(metaStore, builder, schedulerService, admins...)
-	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: apiHandler}
+	controlHandler := composeControlPlaneHandler(apiHandler, secretsProxy)
+	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: controlHandler}
+	secretsClient := secrets.NewProxyClient(controlPlaneBaseURL(cfg.APIAddr), cfg.SecretsProxyToken, http.DefaultClient)
 
 	errCh := make(chan error, len(localRegions)*2+2)
 	run := func(name string, fn func() error) {
@@ -202,7 +227,7 @@ func Run(ctx context.Context, cfg Config) error {
 	for _, region := range localRegions {
 		region := region
 		run("node-agent-"+region.name, func() error {
-			return nodeagent.New(region.host, region.name, region.addr, localnode.New(), objectStore, metaStore, secretProvider, grpcDialOptions...).Run(ctx)
+			return nodeagent.New(region.host, region.name, region.addr, localnode.New(), objectStore, metaStore, secretsClient, grpcDialOptions...).Run(ctx)
 		})
 	}
 	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
@@ -293,4 +318,29 @@ func buildSecretsProvider(ctx context.Context, cfg Config) (secrets.Provider, er
 	default:
 		return nil, fmt.Errorf("unsupported secrets backend %q", cfg.SecretsBackend)
 	}
+}
+
+func composeControlPlaneHandler(apiHandler http.Handler, secretsProxy http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle(secrets.ProxyPath, secretsProxy)
+	mux.Handle("/", apiHandler)
+	return mux
+}
+
+func controlPlaneBaseURL(apiAddr string) string {
+	if strings.HasPrefix(apiAddr, "http://") || strings.HasPrefix(apiAddr, "https://") {
+		return strings.TrimRight(apiAddr, "/")
+	}
+	if strings.HasPrefix(apiAddr, ":") {
+		return "http://127.0.0.1" + apiAddr
+	}
+	host, port, err := net.SplitHostPort(apiAddr)
+	if err == nil {
+		switch host {
+		case "", "0.0.0.0", "::":
+			host = "127.0.0.1"
+		}
+		return "http://" + net.JoinHostPort(host, port)
+	}
+	return "http://" + strings.TrimRight(apiAddr, "/")
 }
