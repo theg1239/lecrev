@@ -30,6 +30,19 @@ type Service struct {
 	now     func() time.Time
 }
 
+const (
+	defaultRuntime       = "node22"
+	defaultMemoryMB      = 128
+	defaultTimeoutSec    = 30
+	defaultNetworkPolicy = domain.NetworkPolicyFull
+	minMemoryMB          = 64
+	maxMemoryMB          = 1024
+	maxTimeoutSec        = 300
+	maxRetries           = 5
+	maxEnvRefs           = 64
+	maxArtifactSizeBytes = 10 << 20
+)
+
 func New(store store.Store, objects artifact.Store) *Service {
 	return &Service{
 		store:   store,
@@ -136,24 +149,83 @@ func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, err
 	if req.ProjectID == "" {
 		return domain.DeployRequest{}, fmt.Errorf("projectId is required")
 	}
+	if strings.TrimSpace(req.Name) == "" {
+		return domain.DeployRequest{}, fmt.Errorf("name is required")
+	}
+	if strings.TrimSpace(req.Entrypoint) == "" {
+		return domain.DeployRequest{}, fmt.Errorf("entrypoint is required")
+	}
 	if req.Runtime == "" {
-		req.Runtime = "node22"
+		req.Runtime = defaultRuntime
 	}
-	if req.TimeoutSec <= 0 {
-		req.TimeoutSec = 30
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = defaultTimeoutSec
+	} else if req.TimeoutSec < 0 {
+		return domain.DeployRequest{}, fmt.Errorf("timeoutSec must be positive")
 	}
-	if req.MemoryMB <= 0 {
-		req.MemoryMB = 128
+	if req.MemoryMB == 0 {
+		req.MemoryMB = defaultMemoryMB
+	} else if req.MemoryMB < 0 {
+		return domain.DeployRequest{}, fmt.Errorf("memoryMb must be positive")
+	}
+	if req.NetworkPolicy == "" {
+		req.NetworkPolicy = defaultNetworkPolicy
 	}
 	if req.MaxRetries < 0 {
-		req.MaxRetries = 0
+		return domain.DeployRequest{}, fmt.Errorf("maxRetries must be zero or greater")
 	}
 	normalizedRegions, err := regions.NormalizeExecutionRegions(req.Regions)
 	if err != nil {
 		return domain.DeployRequest{}, err
 	}
 	req.Regions = normalizedRegions
+	if err := validateDeployRequest(req); err != nil {
+		return domain.DeployRequest{}, err
+	}
 	return req, nil
+}
+
+func validateDeployRequest(req domain.DeployRequest) error {
+	if req.Runtime != defaultRuntime {
+		return fmt.Errorf("unsupported runtime %q: only %s is supported", req.Runtime, defaultRuntime)
+	}
+	if req.MemoryMB < minMemoryMB || req.MemoryMB > maxMemoryMB {
+		return fmt.Errorf("memoryMb must be between %d and %d", minMemoryMB, maxMemoryMB)
+	}
+	if req.TimeoutSec < 1 || req.TimeoutSec > maxTimeoutSec {
+		return fmt.Errorf("timeoutSec must be between 1 and %d", maxTimeoutSec)
+	}
+	if req.MaxRetries > maxRetries {
+		return fmt.Errorf("maxRetries must be between 0 and %d", maxRetries)
+	}
+	if len(req.EnvRefs) > maxEnvRefs {
+		return fmt.Errorf("envRefs cannot exceed %d entries", maxEnvRefs)
+	}
+	for _, ref := range req.EnvRefs {
+		if strings.TrimSpace(ref) == "" {
+			return fmt.Errorf("envRefs cannot contain empty values")
+		}
+	}
+	switch req.NetworkPolicy {
+	case domain.NetworkPolicyNone, domain.NetworkPolicyFull:
+	case domain.NetworkPolicyAllowlist:
+		return fmt.Errorf("network policy %q is not yet supported", req.NetworkPolicy)
+	default:
+		return fmt.Errorf("unsupported network policy %q", req.NetworkPolicy)
+	}
+	switch req.Source.Type {
+	case domain.SourceTypeBundle:
+		if req.Source.BundleBase64 == "" && len(req.Source.InlineFiles) == 0 {
+			return fmt.Errorf("bundle source requires bundleBase64 or inlineFiles")
+		}
+	case domain.SourceTypeGit:
+		if strings.TrimSpace(req.Source.GitURL) == "" {
+			return fmt.Errorf("gitUrl is required for git source")
+		}
+	default:
+		return fmt.Errorf("unsupported source type %q", req.Source.Type)
+	}
+	return nil
 }
 
 func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest) (*domain.FunctionVersion, *domain.BuildJob, error) {
@@ -233,6 +305,9 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	bundle, startup, err := s.prepareBundle(ctx, req)
 	if err != nil {
 		return s.markBuildFailed(ctx, version, buildJob, err)
+	}
+	if len(bundle) > maxArtifactSizeBytes {
+		return s.markBuildFailed(ctx, version, buildJob, fmt.Errorf("artifact size %d exceeds limit of %d bytes", len(bundle), maxArtifactSizeBytes))
 	}
 
 	sum := sha256.Sum256(bundle)

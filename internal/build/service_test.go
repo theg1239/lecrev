@@ -2,11 +2,14 @@ package build
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	mrand "math/rand"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +68,104 @@ func TestCreateFunctionVersionRejectsUnsupportedRegion(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected unsupported region error")
+	}
+}
+
+func TestCreateFunctionVersionRejectsInvalidAdmissionRequests(t *testing.T) {
+	t.Parallel()
+
+	svc := New(memstore.New(), artifact.NewMemoryStore())
+	base := domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "echo",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	}
+
+	tests := []struct {
+		name string
+		edit func(*domain.DeployRequest)
+		want string
+	}{
+		{
+			name: "unsupported runtime",
+			edit: func(req *domain.DeployRequest) { req.Runtime = "python3.12" },
+			want: "unsupported runtime",
+		},
+		{
+			name: "allowlist network policy rejected",
+			edit: func(req *domain.DeployRequest) { req.NetworkPolicy = domain.NetworkPolicyAllowlist },
+			want: "not yet supported",
+		},
+		{
+			name: "memory below minimum",
+			edit: func(req *domain.DeployRequest) { req.MemoryMB = 32 },
+			want: "memoryMb must be between",
+		},
+		{
+			name: "timeout above maximum",
+			edit: func(req *domain.DeployRequest) { req.TimeoutSec = maxTimeoutSec + 1 },
+			want: "timeoutSec must be between",
+		},
+		{
+			name: "too many retries",
+			edit: func(req *domain.DeployRequest) { req.MaxRetries = maxRetries + 1 },
+			want: "maxRetries must be between",
+		},
+		{
+			name: "empty env ref",
+			edit: func(req *domain.DeployRequest) { req.EnvRefs = []string{"DEMO_SECRET", ""} },
+			want: "envRefs cannot contain empty values",
+		},
+		{
+			name: "too many env refs",
+			edit: func(req *domain.DeployRequest) {
+				req.EnvRefs = make([]string, maxEnvRefs+1)
+				for i := range req.EnvRefs {
+					req.EnvRefs[i] = "SECRET_" + strings.Repeat("X", 1)
+				}
+			},
+			want: "envRefs cannot exceed",
+		},
+		{
+			name: "bundle source without payload",
+			edit: func(req *domain.DeployRequest) {
+				req.Source = domain.DeploySource{Type: domain.SourceTypeBundle}
+			},
+			want: "bundle source requires",
+		},
+		{
+			name: "git source without url",
+			edit: func(req *domain.DeployRequest) {
+				req.Source = domain.DeploySource{Type: domain.SourceTypeGit}
+			},
+			want: "gitUrl is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := base
+			req.Source = base.Source
+			req.Source.InlineFiles = map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			}
+			tc.edit(&req)
+
+			_, err := svc.CreateFunctionVersion(context.Background(), req)
+			if err == nil {
+				t.Fatalf("expected admission error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 
@@ -263,6 +364,64 @@ await fs.copyFile(path.join(root, 'src/index.mjs'), path.join(root, 'dist/index.
 	}
 }
 
+func TestAsyncBuildFailsWhenArtifactExceedsLimit(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	bus := NewMemoryBus(16)
+	svc := New(meta, objects)
+	svc.SetBuildBus(bus)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = svc.RunBuildConsumer(ctx, "ap-south-1", "builder-ap-south-1")
+	}()
+
+	version, err := svc.CreateFunctionVersion(ctx, domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "too-big",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		Regions:    []string{"ap-south-1"},
+		Source: domain.DeploySource{
+			Type:         domain.SourceTypeBundle,
+			BundleBase64: oversizeBundleBase64(t),
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue oversized build: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		latest, err := meta.GetFunctionVersion(context.Background(), version.ID)
+		if err != nil {
+			t.Fatalf("get function version: %v", err)
+		}
+		if latest.State == domain.FunctionStateFailed {
+			if latest.ArtifactDigest != "" {
+				t.Fatal("expected no artifact digest on failed oversized build")
+			}
+			job, err := meta.GetBuildJob(context.Background(), version.BuildJobID)
+			if err != nil {
+				t.Fatalf("get build job: %v", err)
+			}
+			if job.State != "failed" {
+				t.Fatalf("expected failed build job, got %s", job.State)
+			}
+			if !strings.Contains(job.Error, "exceeds limit") {
+				t.Fatalf("expected size-limit error, got %q", job.Error)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for oversized build to fail")
+}
+
 func createGitRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 
@@ -294,4 +453,21 @@ func runTestCommand(t *testing.T, dir, name string, args ...string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v failed: %v: %s", name, args, err, string(output))
 	}
+}
+
+func oversizeBundleBase64(t *testing.T) string {
+	t.Helper()
+
+	blob := make([]byte, maxArtifactSizeBytes+1024)
+	if _, err := mrand.New(mrand.NewSource(1)).Read(blob); err != nil {
+		t.Fatalf("generate oversized blob: %v", err)
+	}
+	bundle, err := artifact.BundleFromFiles(map[string][]byte{
+		"index.mjs": []byte("export async function handler() { return { ok: true }; }"),
+		"blob.bin":  blob,
+	})
+	if err != nil {
+		t.Fatalf("build oversized bundle: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(bundle)
 }

@@ -193,6 +193,16 @@ JSON
 
 The current git build path is npm-based: the build worker clones the repository, installs dependencies, runs `npm run build` when a build script is present, prunes dev dependencies, verifies the declared entrypoint exists, then packages the resulting workspace into the immutable execution artifact.
 
+Current deploy admission caps in the implementation:
+
+- runtime: `node22` only
+- network policy: `none` and `full` only (`allowlist` is reserved but rejected in v1)
+- memory: `64` to `1024` MB
+- timeout: `1` to `300` seconds
+- retries: `0` to `5`
+- env refs: up to `64`
+- archived execution artifact size: up to `10 MiB`
+
 Poll the build job or function version until it becomes ready:
 
 ```bash

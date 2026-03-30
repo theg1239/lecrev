@@ -175,6 +175,15 @@ On success:
 - Network policy is function-scoped (`none` and `full` in v1; `allowlist` later).
 - Hard limits enforced at admission and runtime (artifact size, memory, timeout, log size, concurrency, build minutes).
 
+Current v1 implementation caps:
+
+- runtime: `node22`
+- memory: `64` to `1024` MB
+- timeout: `1` to `300` seconds
+- retries: `0` to `5`
+- env refs: up to `64`
+- artifact size: `10 MiB`
+
 ## 13) Observability flow
 
 - Structured logs from agents/executions to Loki.

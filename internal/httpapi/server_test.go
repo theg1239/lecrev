@@ -290,6 +290,41 @@ func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
 	}
 }
 
+func TestCreateFunctionRejectsInvalidAdmissionRequest(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	builder := build.New(meta, artifact.NewMemoryStore())
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+
+	handler := New(meta, builder, sched)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/demo/functions", bytes.NewBufferString(`{
+		"name":"echo",
+		"runtime":"python3.12",
+		"entrypoint":"index.py",
+		"networkPolicy":"allowlist",
+		"source":{"type":"bundle","inlineFiles":{"index.py":"def handler(event, context): return {'ok': True}"}}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "dev-root-key")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte("unsupported runtime")) {
+		t.Fatalf("expected runtime validation error, got %s", resp.Body.String())
+	}
+}
+
 func TestBuildJobInspectionAndInvokeBlockedUntilReady(t *testing.T) {
 	t.Parallel()
 
