@@ -55,6 +55,7 @@ type Config struct {
 	BootstrapAdminAPIKey string
 	EnableMTLS           bool
 	ExecutionDriver      string
+	ExecutionHostSlots   int
 
 	FirecrackerBinary      string
 	JailerBinary           string
@@ -143,6 +144,15 @@ func prepareConfig(cfg *Config) error {
 	if cfg.LoadEnv && cfg.ExecutionDriver == "" {
 		cfg.ExecutionDriver = strings.TrimSpace(os.Getenv("LECREV_EXECUTION_DRIVER"))
 	}
+	if cfg.LoadEnv && cfg.ExecutionHostSlots == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_EXECUTION_HOST_SLOTS")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_EXECUTION_HOST_SLOTS: %w", err)
+			}
+			cfg.ExecutionHostSlots = value
+		}
+	}
 	if cfg.LoadEnv && cfg.FirecrackerBinary == "" {
 		cfg.FirecrackerBinary = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_BINARY"))
 	}
@@ -217,6 +227,9 @@ func prepareConfig(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.ExecutionDriver) == "" {
 		cfg.ExecutionDriver = "local-node"
+	}
+	if cfg.ExecutionHostSlots <= 0 {
+		cfg.ExecutionHostSlots = 1
 	}
 	if cfg.LoadEnv {
 		if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {
@@ -308,6 +321,7 @@ func runNetworked(ctx context.Context, cfg Config) error {
 		dispatchers = append(dispatchers, svc)
 	}
 	schedulerService := scheduler.New(metaStore, dispatchers)
+	builder.SetWarmPreparer(schedulerService)
 	for _, region := range localRegions {
 		region.svc.SetRetryer(schedulerService)
 	}
@@ -351,7 +365,9 @@ func runNetworked(ctx context.Context, cfg Config) error {
 			if err != nil {
 				return err
 			}
-			return nodeagent.New(region.host, region.name, region.addr, driver, objectStore, metaStore, secretsClient, grpcDialOptions...).Run(ctx)
+			return nodeagent.NewWithConfig(nodeagent.Config{
+				MaxConcurrentAssignments: cfg.ExecutionHostSlots,
+			}, region.host, region.name, region.addr, driver, objectStore, metaStore, secretsClient, grpcDialOptions...).Run(ctx)
 		})
 	}
 	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })

@@ -76,6 +76,55 @@ func (AssignmentState) EnumDescriptor() ([]byte, []int) {
 	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
+type SnapshotKind int32
+
+const (
+	SnapshotKind_SNAPSHOT_KIND_UNSPECIFIED SnapshotKind = 0
+	SnapshotKind_SNAPSHOT_KIND_BLANK       SnapshotKind = 1
+	SnapshotKind_SNAPSHOT_KIND_FUNCTION    SnapshotKind = 2
+)
+
+// Enum value maps for SnapshotKind.
+var (
+	SnapshotKind_name = map[int32]string{
+		0: "SNAPSHOT_KIND_UNSPECIFIED",
+		1: "SNAPSHOT_KIND_BLANK",
+		2: "SNAPSHOT_KIND_FUNCTION",
+	}
+	SnapshotKind_value = map[string]int32{
+		"SNAPSHOT_KIND_UNSPECIFIED": 0,
+		"SNAPSHOT_KIND_BLANK":       1,
+		"SNAPSHOT_KIND_FUNCTION":    2,
+	}
+)
+
+func (x SnapshotKind) Enum() *SnapshotKind {
+	p := new(SnapshotKind)
+	*p = x
+	return p
+}
+
+func (x SnapshotKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SnapshotKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_lecrev_region_v1_control_proto_enumTypes[1].Descriptor()
+}
+
+func (SnapshotKind) Type() protoreflect.EnumType {
+	return &file_lecrev_region_v1_control_proto_enumTypes[1]
+}
+
+func (x SnapshotKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SnapshotKind.Descriptor instead.
+func (SnapshotKind) EnumDescriptor() ([]byte, []int) {
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{1}
+}
+
 type WarmPoolMetric struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	FunctionVersionId string                 `protobuf:"bytes,1,opt,name=function_version_id,json=functionVersionId,proto3" json:"function_version_id,omitempty"`
@@ -646,6 +695,66 @@ func (x *ExecutionAssignment) GetTimeoutSec() int32 {
 	return 0
 }
 
+type PrepareSnapshot struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	HostId            string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	SnapshotKind      SnapshotKind           `protobuf:"varint,2,opt,name=snapshot_kind,json=snapshotKind,proto3,enum=lecrev.region.v1.SnapshotKind" json:"snapshot_kind,omitempty"`
+	FunctionVersionId string                 `protobuf:"bytes,3,opt,name=function_version_id,json=functionVersionId,proto3" json:"function_version_id,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PrepareSnapshot) Reset() {
+	*x = PrepareSnapshot{}
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareSnapshot) ProtoMessage() {}
+
+func (x *PrepareSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareSnapshot.ProtoReflect.Descriptor instead.
+func (*PrepareSnapshot) Descriptor() ([]byte, []int) {
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PrepareSnapshot) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *PrepareSnapshot) GetSnapshotKind() SnapshotKind {
+	if x != nil {
+		return x.SnapshotKind
+	}
+	return SnapshotKind_SNAPSHOT_KIND_UNSPECIFIED
+}
+
+func (x *PrepareSnapshot) GetFunctionVersionId() string {
+	if x != nil {
+		return x.FunctionVersionId
+	}
+	return ""
+}
+
 type DrainHost struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HostId        string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
@@ -656,7 +765,7 @@ type DrainHost struct {
 
 func (x *DrainHost) Reset() {
 	*x = DrainHost{}
-	mi := &file_lecrev_region_v1_control_proto_msgTypes[7]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -668,7 +777,7 @@ func (x *DrainHost) String() string {
 func (*DrainHost) ProtoMessage() {}
 
 func (x *DrainHost) ProtoReflect() protoreflect.Message {
-	mi := &file_lecrev_region_v1_control_proto_msgTypes[7]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -681,7 +790,7 @@ func (x *DrainHost) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainHost.ProtoReflect.Descriptor instead.
 func (*DrainHost) Descriptor() ([]byte, []int) {
-	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{7}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DrainHost) GetHostId() string {
@@ -709,7 +818,7 @@ type TerminateVm struct {
 
 func (x *TerminateVm) Reset() {
 	*x = TerminateVm{}
-	mi := &file_lecrev_region_v1_control_proto_msgTypes[8]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -721,7 +830,7 @@ func (x *TerminateVm) String() string {
 func (*TerminateVm) ProtoMessage() {}
 
 func (x *TerminateVm) ProtoReflect() protoreflect.Message {
-	mi := &file_lecrev_region_v1_control_proto_msgTypes[8]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -734,7 +843,7 @@ func (x *TerminateVm) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminateVm.ProtoReflect.Descriptor instead.
 func (*TerminateVm) Descriptor() ([]byte, []int) {
-	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{8}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TerminateVm) GetHostId() string {
@@ -766,6 +875,7 @@ type CoordinatorMessage struct {
 	//	*CoordinatorMessage_Assignment
 	//	*CoordinatorMessage_Drain
 	//	*CoordinatorMessage_Terminate
+	//	*CoordinatorMessage_Prepare
 	Body          isCoordinatorMessage_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -773,7 +883,7 @@ type CoordinatorMessage struct {
 
 func (x *CoordinatorMessage) Reset() {
 	*x = CoordinatorMessage{}
-	mi := &file_lecrev_region_v1_control_proto_msgTypes[9]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -785,7 +895,7 @@ func (x *CoordinatorMessage) String() string {
 func (*CoordinatorMessage) ProtoMessage() {}
 
 func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_lecrev_region_v1_control_proto_msgTypes[9]
+	mi := &file_lecrev_region_v1_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -798,7 +908,7 @@ func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CoordinatorMessage.ProtoReflect.Descriptor instead.
 func (*CoordinatorMessage) Descriptor() ([]byte, []int) {
-	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{9}
+	return file_lecrev_region_v1_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CoordinatorMessage) GetBody() isCoordinatorMessage_Body {
@@ -844,6 +954,15 @@ func (x *CoordinatorMessage) GetTerminate() *TerminateVm {
 	return nil
 }
 
+func (x *CoordinatorMessage) GetPrepare() *PrepareSnapshot {
+	if x != nil {
+		if x, ok := x.Body.(*CoordinatorMessage_Prepare); ok {
+			return x.Prepare
+		}
+	}
+	return nil
+}
+
 type isCoordinatorMessage_Body interface {
 	isCoordinatorMessage_Body()
 }
@@ -864,6 +983,10 @@ type CoordinatorMessage_Terminate struct {
 	Terminate *TerminateVm `protobuf:"bytes,4,opt,name=terminate,proto3,oneof"`
 }
 
+type CoordinatorMessage_Prepare struct {
+	Prepare *PrepareSnapshot `protobuf:"bytes,5,opt,name=prepare,proto3,oneof"`
+}
+
 func (*CoordinatorMessage_Registered) isCoordinatorMessage_Body() {}
 
 func (*CoordinatorMessage_Assignment) isCoordinatorMessage_Body() {}
@@ -872,9 +995,100 @@ func (*CoordinatorMessage_Drain) isCoordinatorMessage_Body() {}
 
 func (*CoordinatorMessage_Terminate) isCoordinatorMessage_Body() {}
 
+func (*CoordinatorMessage_Prepare) isCoordinatorMessage_Body() {}
+
 var File_lecrev_region_v1_control_proto protoreflect.FileDescriptor
 
-const file_lecrev_region_v1_control_proto_rawDesc = "\n\x1elecrev/region/v1/control.proto\x12\x10lecrev.region.v1\"^\n\x0eWarmPoolMetric\x12.\n\x13function_version_id\x18\x01 \x01(\tR\x11functionVersionId\x12\x1c\n\tavailable\x18\x02 \x01(\x05R\tavailable\"\xe6\x01\n\fRegisterHost\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06region\x18\x02 \x01(\tR\x06region\x12\x16\n\x06driver\x18\x03 \x01(\tR\x06driver\x12'\n\x0favailable_slots\x18\x04 \x01(\x05R\x0eavailableSlots\x12\x1d\n\nblank_warm\x18\x05 \x01(\x05R\tblankWarm\x12E\n\rfunction_warm\x18\x06 \x03(\v2 .lecrev.region.v1.WarmPoolMetricR\ffunctionWarm\"\xcf\x01\n\rHostHeartbeat\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06region\x18\x02 \x01(\tR\x06region\x12'\n\x0favailable_slots\x18\x03 \x01(\x05R\x0eavailableSlots\x12\x1d\n\nblank_warm\x18\x04 \x01(\x05R\tblankWarm\x12E\n\rfunction_warm\x18\x05 \x03(\v2 .lecrev.region.v1.WarmPoolMetricR\ffunctionWarm\"\xa9\x02\n\x10AssignmentUpdate\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06region\x18\x02 \x01(\tR\x06region\x12\x1d\n\nattempt_id\x18\x03 \x01(\tR\tattemptId\x12\x15\n\x06job_id\x18\x04 \x01(\tR\x05jobId\x127\n\x05state\x18\x05 \x01(\x0e2!.lecrev.region.v1.AssignmentStateR\x05state\x12\x12\n\x04logs\x18\x06 \x01(\tR\x04logs\x12\x1f\n\voutput_json\x18\a \x01(\fR\noutputJson\x12#\n\rerror_message\x18\b \x01(\tR\ferrorMessage\x12\x1b\n\texit_code\x18\t \x01(\x05R\bexitCode\"\xe8\x01\n\fAgentMessage\x12<\n\bregister\x18\x01 \x01(\v2\x1e.lecrev.region.v1.RegisterHostH\x00R\bregister\x12?\n\theartbeat\x18\x02 \x01(\v2\x1f.lecrev.region.v1.HostHeartbeatH\x00R\theartbeat\x12Q\n\x11assignment_update\x18\x03 \x01(\v2\".lecrev.region.v1.AssignmentUpdateH\x00R\x10assignmentUpdateB\x06\n\x04body\"%\n\nRegistered\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\"\xca\x02\n\x13ExecutionAssignment\x12\x1d\n\nattempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n\x06job_id\x18\x02 \x01(\tR\x05jobId\x12.\n\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\x12'\n\x0fartifact_digest\x18\x04 \x01(\tR\x0eartifactDigest\x12\x1e\n\nentrypoint\x18\x05 \x01(\tR\nentrypoint\x12!\n\fpayload_json\x18\x06 \x01(\fR\vpayloadJson\x12\x19\n\benv_refs\x18\a \x03(\tR\aenvRefs\x12%\n\x0enetwork_policy\x18\b \x01(\tR\rnetworkPolicy\x12\x1f\n\vtimeout_sec\x18\t \x01(\x05R\ntimeoutSec\"<\n\tDrainHost\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"]\n\vTerminateVm\x12\x17\n\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1d\n\nattempt_id\x18\x02 \x01(\tR\tattemptId\x12\x16\n\x06reason\x18\x03 \x01(\tR\x06reason\"\x99\x02\n\x12CoordinatorMessage\x12>\n\nregistered\x18\x01 \x01(\v2\x1c.lecrev.region.v1.RegisteredH\x00R\nregistered\x12G\n\nassignment\x18\x02 \x01(\v2%.lecrev.region.v1.ExecutionAssignmentH\x00R\nassignment\x123\n\x05drain\x18\x03 \x01(\v2\x1b.lecrev.region.v1.DrainHostH\x00R\x05drain\x12=\n\tterminate\x18\x04 \x01(\v2\x1d.lecrev.region.v1.TerminateVmH\x00R\tterminateB\x06\n\x04body*\xad\x01\n\x0fAssignmentState\x12 \n\x1cASSIGNMENT_STATE_UNSPECIFIED\x10\x00\x12\x1d\n\x19ASSIGNMENT_STATE_STARTING\x10\x01\x12\x1c\n\x18ASSIGNMENT_STATE_RUNNING\x10\x02\x12\x1e\n\x1aASSIGNMENT_STATE_SUCCEEDED\x10\x03\x12\x1b\n\x17ASSIGNMENT_STATE_FAILED\x10\x042b\n\vCoordinator\x12S\n\aControl\x12\x1e.lecrev.region.v1.AgentMessage\x1a$.lecrev.region.v1.CoordinatorMessage(\x010\x01B6Z4github.com/theg1239/lecrev/lecrev/region/v1;regionv1b\x06proto3"
+const file_lecrev_region_v1_control_proto_rawDesc = "" +
+	"\n" +
+	"\x1elecrev/region/v1/control.proto\x12\x10lecrev.region.v1\"^\n" +
+	"\x0eWarmPoolMetric\x12.\n" +
+	"\x13function_version_id\x18\x01 \x01(\tR\x11functionVersionId\x12\x1c\n" +
+	"\tavailable\x18\x02 \x01(\x05R\tavailable\"\xe6\x01\n" +
+	"\fRegisterHost\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12\x16\n" +
+	"\x06driver\x18\x03 \x01(\tR\x06driver\x12'\n" +
+	"\x0favailable_slots\x18\x04 \x01(\x05R\x0eavailableSlots\x12\x1d\n" +
+	"\n" +
+	"blank_warm\x18\x05 \x01(\x05R\tblankWarm\x12E\n" +
+	"\rfunction_warm\x18\x06 \x03(\v2 .lecrev.region.v1.WarmPoolMetricR\ffunctionWarm\"\xcf\x01\n" +
+	"\rHostHeartbeat\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12'\n" +
+	"\x0favailable_slots\x18\x03 \x01(\x05R\x0eavailableSlots\x12\x1d\n" +
+	"\n" +
+	"blank_warm\x18\x04 \x01(\x05R\tblankWarm\x12E\n" +
+	"\rfunction_warm\x18\x05 \x03(\v2 .lecrev.region.v1.WarmPoolMetricR\ffunctionWarm\"\xa9\x02\n" +
+	"\x10AssignmentUpdate\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x03 \x01(\tR\tattemptId\x12\x15\n" +
+	"\x06job_id\x18\x04 \x01(\tR\x05jobId\x127\n" +
+	"\x05state\x18\x05 \x01(\x0e2!.lecrev.region.v1.AssignmentStateR\x05state\x12\x12\n" +
+	"\x04logs\x18\x06 \x01(\tR\x04logs\x12\x1f\n" +
+	"\voutput_json\x18\a \x01(\fR\n" +
+	"outputJson\x12#\n" +
+	"\rerror_message\x18\b \x01(\tR\ferrorMessage\x12\x1b\n" +
+	"\texit_code\x18\t \x01(\x05R\bexitCode\"\xe8\x01\n" +
+	"\fAgentMessage\x12<\n" +
+	"\bregister\x18\x01 \x01(\v2\x1e.lecrev.region.v1.RegisterHostH\x00R\bregister\x12?\n" +
+	"\theartbeat\x18\x02 \x01(\v2\x1f.lecrev.region.v1.HostHeartbeatH\x00R\theartbeat\x12Q\n" +
+	"\x11assignment_update\x18\x03 \x01(\v2\".lecrev.region.v1.AssignmentUpdateH\x00R\x10assignmentUpdateB\x06\n" +
+	"\x04body\"%\n" +
+	"\n" +
+	"Registered\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\"\xca\x02\n" +
+	"\x13ExecutionAssignment\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n" +
+	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12.\n" +
+	"\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\x12'\n" +
+	"\x0fartifact_digest\x18\x04 \x01(\tR\x0eartifactDigest\x12\x1e\n" +
+	"\n" +
+	"entrypoint\x18\x05 \x01(\tR\n" +
+	"entrypoint\x12!\n" +
+	"\fpayload_json\x18\x06 \x01(\fR\vpayloadJson\x12\x19\n" +
+	"\benv_refs\x18\a \x03(\tR\aenvRefs\x12%\n" +
+	"\x0enetwork_policy\x18\b \x01(\tR\rnetworkPolicy\x12\x1f\n" +
+	"\vtimeout_sec\x18\t \x01(\x05R\n" +
+	"timeoutSec\"\x9f\x01\n" +
+	"\x0fPrepareSnapshot\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12C\n" +
+	"\rsnapshot_kind\x18\x02 \x01(\x0e2\x1e.lecrev.region.v1.SnapshotKindR\fsnapshotKind\x12.\n" +
+	"\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\"<\n" +
+	"\tDrainHost\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"]\n" +
+	"\vTerminateVm\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x02 \x01(\tR\tattemptId\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xd8\x02\n" +
+	"\x12CoordinatorMessage\x12>\n" +
+	"\n" +
+	"registered\x18\x01 \x01(\v2\x1c.lecrev.region.v1.RegisteredH\x00R\n" +
+	"registered\x12G\n" +
+	"\n" +
+	"assignment\x18\x02 \x01(\v2%.lecrev.region.v1.ExecutionAssignmentH\x00R\n" +
+	"assignment\x123\n" +
+	"\x05drain\x18\x03 \x01(\v2\x1b.lecrev.region.v1.DrainHostH\x00R\x05drain\x12=\n" +
+	"\tterminate\x18\x04 \x01(\v2\x1d.lecrev.region.v1.TerminateVmH\x00R\tterminate\x12=\n" +
+	"\aprepare\x18\x05 \x01(\v2!.lecrev.region.v1.PrepareSnapshotH\x00R\aprepareB\x06\n" +
+	"\x04body*\xad\x01\n" +
+	"\x0fAssignmentState\x12 \n" +
+	"\x1cASSIGNMENT_STATE_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19ASSIGNMENT_STATE_STARTING\x10\x01\x12\x1c\n" +
+	"\x18ASSIGNMENT_STATE_RUNNING\x10\x02\x12\x1e\n" +
+	"\x1aASSIGNMENT_STATE_SUCCEEDED\x10\x03\x12\x1b\n" +
+	"\x17ASSIGNMENT_STATE_FAILED\x10\x04*b\n" +
+	"\fSnapshotKind\x12\x1d\n" +
+	"\x19SNAPSHOT_KIND_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13SNAPSHOT_KIND_BLANK\x10\x01\x12\x1a\n" +
+	"\x16SNAPSHOT_KIND_FUNCTION\x10\x022b\n" +
+	"\vCoordinator\x12S\n" +
+	"\aControl\x12\x1e.lecrev.region.v1.AgentMessage\x1a$.lecrev.region.v1.CoordinatorMessage(\x010\x01B6Z4github.com/theg1239/lecrev/lecrev/region/v1;regionv1b\x06proto3"
 
 var (
 	file_lecrev_region_v1_control_proto_rawDescOnce sync.Once
@@ -888,39 +1102,43 @@ func file_lecrev_region_v1_control_proto_rawDescGZIP() []byte {
 	return file_lecrev_region_v1_control_proto_rawDescData
 }
 
-var file_lecrev_region_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_lecrev_region_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_lecrev_region_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_lecrev_region_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_lecrev_region_v1_control_proto_goTypes = []any{
 	(AssignmentState)(0),        // 0: lecrev.region.v1.AssignmentState
-	(*WarmPoolMetric)(nil),      // 1: lecrev.region.v1.WarmPoolMetric
-	(*RegisterHost)(nil),        // 2: lecrev.region.v1.RegisterHost
-	(*HostHeartbeat)(nil),       // 3: lecrev.region.v1.HostHeartbeat
-	(*AssignmentUpdate)(nil),    // 4: lecrev.region.v1.AssignmentUpdate
-	(*AgentMessage)(nil),        // 5: lecrev.region.v1.AgentMessage
-	(*Registered)(nil),          // 6: lecrev.region.v1.Registered
-	(*ExecutionAssignment)(nil), // 7: lecrev.region.v1.ExecutionAssignment
-	(*DrainHost)(nil),           // 8: lecrev.region.v1.DrainHost
-	(*TerminateVm)(nil),         // 9: lecrev.region.v1.TerminateVm
-	(*CoordinatorMessage)(nil),  // 10: lecrev.region.v1.CoordinatorMessage
+	(SnapshotKind)(0),           // 1: lecrev.region.v1.SnapshotKind
+	(*WarmPoolMetric)(nil),      // 2: lecrev.region.v1.WarmPoolMetric
+	(*RegisterHost)(nil),        // 3: lecrev.region.v1.RegisterHost
+	(*HostHeartbeat)(nil),       // 4: lecrev.region.v1.HostHeartbeat
+	(*AssignmentUpdate)(nil),    // 5: lecrev.region.v1.AssignmentUpdate
+	(*AgentMessage)(nil),        // 6: lecrev.region.v1.AgentMessage
+	(*Registered)(nil),          // 7: lecrev.region.v1.Registered
+	(*ExecutionAssignment)(nil), // 8: lecrev.region.v1.ExecutionAssignment
+	(*PrepareSnapshot)(nil),     // 9: lecrev.region.v1.PrepareSnapshot
+	(*DrainHost)(nil),           // 10: lecrev.region.v1.DrainHost
+	(*TerminateVm)(nil),         // 11: lecrev.region.v1.TerminateVm
+	(*CoordinatorMessage)(nil),  // 12: lecrev.region.v1.CoordinatorMessage
 }
 var file_lecrev_region_v1_control_proto_depIdxs = []int32{
-	1,  // 0: lecrev.region.v1.RegisterHost.function_warm:type_name -> lecrev.region.v1.WarmPoolMetric
-	1,  // 1: lecrev.region.v1.HostHeartbeat.function_warm:type_name -> lecrev.region.v1.WarmPoolMetric
+	2,  // 0: lecrev.region.v1.RegisterHost.function_warm:type_name -> lecrev.region.v1.WarmPoolMetric
+	2,  // 1: lecrev.region.v1.HostHeartbeat.function_warm:type_name -> lecrev.region.v1.WarmPoolMetric
 	0,  // 2: lecrev.region.v1.AssignmentUpdate.state:type_name -> lecrev.region.v1.AssignmentState
-	2,  // 3: lecrev.region.v1.AgentMessage.register:type_name -> lecrev.region.v1.RegisterHost
-	3,  // 4: lecrev.region.v1.AgentMessage.heartbeat:type_name -> lecrev.region.v1.HostHeartbeat
-	4,  // 5: lecrev.region.v1.AgentMessage.assignment_update:type_name -> lecrev.region.v1.AssignmentUpdate
-	6,  // 6: lecrev.region.v1.CoordinatorMessage.registered:type_name -> lecrev.region.v1.Registered
-	7,  // 7: lecrev.region.v1.CoordinatorMessage.assignment:type_name -> lecrev.region.v1.ExecutionAssignment
-	8,  // 8: lecrev.region.v1.CoordinatorMessage.drain:type_name -> lecrev.region.v1.DrainHost
-	9,  // 9: lecrev.region.v1.CoordinatorMessage.terminate:type_name -> lecrev.region.v1.TerminateVm
-	5,  // 10: lecrev.region.v1.Coordinator.Control:input_type -> lecrev.region.v1.AgentMessage
-	10, // 11: lecrev.region.v1.Coordinator.Control:output_type -> lecrev.region.v1.CoordinatorMessage
-	11, // [11:12] is the sub-list for method output_type
-	10, // [10:11] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	3,  // 3: lecrev.region.v1.AgentMessage.register:type_name -> lecrev.region.v1.RegisterHost
+	4,  // 4: lecrev.region.v1.AgentMessage.heartbeat:type_name -> lecrev.region.v1.HostHeartbeat
+	5,  // 5: lecrev.region.v1.AgentMessage.assignment_update:type_name -> lecrev.region.v1.AssignmentUpdate
+	1,  // 6: lecrev.region.v1.PrepareSnapshot.snapshot_kind:type_name -> lecrev.region.v1.SnapshotKind
+	7,  // 7: lecrev.region.v1.CoordinatorMessage.registered:type_name -> lecrev.region.v1.Registered
+	8,  // 8: lecrev.region.v1.CoordinatorMessage.assignment:type_name -> lecrev.region.v1.ExecutionAssignment
+	10, // 9: lecrev.region.v1.CoordinatorMessage.drain:type_name -> lecrev.region.v1.DrainHost
+	11, // 10: lecrev.region.v1.CoordinatorMessage.terminate:type_name -> lecrev.region.v1.TerminateVm
+	9,  // 11: lecrev.region.v1.CoordinatorMessage.prepare:type_name -> lecrev.region.v1.PrepareSnapshot
+	6,  // 12: lecrev.region.v1.Coordinator.Control:input_type -> lecrev.region.v1.AgentMessage
+	12, // 13: lecrev.region.v1.Coordinator.Control:output_type -> lecrev.region.v1.CoordinatorMessage
+	13, // [13:14] is the sub-list for method output_type
+	12, // [12:13] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_lecrev_region_v1_control_proto_init() }
@@ -933,19 +1151,20 @@ func file_lecrev_region_v1_control_proto_init() {
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_AssignmentUpdate)(nil),
 	}
-	file_lecrev_region_v1_control_proto_msgTypes[9].OneofWrappers = []any{
+	file_lecrev_region_v1_control_proto_msgTypes[10].OneofWrappers = []any{
 		(*CoordinatorMessage_Registered)(nil),
 		(*CoordinatorMessage_Assignment)(nil),
 		(*CoordinatorMessage_Drain)(nil),
 		(*CoordinatorMessage_Terminate)(nil),
+		(*CoordinatorMessage_Prepare)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lecrev_region_v1_control_proto_rawDesc), len(file_lecrev_region_v1_control_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   10,
+			NumEnums:      2,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

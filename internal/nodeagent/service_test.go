@@ -120,22 +120,54 @@ func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
 			FunctionWarm: map[string]int{},
 		},
 	}
-	svc, _ := newTestService(t, driver)
+	svc, _ := newConfiguredTestService(t, driver, Config{MaxConcurrentAssignments: 3})
 
 	if err := svc.prepareDriver(context.Background()); err != nil {
 		t.Fatalf("prepare driver: %v", err)
 	}
 
 	register := svc.RegistrationMessage()
-	if register.BlankWarm != 1 {
+	if register.AvailableSlots != 3 {
+		t.Fatalf("expected configured host slots 3, got %d", register.AvailableSlots)
+	}
+	if register.BlankWarm != 3 {
 		t.Fatalf("expected blank warm inventory from driver, got %d", register.BlankWarm)
 	}
 
 	svc.executeAssignment(context.Background(), testAssignment(), func(*regionv1.AssignmentUpdate) {}, func() {})
 
 	heartbeat := svc.heartbeatMessage()
-	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 1 {
+	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 3 {
 		t.Fatalf("expected prepared function warm inventory, got %+v", heartbeat.FunctionWarm)
+	}
+}
+
+func TestPrepareSnapshotUsesDriverWarmPreparation(t *testing.T) {
+	t.Parallel()
+
+	driver := &inventoryDriver{
+		result: &firecracker.ExecuteResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"ok":true}`),
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		},
+		inventory: firecracker.WarmInventory{
+			BlankWarm:    1,
+			FunctionWarm: map[string]int{},
+		},
+	}
+	svc, _ := newConfiguredTestService(t, driver, Config{MaxConcurrentAssignments: 2})
+
+	svc.prepareSnapshot(context.Background(), &regionv1.PrepareSnapshot{
+		HostId:            "host-ap-south-1-a",
+		SnapshotKind:      regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION,
+		FunctionVersionId: "fn-1",
+	}, func() {})
+
+	heartbeat := svc.heartbeatMessage()
+	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 2 {
+		t.Fatalf("expected function warm capacity 2 after prepare, got %+v", heartbeat.FunctionWarm)
 	}
 }
 
@@ -176,6 +208,26 @@ func (d *inventoryDriver) WarmInventory() firecracker.WarmInventory {
 	}
 }
 
+func (d *inventoryDriver) WarmInventoryForSlots(freeSlots int) firecracker.WarmInventory {
+	base := d.WarmInventory()
+	if freeSlots <= 0 {
+		base.BlankWarm = 0
+		for functionID := range base.FunctionWarm {
+			base.FunctionWarm[functionID] = 0
+		}
+		return base
+	}
+	if base.BlankWarm > 0 {
+		base.BlankWarm = freeSlots
+	}
+	for functionID, count := range base.FunctionWarm {
+		if count > 0 {
+			base.FunctionWarm[functionID] = freeSlots
+		}
+	}
+	return base
+}
+
 func (d *inventoryDriver) EnsureBlankWarm(context.Context) error {
 	d.inventory.BlankWarm = 1
 	return nil
@@ -190,6 +242,10 @@ func (d *inventoryDriver) PrepareFunctionWarm(_ context.Context, req firecracker
 }
 
 func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact.Store) {
+	return newConfiguredTestService(t, driver, Config{})
+}
+
+func newConfiguredTestService(t *testing.T, driver firecracker.Driver, cfg Config) (*Service, artifact.Store) {
 	t.Helper()
 
 	meta := memstore.New()
@@ -233,7 +289,7 @@ func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact
 	}); err != nil {
 		t.Fatalf("put function version: %v", err)
 	}
-	svc := New("host-ap-south-1-a", "ap-south-1", "", driver, objects, meta, stubResolver{})
+	svc := NewWithConfig(cfg, "host-ap-south-1-a", "ap-south-1", "", driver, objects, meta, stubResolver{})
 	return svc, objects
 }
 

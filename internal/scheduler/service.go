@@ -23,6 +23,10 @@ type RegionDispatcher interface {
 	EnqueueExecution(ctx context.Context, assignment domain.Assignment) error
 }
 
+type WarmPreparer interface {
+	PrepareFunctionWarm(ctx context.Context, version *domain.FunctionVersion) error
+}
+
 type Service struct {
 	store                            store.Store
 	dispatchers                      map[string]RegionDispatcher
@@ -181,6 +185,31 @@ func (s *Service) RetryExecution(ctx context.Context, jobID string) (*domain.Exe
 	}
 	s.wake()
 	return job, nil
+}
+
+func (s *Service) PrepareFunctionVersion(ctx context.Context, version *domain.FunctionVersion) error {
+	if version == nil {
+		return fmt.Errorf("function version is required")
+	}
+	var errs []string
+	for _, region := range version.Regions {
+		dispatcher, ok := s.dispatchers[region]
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: missing dispatcher", region))
+			continue
+		}
+		preparer, ok := dispatcher.(WarmPreparer)
+		if !ok {
+			continue
+		}
+		if err := preparer.PrepareFunctionWarm(ctx, version); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", region, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("prepare function version %s: %s", version.ID, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func (s *Service) Run(ctx context.Context) error {

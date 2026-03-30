@@ -44,6 +44,10 @@ type InventoryProvider interface {
 	WarmInventory() WarmInventory
 }
 
+type SlotWarmInventoryProvider interface {
+	WarmInventoryForSlots(freeSlots int) WarmInventory
+}
+
 type BlankWarmEnsurer interface {
 	EnsureBlankWarm(ctx context.Context) error
 }

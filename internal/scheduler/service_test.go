@@ -15,7 +15,9 @@ type fakeDispatcher struct {
 	region      string
 	stats       domain.RegionStats
 	err         error
+	warmErr     error
 	assignments []domain.Assignment
+	warmups     []string
 }
 
 func (f *fakeDispatcher) Region() string            { return f.region }
@@ -25,6 +27,14 @@ func (f *fakeDispatcher) EnqueueExecution(_ context.Context, assignment domain.A
 		return f.err
 	}
 	f.assignments = append(f.assignments, assignment)
+	return nil
+}
+
+func (f *fakeDispatcher) PrepareFunctionWarm(_ context.Context, version *domain.FunctionVersion) error {
+	if f.warmErr != nil {
+		return f.warmErr
+	}
+	f.warmups = append(f.warmups, version.ID)
 	return nil
 }
 
@@ -284,6 +294,26 @@ func TestScheduleNextPrefersArtifactLocalRegion(t *testing.T) {
 	}
 }
 
+func TestPrepareFunctionVersionTargetsConfiguredRegions(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	version := seedFunctionVersion(t, store, "fn-warm", []string{"ap-south-1", "ap-southeast-1"})
+	first := &fakeDispatcher{region: "ap-south-1"}
+	second := &fakeDispatcher{region: "ap-southeast-1"}
+	svc := New(store, []RegionDispatcher{first, second})
+
+	if err := svc.PrepareFunctionVersion(context.Background(), version); err != nil {
+		t.Fatalf("prepare function version: %v", err)
+	}
+	if len(first.warmups) != 1 || first.warmups[0] != version.ID {
+		t.Fatalf("expected first region warm prep for %s, got %+v", version.ID, first.warmups)
+	}
+	if len(second.warmups) != 1 || second.warmups[0] != version.ID {
+		t.Fatalf("expected second region warm prep for %s, got %+v", version.ID, second.warmups)
+	}
+}
+
 func TestRecoverStaleSchedulingRequeuesJob(t *testing.T) {
 	t.Parallel()
 
@@ -429,11 +459,11 @@ func TestDispatchExecutionIdempotentRejectsDifferentPayload(t *testing.T) {
 	}
 }
 
-func seedFunctionVersion(t *testing.T, store *memstore.Store, versionID string, regions []string) {
+func seedFunctionVersion(t *testing.T, store *memstore.Store, versionID string, regions []string) *domain.FunctionVersion {
 	t.Helper()
 
 	now := time.Now().UTC()
-	if err := store.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+	version := &domain.FunctionVersion{
 		ID:             versionID,
 		ProjectID:      "demo",
 		Name:           "echo",
@@ -445,9 +475,11 @@ func seedFunctionVersion(t *testing.T, store *memstore.Store, versionID string, 
 		ArtifactDigest: "digest",
 		State:          domain.FunctionStateReady,
 		CreatedAt:      now,
-	}); err != nil {
+	}
+	if err := store.PutFunctionVersion(context.Background(), version); err != nil {
 		t.Fatalf("put function version: %v", err)
 	}
+	return version
 }
 
 func seedRegion(t *testing.T, store *memstore.Store, region *domain.Region) {

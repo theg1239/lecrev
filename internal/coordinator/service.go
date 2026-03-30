@@ -36,9 +36,11 @@ type hostSession struct {
 	host     domain.Host
 	sendCh   chan *regionv1.CoordinatorMessage
 	executor EmbeddedExecutor
+	preparer EmbeddedPreparer
 }
 
 type EmbeddedExecutor func(context.Context, *regionv1.ExecutionAssignment)
+type EmbeddedPreparer func(context.Context, *regionv1.PrepareSnapshot)
 
 type Retryer interface {
 	RetryExecution(ctx context.Context, jobID string) (*domain.ExecutionJob, error)
@@ -159,6 +161,43 @@ func (s *Service) DrainHost(ctx context.Context, hostID, reason string) error {
 	}
 }
 
+func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.FunctionVersion) error {
+	if version == nil {
+		return fmt.Errorf("function version is required")
+	}
+	hostID, session, alreadyWarm, err := s.pickWarmHost(version.ID)
+	if err != nil {
+		return err
+	}
+	if alreadyWarm {
+		return nil
+	}
+	msg := &regionv1.PrepareSnapshot{
+		HostId:            hostID,
+		SnapshotKind:      regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION,
+		FunctionVersionId: version.ID,
+	}
+	if session.preparer != nil {
+		go session.preparer(context.Background(), msg)
+		return nil
+	}
+	control := &regionv1.CoordinatorMessage{
+		Body: &regionv1.CoordinatorMessage_Prepare{
+			Prepare: msg,
+		},
+	}
+	select {
+	case session.sendCh <- control:
+		return nil
+	case <-ctx.Done():
+		s.restorePreparationReservation(hostID)
+		return ctx.Err()
+	default:
+		s.restorePreparationReservation(hostID)
+		return fmt.Errorf("host %s control channel full", hostID)
+	}
+}
+
 func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignment) error {
 	hostID, session, startMode, err := s.pickHost(assignment)
 	if err != nil {
@@ -273,14 +312,14 @@ func (s *Service) Control(stream regionv1.Coordinator_ControlServer) error {
 }
 
 func (s *Service) registerHost(msg *regionv1.RegisterHost, sendCh chan *regionv1.CoordinatorMessage) error {
-	return s.registerHostSession(context.Background(), msg, sendCh, nil)
+	return s.registerHostSession(context.Background(), msg, sendCh, nil, nil)
 }
 
-func (s *Service) RegisterEmbeddedHost(ctx context.Context, msg *regionv1.RegisterHost, executor EmbeddedExecutor) error {
-	return s.registerHostSession(ctx, msg, nil, executor)
+func (s *Service) RegisterEmbeddedHost(ctx context.Context, msg *regionv1.RegisterHost, executor EmbeddedExecutor, preparer EmbeddedPreparer) error {
+	return s.registerHostSession(ctx, msg, nil, executor, preparer)
 }
 
-func (s *Service) registerHostSession(ctx context.Context, msg *regionv1.RegisterHost, sendCh chan *regionv1.CoordinatorMessage, executor EmbeddedExecutor) error {
+func (s *Service) registerHostSession(ctx context.Context, msg *regionv1.RegisterHost, sendCh chan *regionv1.CoordinatorMessage, executor EmbeddedExecutor, preparer EmbeddedPreparer) error {
 	host := domain.Host{
 		ID:             msg.HostId,
 		Region:         msg.Region,
@@ -292,7 +331,7 @@ func (s *Service) registerHostSession(ctx context.Context, msg *regionv1.Registe
 		LastHeartbeat:  time.Now().UTC(),
 	}
 	s.mu.Lock()
-	s.hosts[host.ID] = &hostSession{host: host, sendCh: sendCh, executor: executor}
+	s.hosts[host.ID] = &hostSession{host: host, sendCh: sendCh, executor: executor, preparer: preparer}
 	s.mu.Unlock()
 	if err := s.store.PutHost(ctx, &host); err != nil {
 		return err
@@ -476,6 +515,38 @@ func (s *Service) pickHost(assignment domain.Assignment) (string, *hostSession, 
 	return chosen.id, chosen.session, startMode, nil
 }
 
+func (s *Service) pickWarmHost(functionVersionID string) (string, *hostSession, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	type candidate struct {
+		id      string
+		session *hostSession
+		score   int
+	}
+	candidates := make([]candidate, 0, len(s.hosts))
+	for id, session := range s.hosts {
+		if session.host.State != domain.HostStateActive || session.host.AvailableSlots <= 0 {
+			continue
+		}
+		if session.host.FunctionWarm[functionVersionID] > 0 {
+			return id, session, true, nil
+		}
+		score := session.host.BlankWarm*100 + session.host.AvailableSlots
+		candidates = append(candidates, candidate{id: id, session: session, score: score})
+	}
+	if len(candidates) == 0 {
+		return "", nil, false, fmt.Errorf("no active hosts available in region %s for function warm prep", s.region)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	chosen := candidates[0]
+	chosen.session.host.AvailableSlots--
+	host := chosen.session.host
+	_ = s.store.UpdateHost(context.Background(), &host)
+	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
+	_ = s.persistRegionLocked()
+	return chosen.id, chosen.session, false, nil
+}
+
 func (s *Service) releaseHostSlot(hostID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -500,6 +571,18 @@ func (s *Service) restoreHostReservation(hostID, functionVersionID string, start
 		case domain.StartModeBlankWarm:
 			session.host.BlankWarm++
 		}
+		host := session.host
+		_ = s.store.UpdateHost(context.Background(), &host)
+		_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
+		_ = s.persistRegionLocked()
+	}
+}
+
+func (s *Service) restorePreparationReservation(hostID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session, ok := s.hosts[hostID]; ok {
+		session.host.AvailableSlots++
 		host := session.host
 		_ = s.store.UpdateHost(context.Background(), &host)
 		_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))

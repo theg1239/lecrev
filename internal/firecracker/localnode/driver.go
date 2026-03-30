@@ -39,6 +39,26 @@ func (d *Driver) WarmInventory() firecracker.WarmInventory {
 	}
 }
 
+func (d *Driver) WarmInventoryForSlots(freeSlots int) firecracker.WarmInventory {
+	base := d.WarmInventory()
+	if freeSlots <= 0 {
+		base.BlankWarm = 0
+		for functionID := range base.FunctionWarm {
+			base.FunctionWarm[functionID] = 0
+		}
+		return base
+	}
+	if base.BlankWarm > 0 {
+		base.BlankWarm = freeSlots
+	}
+	for functionID, count := range base.FunctionWarm {
+		if count > 0 {
+			base.FunctionWarm[functionID] = freeSlots
+		}
+	}
+	return base
+}
+
 func (d *Driver) EnsureBlankWarm(context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

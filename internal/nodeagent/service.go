@@ -31,6 +31,7 @@ type Service struct {
 	dialOptions     []grpc.DialOption
 
 	mu             sync.Mutex
+	maxSlots       int
 	sendMu         sync.Mutex
 	availableSlots int
 	blankWarm      int
@@ -47,7 +48,23 @@ type EmbeddedCoordinator interface {
 	ApplyAssignmentUpdate(ctx context.Context, msg *regionv1.AssignmentUpdate) error
 }
 
+type Config struct {
+	MaxConcurrentAssignments int
+}
+
+func (c Config) withDefaults() Config {
+	if c.MaxConcurrentAssignments <= 0 {
+		c.MaxConcurrentAssignments = 1
+	}
+	return c
+}
+
 func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, store store.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
+	return NewWithConfig(Config{}, hostID, region, coordinatorAddr, driver, objects, store, secrets, dialOptions...)
+}
+
+func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, store store.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
+	cfg = cfg.withDefaults()
 	if len(dialOptions) == 0 {
 		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	}
@@ -65,7 +82,8 @@ func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, obje
 		store:           store,
 		secrets:         secrets,
 		dialOptions:     append([]grpc.DialOption(nil), dialOptions...),
-		availableSlots:  1,
+		maxSlots:        cfg.MaxConcurrentAssignments,
+		availableSlots:  cfg.MaxConcurrentAssignments,
 		blankWarm:       1,
 		functionWarm:    map[string]int{},
 	}
@@ -120,12 +138,16 @@ func (s *Service) Run(ctx context.Context) error {
 					},
 				})
 			})
+		case *regionv1.CoordinatorMessage_Prepare:
+			go s.prepareSnapshot(ctx, body.Prepare, func() {
+				_ = s.send(stream, &regionv1.AgentMessage{
+					Body: &regionv1.AgentMessage_Heartbeat{
+						Heartbeat: s.heartbeatMessage(),
+					},
+				})
+			})
 		case *regionv1.CoordinatorMessage_Drain:
-			s.mu.Lock()
-			s.availableSlots = 0
-			s.blankWarm = 0
-			s.functionWarm = map[string]int{}
-			s.mu.Unlock()
+			s.applyDrain()
 			_ = s.send(stream, &regionv1.AgentMessage{
 				Body: &regionv1.AgentMessage_Heartbeat{
 					Heartbeat: s.heartbeatMessage(),
@@ -185,6 +207,12 @@ func (s *Service) ExecuteEmbeddedAssignment(ctx context.Context, coordinator Emb
 	})
 }
 
+func (s *Service) PrepareEmbeddedSnapshot(ctx context.Context, coordinator EmbeddedCoordinator, msg *regionv1.PrepareSnapshot) {
+	s.prepareSnapshot(ctx, msg, func() {
+		_ = coordinator.UpdateEmbeddedHeartbeat(ctx, s.heartbeatMessage())
+	})
+}
+
 func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.ExecutionAssignment, sendUpdate func(*regionv1.AssignmentUpdate), sendHeartbeat func()) {
 	s.mu.Lock()
 	if s.availableSlots > 0 {
@@ -198,7 +226,9 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		}
 		released = true
 		s.mu.Lock()
-		s.availableSlots++
+		if s.availableSlots < s.maxSlots {
+			s.availableSlots++
+		}
 		s.mu.Unlock()
 	}
 	defer releaseSlot()
@@ -328,6 +358,53 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	sendHeartbeat()
 }
 
+func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnapshot, sendHeartbeat func()) {
+	s.reserveSlot()
+	defer func() {
+		s.releaseSlot()
+		sendHeartbeat()
+	}()
+
+	switch msg.SnapshotKind {
+	case regionv1.SnapshotKind_SNAPSHOT_KIND_BLANK:
+		if warmer, ok := s.driver.(firecracker.BlankWarmEnsurer); ok {
+			_ = warmer.EnsureBlankWarm(ctx)
+		}
+	case regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION:
+		if strings.TrimSpace(msg.FunctionVersionId) == "" {
+			return
+		}
+		warmer, ok := s.driver.(firecracker.PostExecutionWarmer)
+		if !ok {
+			return
+		}
+		version, err := s.store.GetFunctionVersion(ctx, msg.FunctionVersionId)
+		if err != nil {
+			return
+		}
+		artifactMeta, err := s.store.GetArtifact(ctx, version.ArtifactDigest)
+		if err != nil {
+			return
+		}
+		bundle, err := s.objects.Get(ctx, artifactMeta.BundleKey)
+		if err != nil {
+			return
+		}
+		_ = warmer.PrepareFunctionWarm(ctx, firecracker.ExecuteRequest{
+			AttemptID:      "prepare-" + version.ID,
+			JobID:          "prepare-" + version.ID,
+			FunctionID:     version.ID,
+			Entrypoint:     version.Entrypoint,
+			ArtifactBundle: bundle,
+			Timeout:        time.Duration(version.TimeoutSec) * time.Second,
+			MemoryMB:       version.MemoryMB,
+			NetworkPolicy:  string(version.NetworkPolicy),
+			Region:         s.region,
+			HostID:         s.hostID,
+		})
+	}
+}
+
 func (s *Service) archiveExecutionArtifacts(ctx context.Context, jobID, attemptID, logs string, output []byte) error {
 	if s.objects == nil {
 		return fmt.Errorf("artifact store is not configured")
@@ -443,6 +520,12 @@ func (s *Service) prepareDriver(ctx context.Context) error {
 }
 
 func (s *Service) warmInventory() firecracker.WarmInventory {
+	s.mu.Lock()
+	availableSlots := s.availableSlots
+	s.mu.Unlock()
+	if provider, ok := s.driver.(firecracker.SlotWarmInventoryProvider); ok {
+		return provider.WarmInventoryForSlots(availableSlots)
+	}
 	if provider, ok := s.driver.(firecracker.InventoryProvider); ok {
 		return provider.WarmInventory()
 	}
@@ -450,12 +533,36 @@ func (s *Service) warmInventory() firecracker.WarmInventory {
 	defer s.mu.Unlock()
 	functionWarm := make(map[string]int, len(s.functionWarm))
 	for functionID, count := range s.functionWarm {
-		functionWarm[functionID] = count
+		functionWarm[functionID] = minInt(count, s.availableSlots)
 	}
 	return firecracker.WarmInventory{
-		BlankWarm:    s.blankWarm,
+		BlankWarm:    minInt(s.blankWarm, s.availableSlots),
 		FunctionWarm: functionWarm,
 	}
+}
+
+func (s *Service) reserveSlot() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.availableSlots > 0 {
+		s.availableSlots--
+	}
+}
+
+func (s *Service) releaseSlot() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.availableSlots < s.maxSlots {
+		s.availableSlots++
+	}
+}
+
+func (s *Service) applyDrain() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.availableSlots = 0
+	s.blankWarm = 0
+	s.functionWarm = map[string]int{}
 }
 
 func warmMetrics(input map[string]int) []*regionv1.WarmPoolMetric {
@@ -467,4 +574,11 @@ func warmMetrics(input map[string]int) []*regionv1.WarmPoolMetric {
 		})
 	}
 	return out
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }

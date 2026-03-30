@@ -38,6 +38,12 @@ enum AssignmentState {
   ASSIGNMENT_STATE_FAILED = 4;
 }
 
+enum SnapshotKind {
+  SNAPSHOT_KIND_UNSPECIFIED = 0;
+  SNAPSHOT_KIND_BLANK = 1;
+  SNAPSHOT_KIND_FUNCTION = 2;
+}
+
 message AssignmentUpdate {
   string host_id = 1;
   string region = 2;
@@ -74,6 +80,12 @@ message ExecutionAssignment {
   int32 timeout_sec = 9;
 }
 
+message PrepareSnapshot {
+  string host_id = 1;
+  SnapshotKind snapshot_kind = 2;
+  string function_version_id = 3;
+}
+
 message DrainHost {
   string host_id = 1;
   string reason = 2;
@@ -91,5 +103,6 @@ message CoordinatorMessage {
     ExecutionAssignment assignment = 2;
     DrainHost drain = 3;
     TerminateVm terminate = 4;
+    PrepareSnapshot prepare = 5;
   }
 }

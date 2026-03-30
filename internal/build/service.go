@@ -27,9 +27,14 @@ type Service struct {
 	store   store.Store
 	objects artifact.Store
 	bus     BuildBus
+	warmer  WarmPreparer
 	now     func() time.Time
 
 	maxActiveBuildJobsPerProject int
+}
+
+type WarmPreparer interface {
+	PrepareFunctionVersion(ctx context.Context, version *domain.FunctionVersion) error
 }
 
 const (
@@ -57,6 +62,10 @@ func New(store store.Store, objects artifact.Store) *Service {
 
 func (s *Service) SetBuildBus(bus BuildBus) {
 	s.bus = bus
+}
+
+func (s *Service) SetWarmPreparer(warmer WarmPreparer) {
+	s.warmer = warmer
 }
 
 func (s *Service) RunBuildConsumer(ctx context.Context, region, consumer string) error {
@@ -357,6 +366,13 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	version.State = domain.FunctionStateReady
 	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
+	}
+	if s.warmer != nil {
+		if err := s.warmer.PrepareFunctionVersion(ctx, version); err != nil {
+			recorder.Printf("warm preparation deferred for function version %s: %v", version.ID, err)
+		} else {
+			recorder.Printf("queued function warm preparation for function version %s", version.ID)
+		}
 	}
 
 	recorder.Printf("build job %s completed successfully", buildJob.ID)

@@ -196,3 +196,66 @@ func TestDrainHostClearsWarmPoolsAndPreventsSlotRecovery(t *testing.T) {
 		t.Fatalf("expected draining host to stay unschedulable, got %d slots", host.AvailableSlots)
 	}
 }
+
+func TestPrepareFunctionWarmSendsSnapshotPrepCommand(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	now := time.Now().UTC()
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-prepare",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     10,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+
+	svc := New("ap-south-1", meta, nil)
+	sendCh := make(chan *regionv1.CoordinatorMessage, 4)
+	if err := svc.registerHost(&regionv1.RegisterHost{
+		HostId:         "host-ap-south-1-a",
+		Region:         "ap-south-1",
+		Driver:         "firecracker",
+		AvailableSlots: 2,
+		BlankWarm:      1,
+	}, sendCh); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	version, err := meta.GetFunctionVersion(context.Background(), "fn-prepare")
+	if err != nil {
+		t.Fatalf("get function version: %v", err)
+	}
+	if err := svc.PrepareFunctionWarm(context.Background(), version); err != nil {
+		t.Fatalf("prepare function warm: %v", err)
+	}
+
+	msg := <-sendCh
+	prepare, ok := msg.Body.(*regionv1.CoordinatorMessage_Prepare)
+	if !ok {
+		t.Fatalf("expected prepare message, got %T", msg.Body)
+	}
+	if prepare.Prepare.FunctionVersionId != version.ID {
+		t.Fatalf("expected function version %s, got %s", version.ID, prepare.Prepare.FunctionVersionId)
+	}
+	if prepare.Prepare.SnapshotKind != regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION {
+		t.Fatalf("expected function snapshot kind, got %s", prepare.Prepare.SnapshotKind)
+	}
+
+	host, err := meta.GetHost(context.Background(), "host-ap-south-1-a")
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	if host.AvailableSlots != 1 {
+		t.Fatalf("expected one slot reserved for prep, got %d", host.AvailableSlots)
+	}
+}

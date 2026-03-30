@@ -132,6 +132,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		dispatchers = append(dispatchers, svc)
 	}
 	schedulerService := scheduler.New(metaStore, dispatchers)
+	builder.SetWarmPreparer(schedulerService)
 	for _, region := range localRegions {
 		region.svc.SetRetryer(schedulerService)
 	}
@@ -175,9 +176,13 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		})
 
 		agentSecretsClient := secrets.NewProxyClient("http://embedded.lecrev", cfg.SecretsProxyToken, transport.NewHandlerClient(controlHandler))
-		agent := nodeagent.New(region.host, region.name, "", localnode.New(), objectStore, metaStore, agentSecretsClient)
+		agent := nodeagent.NewWithConfig(nodeagent.Config{
+			MaxConcurrentAssignments: cfg.ExecutionHostSlots,
+		}, region.host, region.name, "", localnode.New(), objectStore, metaStore, agentSecretsClient)
 		if err := region.svc.RegisterEmbeddedHost(ctx, agent.RegistrationMessage(), func(execCtx context.Context, assignment *regionv1.ExecutionAssignment) {
 			go agent.ExecuteEmbeddedAssignment(execCtx, region.svc, assignment)
+		}, func(execCtx context.Context, prepare *regionv1.PrepareSnapshot) {
+			go agent.PrepareEmbeddedSnapshot(execCtx, region.svc, prepare)
 		}); err != nil {
 			stack.Close()
 			return nil, err
