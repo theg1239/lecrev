@@ -27,6 +27,7 @@ type snapshotMetadata struct {
 	FunctionID    string    `json:"functionId,omitempty"`
 	Entrypoint    string    `json:"entrypoint,omitempty"`
 	NetworkPolicy string    `json:"networkPolicy,omitempty"`
+	MemoryMB      int       `json:"memoryMb,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
@@ -55,13 +56,13 @@ func (d *Driver) executeCold(ctx context.Context, req firecracker.ExecuteRequest
 	return d.runInvocation(ctx, instance, req, false)
 }
 
-func (d *Driver) executeFromSnapshot(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset) (*firecracker.ExecuteResult, error) {
+func (d *Driver) executeFromSnapshot(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset, usePreparedRoot bool) (*firecracker.ExecuteResult, error) {
 	instance, err := d.restoreInstance(ctx, req, asset)
 	if err != nil {
 		return nil, err
 	}
 	defer instance.cleanup()
-	return d.runInvocation(ctx, instance, req, true)
+	return d.runInvocation(ctx, instance, req, usePreparedRoot)
 }
 
 func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req firecracker.ExecuteRequest, usePreparedRoot bool) (*firecracker.ExecuteResult, error) {
@@ -296,6 +297,7 @@ func (d *Driver) ensureBlankSnapshotLocked(ctx context.Context) error {
 	return d.createSnapshotAsset(ctx, instance, asset, snapshotMetadata{
 		Kind:          "blank",
 		NetworkPolicy: "none",
+		MemoryMB:      int(d.config.DefaultMemoryMB),
 		CreatedAt:     time.Now().UTC(),
 	})
 }
@@ -312,7 +314,7 @@ func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecrack
 	)
 	if strings.EqualFold(req.NetworkPolicy, "none") {
 		if err := d.ensureBlankSnapshotLocked(ctx); err == nil {
-			if blankAsset := d.blankSnapshotAsset(); blankAsset.complete() {
+			if blankAsset, ok := d.blankSnapshotAssetForRequest(req); ok {
 				instance, err = d.restoreInstance(ctx, req, blankAsset)
 			}
 		}
@@ -340,6 +342,7 @@ func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecrack
 		FunctionID:    req.FunctionID,
 		Entrypoint:    req.Entrypoint,
 		NetworkPolicy: req.NetworkPolicy,
+		MemoryMB:      req.MemoryMB,
 		CreatedAt:     time.Now().UTC(),
 	})
 }
@@ -427,6 +430,17 @@ func (d *Driver) functionSnapshotAsset(functionID string) (snapshotAsset, bool) 
 	return asset, asset.complete()
 }
 
+func (d *Driver) blankWarmInventory() int {
+	_, ok := d.blankSnapshotAssetForRequest(firecracker.ExecuteRequest{
+		MemoryMB:      int(d.config.DefaultMemoryMB),
+		NetworkPolicy: "none",
+	})
+	if !ok {
+		return 0
+	}
+	return 1
+}
+
 func (d *Driver) blankSnapshotAsset() snapshotAsset {
 	dir := filepath.Join(d.config.SnapshotDir, "blank")
 	return snapshotAsset{
@@ -436,6 +450,27 @@ func (d *Driver) blankSnapshotAsset() snapshotAsset {
 		rootFSPath:   filepath.Join(dir, "rootfs.ext4"),
 		metadataPath: filepath.Join(dir, "metadata.json"),
 	}
+}
+
+func (d *Driver) blankSnapshotAssetForRequest(req firecracker.ExecuteRequest) (snapshotAsset, bool) {
+	asset := d.blankSnapshotAsset()
+	if !asset.complete() {
+		return snapshotAsset{}, false
+	}
+	meta, err := asset.metadata()
+	if err != nil {
+		return snapshotAsset{}, false
+	}
+	if meta.Kind != "blank" {
+		return snapshotAsset{}, false
+	}
+	if !strings.EqualFold(meta.NetworkPolicy, "none") || !strings.EqualFold(req.NetworkPolicy, "none") {
+		return snapshotAsset{}, false
+	}
+	if meta.MemoryMB > 0 && req.MemoryMB > 0 && meta.MemoryMB != req.MemoryMB {
+		return snapshotAsset{}, false
+	}
+	return asset, true
 }
 
 func (d *Driver) functionSnapshotPath(functionID string) snapshotAsset {

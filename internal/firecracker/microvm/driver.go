@@ -85,7 +85,10 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 		req.MemoryMB = int(d.config.DefaultMemoryMB)
 	}
 	if asset, ok := d.functionSnapshotAsset(req.FunctionID); ok {
-		return d.executeFromSnapshot(ctx, req, asset)
+		return d.executeFromSnapshot(ctx, req, asset, true)
+	}
+	if asset, ok := d.blankSnapshotAssetForRequest(req); ok {
+		return d.executeFromSnapshot(ctx, req, asset, false)
 	}
 	return d.executeCold(ctx, req)
 }
@@ -93,7 +96,7 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 func (d *Driver) WarmInventory() firecracker.WarmInventory {
 	functionWarm := d.functionWarmInventory()
 	return firecracker.WarmInventory{
-		BlankWarm:    0,
+		BlankWarm:    d.blankWarmInventory(),
 		FunctionWarm: functionWarm,
 	}
 }

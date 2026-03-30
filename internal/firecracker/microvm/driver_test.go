@@ -145,7 +145,7 @@ func TestStageKernelFallsBackToCopy(t *testing.T) {
 	}
 }
 
-func TestWarmInventoryReturnsPreparedFunctionSnapshots(t *testing.T) {
+func TestWarmInventoryReturnsPreparedSnapshots(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -172,12 +172,63 @@ func TestWarmInventoryReturnsPreparedFunctionSnapshots(t *testing.T) {
 	if err := os.WriteFile(asset.metadataPath, []byte(`{"kind":"function","functionId":"fn-1"}`), 0o644); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
+	blank := driver.blankSnapshotAsset()
+	if err := os.MkdirAll(blank.dir, 0o755); err != nil {
+		t.Fatalf("mkdir blank asset: %v", err)
+	}
+	for _, path := range []string{blank.statePath, blank.memoryPath, blank.rootFSPath} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatalf("write blank asset file %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(blank.metadataPath, []byte(`{"kind":"blank","networkPolicy":"none","memoryMb":128}`), 0o644); err != nil {
+		t.Fatalf("write blank metadata: %v", err)
+	}
 
 	inventory := driver.WarmInventory()
-	if inventory.BlankWarm != 0 {
-		t.Fatalf("expected blank warm inventory to remain 0, got %d", inventory.BlankWarm)
+	if inventory.BlankWarm != 1 {
+		t.Fatalf("expected blank warm inventory to be 1, got %d", inventory.BlankWarm)
 	}
 	if inventory.FunctionWarm["fn-1"] != 1 {
 		t.Fatalf("expected function warm inventory for fn-1, got %+v", inventory.FunctionWarm)
+	}
+}
+
+func TestBlankSnapshotAssetForRequestRequiresMatchingShape(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	driver, err := New(Config{
+		FirecrackerBinary: "/usr/bin/firecracker",
+		KernelImagePath:   filepath.Join(dir, "vmlinux"),
+		RootFSPath:        filepath.Join(dir, "rootfs.ext4"),
+		WorkspaceDir:      dir,
+		SnapshotDir:       filepath.Join(dir, "snapshots"),
+	})
+	if err != nil {
+		t.Fatalf("new driver: %v", err)
+	}
+
+	blank := driver.blankSnapshotAsset()
+	if err := os.MkdirAll(blank.dir, 0o755); err != nil {
+		t.Fatalf("mkdir blank asset: %v", err)
+	}
+	for _, path := range []string{blank.statePath, blank.memoryPath, blank.rootFSPath} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatalf("write blank asset file %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(blank.metadataPath, []byte(`{"kind":"blank","networkPolicy":"none","memoryMb":128}`), 0o644); err != nil {
+		t.Fatalf("write blank metadata: %v", err)
+	}
+
+	if _, ok := driver.blankSnapshotAssetForRequest(firecracker.ExecuteRequest{NetworkPolicy: "none", MemoryMB: 128}); !ok {
+		t.Fatal("expected matching blank snapshot to be usable")
+	}
+	if _, ok := driver.blankSnapshotAssetForRequest(firecracker.ExecuteRequest{NetworkPolicy: "full", MemoryMB: 128}); ok {
+		t.Fatal("expected network mismatch to reject blank snapshot")
+	}
+	if _, ok := driver.blankSnapshotAssetForRequest(firecracker.ExecuteRequest{NetworkPolicy: "none", MemoryMB: 256}); ok {
+		t.Fatal("expected memory mismatch to reject blank snapshot")
 	}
 }
