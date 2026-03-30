@@ -889,6 +889,175 @@ func TestDeploymentSummaryEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeploymentDetailAndArtifactEndpoints(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "Demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-active",
+		ProjectID:      "demo",
+		Name:           "active",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		BuildJobID:     "build-active",
+		ArtifactDigest: "digest-active",
+		SourceType:     domain.SourceTypeBundle,
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("put active function version: %v", err)
+	}
+	if err := meta.PutBuildJob(context.Background(), &domain.BuildJob{
+		ID:                "build-active",
+		FunctionVersionID: "fn-active",
+		TargetRegion:      "ap-south-1",
+		State:             "succeeded",
+		LogsKey:           "builds/build-active/logs.txt",
+		CreatedAt:         now.Add(-2 * time.Minute),
+		UpdatedAt:         now.Add(-90 * time.Second),
+	}); err != nil {
+		t.Fatalf("put active build job: %v", err)
+	}
+	if err := objects.Put(context.Background(), "builds/build-active/logs.txt", []byte("build active\n")); err != nil {
+		t.Fatalf("put active build logs: %v", err)
+	}
+	if err := meta.PutExecutionJob(context.Background(), &domain.ExecutionJob{
+		ID:                "job-active",
+		FunctionVersionID: "fn-active",
+		ProjectID:         "demo",
+		TargetRegion:      "ap-south-1",
+		State:             domain.JobStateSucceeded,
+		MaxRetries:        1,
+		AttemptCount:      1,
+		LastAttemptID:     "attempt-active",
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			LogsKey:    "jobs/job-active/logs.txt",
+			OutputKey:  "jobs/job-active/output.json",
+			HostID:     "host-ap-south-1-a",
+			Region:     "ap-south-1",
+			StartedAt:  now.Add(-30 * time.Second),
+			FinishedAt: now.Add(-20 * time.Second),
+		},
+		CreatedAt: now.Add(-30 * time.Second),
+		UpdatedAt: now.Add(-20 * time.Second),
+	}); err != nil {
+		t.Fatalf("put active execution job: %v", err)
+	}
+	if err := objects.Put(context.Background(), "jobs/job-active/logs.txt", []byte("job active\n")); err != nil {
+		t.Fatalf("put active execution logs: %v", err)
+	}
+	if err := objects.Put(context.Background(), "jobs/job-active/output.json", []byte(`{"ok":true}`)); err != nil {
+		t.Fatalf("put active execution output: %v", err)
+	}
+
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-build-only",
+		ProjectID:      "demo",
+		Name:           "build-only",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		BuildJobID:     "build-only",
+		ArtifactDigest: "digest-build-only",
+		SourceType:     domain.SourceTypeBundle,
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now.Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("put build-only function version: %v", err)
+	}
+	if err := meta.PutBuildJob(context.Background(), &domain.BuildJob{
+		ID:                "build-only",
+		FunctionVersionID: "fn-build-only",
+		TargetRegion:      "ap-south-1",
+		State:             "succeeded",
+		LogsKey:           "builds/build-only/logs.txt",
+		CreatedAt:         now.Add(-1 * time.Minute),
+		UpdatedAt:         now.Add(-50 * time.Second),
+	}); err != nil {
+		t.Fatalf("put build-only build job: %v", err)
+	}
+	if err := objects.Put(context.Background(), "builds/build-only/logs.txt", []byte("build only\n")); err != nil {
+		t.Fatalf("put build-only build logs: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	detailReq := httptest.NewRequest(http.MethodGet, "/v1/deployments/fn-active", nil)
+	detailReq.Header.Set("X-API-Key", "tenant-key")
+	detailResp := httptest.NewRecorder()
+	handler.ServeHTTP(detailResp, detailReq)
+	if detailResp.Code != http.StatusOK {
+		t.Fatalf("expected deployment detail status %d, got %d: %s", http.StatusOK, detailResp.Code, detailResp.Body.String())
+	}
+	var deployment deploymentSummary
+	if err := json.Unmarshal(detailResp.Body.Bytes(), &deployment); err != nil {
+		t.Fatalf("decode deployment summary: %v", err)
+	}
+	if deployment.ID != "fn-active" || deployment.Status != "active" || deployment.LastJob == nil {
+		t.Fatalf("unexpected deployment detail payload: %+v", deployment)
+	}
+
+	logsReq := httptest.NewRequest(http.MethodGet, "/v1/deployments/fn-active/logs", nil)
+	logsReq.Header.Set("X-API-Key", "tenant-key")
+	logsResp := httptest.NewRecorder()
+	handler.ServeHTTP(logsResp, logsReq)
+	if logsResp.Code != http.StatusOK {
+		t.Fatalf("expected deployment logs status %d, got %d: %s", http.StatusOK, logsResp.Code, logsResp.Body.String())
+	}
+	if body := logsResp.Body.String(); body != "job active\n" {
+		t.Fatalf("expected execution logs to win for active deployment, got %q", body)
+	}
+
+	outputReq := httptest.NewRequest(http.MethodGet, "/v1/deployments/fn-active/output", nil)
+	outputReq.Header.Set("X-API-Key", "tenant-key")
+	outputResp := httptest.NewRecorder()
+	handler.ServeHTTP(outputResp, outputReq)
+	if outputResp.Code != http.StatusOK {
+		t.Fatalf("expected deployment output status %d, got %d: %s", http.StatusOK, outputResp.Code, outputResp.Body.String())
+	}
+	if body := outputResp.Body.String(); body != `{"ok":true}` {
+		t.Fatalf("unexpected deployment output body %q", body)
+	}
+
+	buildOnlyLogsReq := httptest.NewRequest(http.MethodGet, "/v1/deployments/fn-build-only/logs", nil)
+	buildOnlyLogsReq.Header.Set("X-API-Key", "tenant-key")
+	buildOnlyLogsResp := httptest.NewRecorder()
+	handler.ServeHTTP(buildOnlyLogsResp, buildOnlyLogsReq)
+	if buildOnlyLogsResp.Code != http.StatusOK {
+		t.Fatalf("expected build-only deployment logs status %d, got %d: %s", http.StatusOK, buildOnlyLogsResp.Code, buildOnlyLogsResp.Body.String())
+	}
+	if body := buildOnlyLogsResp.Body.String(); body != "build only\n" {
+		t.Fatalf("expected build logs fallback for build-only deployment, got %q", body)
+	}
+
+	buildOnlyOutputReq := httptest.NewRequest(http.MethodGet, "/v1/deployments/fn-build-only/output", nil)
+	buildOnlyOutputReq.Header.Set("X-API-Key", "tenant-key")
+	buildOnlyOutputResp := httptest.NewRecorder()
+	handler.ServeHTTP(buildOnlyOutputResp, buildOnlyOutputReq)
+	if buildOnlyOutputResp.Code != http.StatusConflict {
+		t.Fatalf("expected build-only deployment output status %d, got %d: %s", http.StatusConflict, buildOnlyOutputResp.Code, buildOnlyOutputResp.Body.String())
+	}
+}
+
 func TestWriteServiceErrorMapsQuotaErrorsToTooManyRequests(t *testing.T) {
 	t.Parallel()
 

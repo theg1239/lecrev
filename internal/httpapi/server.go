@@ -57,6 +57,9 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Use(srv.authMiddleware)
 		r.Options("/*", srv.handlePreflight)
 		r.Get("/deployments", srv.listDeployments)
+		r.Get("/deployments/{deploymentID}", srv.getDeployment)
+		r.Get("/deployments/{deploymentID}/logs", srv.getDeploymentLogs)
+		r.Get("/deployments/{deploymentID}/output", srv.getDeploymentOutput)
 		r.Get("/projects", srv.listProjects)
 		r.Get("/projects/{projectID}", srv.getProject)
 		r.Get("/projects/{projectID}/overview", srv.getProjectOverview)
@@ -240,6 +243,69 @@ func (s *Server) listProjectDeployments(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.listDeploymentsForProjects(w, r, []domain.Project{*project})
+}
+
+func (s *Server) getDeployment(w http.ResponseWriter, r *http.Request) {
+	deployment, _, _, err := s.loadAuthorizedDeployment(r.Context(), chi.URLParam(r, "deploymentID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, deployment)
+}
+
+func (s *Server) getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
+	_, buildJob, latestJob, err := s.loadAuthorizedDeployment(r.Context(), chi.URLParam(r, "deploymentID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if latestJob != nil && latestJob.Result != nil && strings.TrimSpace(latestJob.Result.LogsKey) != "" {
+		data, err := s.objects.Get(r.Context(), latestJob.Result.LogsKey)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		writeRaw(w, http.StatusOK, "text/plain; charset=utf-8", data)
+		return
+	}
+	if buildJob != nil && strings.TrimSpace(buildJob.LogsKey) != "" {
+		data, err := s.objects.Get(r.Context(), buildJob.LogsKey)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		writeRaw(w, http.StatusOK, "text/plain; charset=utf-8", data)
+		return
+	}
+	if latestJob != nil {
+		writeServiceError(w, domain.ErrExecutionResultNotReady)
+		return
+	}
+	writeServiceError(w, domain.ErrBuildLogsNotReady)
+}
+
+func (s *Server) getDeploymentOutput(w http.ResponseWriter, r *http.Request) {
+	_, _, latestJob, err := s.loadAuthorizedDeployment(r.Context(), chi.URLParam(r, "deploymentID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if latestJob == nil {
+		writeServiceError(w, domain.ErrExecutionResultNotReady)
+		return
+	}
+	key, err := jobResultKey(latestJob, "output")
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	data, err := s.objects.Get(r.Context(), key)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeRaw(w, http.StatusOK, "application/json", data)
 }
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
@@ -1096,6 +1162,49 @@ func (s *Server) authorizedBuildJob(ctx context.Context, jobID string) (*domain.
 	return job, version, nil
 }
 
+func (s *Server) loadAuthorizedDeployment(ctx context.Context, deploymentID string) (*deploymentSummary, *domain.BuildJob, *domain.ExecutionJob, error) {
+	version, err := s.store.GetFunctionVersion(ctx, deploymentID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	project, err := s.authorizedProject(ctx, version.ProjectID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var buildJob *domain.BuildJob
+	if strings.TrimSpace(version.BuildJobID) != "" {
+		job, err := s.store.GetBuildJob(ctx, version.BuildJobID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, nil, nil, err
+		}
+		if err == nil {
+			buildJob = job
+		}
+	}
+
+	jobs, err := s.store.ListExecutionJobsByProject(ctx, version.ProjectID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	latestJob := latestExecutionJobForVersion(version.ID, jobs)
+
+	buildJobs := make([]domain.BuildJob, 0, 1)
+	if buildJob != nil {
+		buildJobs = append(buildJobs, *buildJob)
+	}
+	deploymentJobs := make([]domain.ExecutionJob, 0, 1)
+	if latestJob != nil {
+		deploymentJobs = append(deploymentJobs, *latestJob)
+	}
+
+	summaries := summarizeDeployments(*project, []domain.FunctionVersion{*version}, buildJobs, deploymentJobs)
+	if len(summaries) == 0 {
+		return nil, nil, nil, store.ErrNotFound
+	}
+	return &summaries[0], buildJob, latestJob, nil
+}
+
 func (s *Server) authorizedProject(ctx context.Context, projectID string) (*domain.Project, error) {
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -1106,6 +1215,17 @@ func (s *Server) authorizedProject(ctx context.Context, projectID string) (*doma
 		return nil, store.ErrAccessDenied
 	}
 	return project, nil
+}
+
+func latestExecutionJobForVersion(versionID string, jobs []domain.ExecutionJob) *domain.ExecutionJob {
+	for _, job := range jobs {
+		if job.FunctionVersionID != versionID {
+			continue
+		}
+		jobCopy := job
+		return &jobCopy
+	}
+	return nil
 }
 
 func jobResultKey(job *domain.ExecutionJob, kind string) (string, error) {

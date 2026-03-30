@@ -323,6 +323,15 @@ curl -sS 'http://localhost:8080/v1/deployments?limit=20' \
 curl -sS 'http://localhost:8080/v1/projects/demo/deployments?status=ready&environment=staging' \
   -H 'X-API-Key: dev-root-key'
 
+curl -sS http://localhost:8080/v1/deployments/<deployment-id> \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS http://localhost:8080/v1/deployments/<deployment-id>/logs \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS http://localhost:8080/v1/deployments/<deployment-id>/output \
+  -H 'X-API-Key: dev-root-key'
+
 curl -sS 'http://localhost:8080/v1/projects/demo/functions?limit=20' \
   -H 'X-API-Key: dev-root-key'
 
