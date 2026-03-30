@@ -183,5 +183,6 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		})
 	}
 	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
+	run("global-scheduler", func() error { return schedulerService.Run(ctx) })
 	return stack, nil
 }

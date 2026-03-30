@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -442,6 +443,35 @@ func (s *Store) ClaimNextExecutionJob(ctx context.Context, fromStates []domain.J
 		job.Result = &result
 	}
 	return &job, nil
+}
+
+func (s *Store) RequeueStaleExecutionJobs(ctx context.Context, fromState, toState domain.JobState, staleBefore, now time.Time, errorMessage string) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		update execution_jobs
+		set state = $2,
+		    target_region = null,
+		    error = $5,
+		    updated_at = $4
+		where state = $1
+		  and updated_at <= $3
+	`, string(fromState), string(toState), staleBefore, now, nullableText(strings.TrimSpace(errorMessage)))
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (s *Store) CountActiveExecutionJobsByRegion(ctx context.Context, region string) (int, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from execution_jobs
+		where target_region = $1
+		  and state not in ('succeeded', 'failed')
+	`, region).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) PutAttempt(ctx context.Context, attempt *domain.Attempt) error {

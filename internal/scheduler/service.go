@@ -24,17 +24,23 @@ type RegionDispatcher interface {
 }
 
 type Service struct {
-	store       store.Store
-	dispatchers map[string]RegionDispatcher
-	now         func() time.Time
+	store        store.Store
+	dispatchers  map[string]RegionDispatcher
+	now          func() time.Time
 	pollInterval time.Duration
-	wakeCh      chan struct{}
+	schedulingTimeout time.Duration
+	healthyWithin time.Duration
+	wakeCh       chan struct{}
 }
 
 type candidate struct {
-	region     string
-	dispatcher RegionDispatcher
-	stats      domain.RegionStats
+	region        string
+	dispatcher    RegionDispatcher
+	stats         domain.RegionStats
+	backlog       int
+	healthy       bool
+	artifactLocal bool
+	lastHeartbeat time.Time
 }
 
 func New(store store.Store, dispatchers []RegionDispatcher) *Service {
@@ -43,11 +49,13 @@ func New(store store.Store, dispatchers []RegionDispatcher) *Service {
 		index[dispatcher.Region()] = dispatcher
 	}
 	return &Service{
-		store:       store,
-		dispatchers: index,
-		now:         func() time.Time { return time.Now().UTC() },
-		pollInterval: 500 * time.Millisecond,
-		wakeCh:      make(chan struct{}, 1),
+		store:         store,
+		dispatchers:   index,
+		now:           func() time.Time { return time.Now().UTC() },
+		pollInterval:  500 * time.Millisecond,
+		schedulingTimeout: 10 * time.Second,
+		healthyWithin: 15 * time.Second,
+		wakeCh:        make(chan struct{}, 1),
 	}
 }
 
@@ -155,6 +163,9 @@ func (s *Service) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	for {
+		if _, err := s.recoverStaleScheduling(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("scheduler recovery failed", "err", err)
+		}
 		if err := s.schedulePending(ctx); err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, context.Canceled) {
 			slog.Error("scheduler loop failed", "err", err)
 		}
@@ -222,7 +233,7 @@ func (s *Service) scheduleNext(ctx context.Context) (bool, error) {
 
 func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.FunctionVersion, job *domain.ExecutionJob) error {
 	now := s.now()
-	candidates, err := s.rankDispatchers(version)
+	candidates, err := s.rankDispatchers(ctx, version)
 	if err != nil {
 		job.State = domain.JobStateQueued
 		job.TargetRegion = ""
@@ -291,7 +302,7 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 }
 
 func (s *Service) pickRegion(version *domain.FunctionVersion) (string, RegionDispatcher, error) {
-	candidates, err := s.rankDispatchers(version)
+	candidates, err := s.rankDispatchers(context.Background(), version)
 	if err != nil {
 		return "", nil, err
 	}
@@ -299,30 +310,73 @@ func (s *Service) pickRegion(version *domain.FunctionVersion) (string, RegionDis
 	return pick.region, pick.dispatcher, nil
 }
 
-func (s *Service) rankDispatchers(version *domain.FunctionVersion) ([]candidate, error) {
+func (s *Service) rankDispatchers(ctx context.Context, version *domain.FunctionVersion) ([]candidate, error) {
+	artifactRegions, err := s.artifactRegionIndex(ctx, version.ArtifactDigest)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
 	candidates := make([]candidate, 0, len(version.Regions))
 	for _, region := range version.Regions {
 		dispatcher, ok := s.dispatchers[region]
 		if !ok {
 			continue
 		}
+		stats := dispatcher.Stats()
+		backlog := 0
+		healthy := true
+		lastHeartbeat := time.Time{}
+		if queued, err := s.store.CountActiveExecutionJobsByRegion(ctx, region); err == nil {
+			backlog = queued
+		} else {
+			return nil, err
+		}
+		if snapshot, err := s.store.GetRegion(ctx, region); err == nil {
+			stats = domain.RegionStats{
+				AvailableHosts: snapshot.AvailableHosts,
+				BlankWarm:      snapshot.BlankWarm,
+				FunctionWarm:   snapshot.FunctionWarm,
+			}
+			lastHeartbeat = snapshot.LastHeartbeatAt
+			healthy = regionHealthy(snapshot, s.now(), s.healthyWithin)
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
 		candidates = append(candidates, candidate{
-			region:     region,
-			dispatcher: dispatcher,
-			stats:      dispatcher.Stats(),
+			region:        region,
+			dispatcher:    dispatcher,
+			stats:         stats,
+			backlog:       backlog,
+			healthy:       healthy,
+			artifactLocal: artifactRegions[region],
+			lastHeartbeat: lastHeartbeat,
 		})
 	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no dispatcher available for %v", version.Regions)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].healthy != candidates[j].healthy {
+			return candidates[i].healthy
+		}
+		if candidates[i].artifactLocal != candidates[j].artifactLocal {
+			return candidates[i].artifactLocal
+		}
+		if candidates[i].backlog != candidates[j].backlog {
+			return candidates[i].backlog < candidates[j].backlog
+		}
 		if candidates[i].stats.FunctionWarm != candidates[j].stats.FunctionWarm {
 			return candidates[i].stats.FunctionWarm > candidates[j].stats.FunctionWarm
 		}
 		if candidates[i].stats.BlankWarm != candidates[j].stats.BlankWarm {
 			return candidates[i].stats.BlankWarm > candidates[j].stats.BlankWarm
 		}
-		return candidates[i].stats.AvailableHosts > candidates[j].stats.AvailableHosts
+		if candidates[i].stats.AvailableHosts != candidates[j].stats.AvailableHosts {
+			return candidates[i].stats.AvailableHosts > candidates[j].stats.AvailableHosts
+		}
+		if !candidates[i].lastHeartbeat.Equal(candidates[j].lastHeartbeat) {
+			return candidates[i].lastHeartbeat.After(candidates[j].lastHeartbeat)
+		}
+		return candidates[i].region < candidates[j].region
 	})
 	return candidates, nil
 }
@@ -342,4 +396,54 @@ func (s *Service) wake() {
 	case s.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+func (s *Service) recoverStaleScheduling(ctx context.Context) (int, error) {
+	if s.schedulingTimeout <= 0 {
+		return 0, nil
+	}
+	now := s.now()
+	recovered, err := s.store.RequeueStaleExecutionJobs(
+		ctx,
+		domain.JobStateScheduling,
+		domain.JobStateQueued,
+		now.Add(-s.schedulingTimeout),
+		now,
+		"scheduling claim expired before dispatch",
+	)
+	if err != nil {
+		return 0, err
+	}
+	if recovered > 0 {
+		s.wake()
+	}
+	return recovered, nil
+}
+
+func (s *Service) artifactRegionIndex(ctx context.Context, digest string) (map[string]bool, error) {
+	if digest == "" {
+		return nil, nil
+	}
+	artifact, err := s.store.GetArtifact(ctx, digest)
+	if err != nil {
+		return nil, err
+	}
+	regions := make(map[string]bool, len(artifact.Regions))
+	for region := range artifact.Regions {
+		regions[region] = true
+	}
+	return regions, nil
+}
+
+func regionHealthy(region *domain.Region, now time.Time, maxHeartbeatAge time.Duration) bool {
+	if region == nil {
+		return true
+	}
+	if region.State != "active" {
+		return false
+	}
+	if maxHeartbeatAge <= 0 || region.LastHeartbeatAt.IsZero() {
+		return true
+	}
+	return now.Sub(region.LastHeartbeatAt) <= maxHeartbeatAge
 }

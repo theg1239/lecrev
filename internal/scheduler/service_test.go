@@ -148,6 +148,211 @@ func TestScheduleNextFallsBackWhenTopRegionCannotAccept(t *testing.T) {
 	}
 }
 
+func TestScheduleNextPrefersHealthyRegionOverStaleWarmerRegion(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-healthy", []string{"ap-south-1", "ap-southeast-1"})
+	now := time.Now().UTC()
+	seedRegion(t, store, &domain.Region{
+		Name:            "ap-south-1",
+		State:           "active",
+		AvailableHosts:  1,
+		BlankWarm:       2,
+		FunctionWarm:    10,
+		LastHeartbeatAt: now.Add(-time.Minute),
+	})
+	seedRegion(t, store, &domain.Region{
+		Name:            "ap-southeast-1",
+		State:           "active",
+		AvailableHosts:  1,
+		BlankWarm:       0,
+		FunctionWarm:    0,
+		LastHeartbeatAt: now,
+	})
+
+	staleWarm := &fakeDispatcher{
+		region: "ap-south-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 2, FunctionWarm: 10},
+	}
+	healthy := &fakeDispatcher{
+		region: "ap-southeast-1",
+		stats:  domain.RegionStats{AvailableHosts: 1},
+	}
+	svc := New(store, []RegionDispatcher{staleWarm, healthy})
+	svc.now = func() time.Time { return now }
+	svc.healthyWithin = 15 * time.Second
+
+	job, err := svc.DispatchExecution(context.Background(), "fn-healthy", json.RawMessage(`{"msg":"hi"}`))
+	if err != nil {
+		t.Fatalf("queue execution: %v", err)
+	}
+
+	dispatched, err := svc.scheduleNext(context.Background())
+	if err != nil {
+		t.Fatalf("schedule next: %v", err)
+	}
+	if !dispatched {
+		t.Fatal("expected one queued job to be dispatched")
+	}
+
+	job, err = store.GetExecutionJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.TargetRegion != "ap-southeast-1" {
+		t.Fatalf("expected healthy region, got %s", job.TargetRegion)
+	}
+}
+
+func TestScheduleNextPrefersArtifactLocalRegion(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-artifact", []string{"ap-south-1", "ap-southeast-1"})
+	seedArtifact(t, store, &domain.Artifact{
+		Digest:     "digest",
+		SizeBytes:  128,
+		BundleKey:  "artifacts/digest/bundle.tgz",
+		StartupKey: "artifacts/digest/startup.json",
+		Regions: map[string]time.Time{
+			"ap-south-1": time.Now().UTC(),
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+
+	remote := &fakeDispatcher{
+		region: "ap-southeast-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 1},
+	}
+	local := &fakeDispatcher{
+		region: "ap-south-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 1},
+	}
+	svc := New(store, []RegionDispatcher{remote, local})
+
+	job, err := svc.DispatchExecution(context.Background(), "fn-artifact", json.RawMessage(`{"msg":"hi"}`))
+	if err != nil {
+		t.Fatalf("queue execution: %v", err)
+	}
+
+	dispatched, err := svc.scheduleNext(context.Background())
+	if err != nil {
+		t.Fatalf("schedule next: %v", err)
+	}
+	if !dispatched {
+		t.Fatal("expected one queued job to be dispatched")
+	}
+
+	job, err = store.GetExecutionJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.TargetRegion != "ap-south-1" {
+		t.Fatalf("expected artifact-local region, got %s", job.TargetRegion)
+	}
+}
+
+func TestRecoverStaleSchedulingRequeuesJob(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-stale", []string{"ap-south-1"})
+	now := time.Now().UTC()
+	job := &domain.ExecutionJob{
+		ID:                "job-stale",
+		FunctionVersionID: "fn-stale",
+		ProjectID:         "demo",
+		State:             domain.JobStateScheduling,
+		Payload:           json.RawMessage(`{"msg":"hi"}`),
+		MaxRetries:        2,
+		CreatedAt:         now.Add(-time.Minute),
+		UpdatedAt:         now.Add(-time.Minute),
+	}
+	if err := store.PutExecutionJob(context.Background(), job); err != nil {
+		t.Fatalf("put job: %v", err)
+	}
+
+	dispatcher := &fakeDispatcher{region: "ap-south-1", stats: domain.RegionStats{AvailableHosts: 1}}
+	svc := New(store, []RegionDispatcher{dispatcher})
+	svc.now = func() time.Time { return now }
+	svc.schedulingTimeout = 10 * time.Second
+
+	recovered, err := svc.recoverStaleScheduling(context.Background())
+	if err != nil {
+		t.Fatalf("recover stale scheduling: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected one recovered job, got %d", recovered)
+	}
+
+	requeued, err := store.GetExecutionJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get requeued job: %v", err)
+	}
+	if requeued.State != domain.JobStateQueued {
+		t.Fatalf("expected queued state after recovery, got %s", requeued.State)
+	}
+	if requeued.TargetRegion != "" {
+		t.Fatalf("expected cleared target region, got %s", requeued.TargetRegion)
+	}
+	if requeued.Error != "scheduling claim expired before dispatch" {
+		t.Fatalf("unexpected recovery error message: %s", requeued.Error)
+	}
+}
+
+func TestScheduleNextPrefersLowerBacklogRegion(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-backlog", []string{"ap-south-1", "ap-southeast-1"})
+	now := time.Now().UTC()
+	if err := store.PutExecutionJob(context.Background(), &domain.ExecutionJob{
+		ID:                "job-existing-1",
+		FunctionVersionID: "fn-backlog",
+		ProjectID:         "demo",
+		TargetRegion:      "ap-south-1",
+		State:             domain.JobStateAssigned,
+		Payload:           json.RawMessage(`{"msg":"existing"}`),
+		MaxRetries:        1,
+		CreatedAt:         now.Add(-time.Minute),
+		UpdatedAt:         now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("put existing job: %v", err)
+	}
+
+	busy := &fakeDispatcher{
+		region: "ap-south-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 1},
+	}
+	idle := &fakeDispatcher{
+		region: "ap-southeast-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 1},
+	}
+	svc := New(store, []RegionDispatcher{busy, idle})
+
+	job, err := svc.DispatchExecution(context.Background(), "fn-backlog", json.RawMessage(`{"msg":"hi"}`))
+	if err != nil {
+		t.Fatalf("queue execution: %v", err)
+	}
+
+	dispatched, err := svc.scheduleNext(context.Background())
+	if err != nil {
+		t.Fatalf("schedule next: %v", err)
+	}
+	if !dispatched {
+		t.Fatal("expected one queued job to be dispatched")
+	}
+
+	job, err = store.GetExecutionJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.TargetRegion != "ap-southeast-1" {
+		t.Fatalf("expected lower backlog region, got %s", job.TargetRegion)
+	}
+}
+
 func TestDispatchExecutionIdempotentReplaysExistingJob(t *testing.T) {
 	t.Parallel()
 
@@ -211,5 +416,19 @@ func seedFunctionVersion(t *testing.T, store *memstore.Store, versionID string, 
 		CreatedAt:      now,
 	}); err != nil {
 		t.Fatalf("put function version: %v", err)
+	}
+}
+
+func seedRegion(t *testing.T, store *memstore.Store, region *domain.Region) {
+	t.Helper()
+	if err := store.PutRegion(context.Background(), region); err != nil {
+		t.Fatalf("put region: %v", err)
+	}
+}
+
+func seedArtifact(t *testing.T, store *memstore.Store, artifact *domain.Artifact) {
+	t.Helper()
+	if err := store.PutArtifact(context.Background(), artifact); err != nil {
+		t.Fatalf("put artifact: %v", err)
 	}
 }

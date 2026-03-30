@@ -254,6 +254,47 @@ func (s *Store) ClaimNextExecutionJob(_ context.Context, fromStates []domain.Job
 	return chosen, nil
 }
 
+func (s *Store) RequeueStaleExecutionJobs(_ context.Context, fromState, toState domain.JobState, staleBefore, now time.Time, errorMessage string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for id, job := range s.executionJobs {
+		if job.State != fromState {
+			continue
+		}
+		if job.UpdatedAt.After(staleBefore) {
+			continue
+		}
+		job.State = toState
+		job.TargetRegion = ""
+		if strings.TrimSpace(errorMessage) != "" {
+			job.Error = strings.TrimSpace(errorMessage)
+		}
+		job.UpdatedAt = now
+		s.executionJobs[id] = cloneExecutionJob(job)
+		count++
+	}
+	return count, nil
+}
+
+func (s *Store) CountActiveExecutionJobsByRegion(_ context.Context, region string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	count := 0
+	for _, job := range s.executionJobs {
+		if job.TargetRegion != region {
+			continue
+		}
+		if job.State == domain.JobStateSucceeded || job.State == domain.JobStateFailed {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 func (s *Store) PutAttempt(_ context.Context, attempt *domain.Attempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
