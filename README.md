@@ -333,7 +333,7 @@ curl -sS 'http://localhost:8080/v1/projects/demo/jobs?limit=20' \
   -H 'X-API-Key: dev-root-key'
 ```
 
-These endpoints are intended for a frontend dashboard. They return compact project, deployment, function, build-job, and execution-job summaries rather than the full archived artifacts.
+These endpoints are intended for a frontend dashboard. They return compact project, deployment, function, build-job, and execution-job summaries rather than the full archived artifacts. For git-backed builds, deployment summaries now include persisted `branch`, `gitUrl`, and resolved `commitSha` metadata captured during the build.
 
 Inspect per-job attempts and cost records:
 

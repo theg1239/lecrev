@@ -110,6 +110,7 @@ type deploymentSummary struct {
 	SourceType        domain.SourceType    `json:"sourceType"`
 	Environment       string               `json:"environment,omitempty"`
 	Branch            string               `json:"branch,omitempty"`
+	CommitSHA         string               `json:"commitSha,omitempty"`
 	GitURL            string               `json:"gitUrl,omitempty"`
 	Status            string               `json:"status"`
 	FunctionState     domain.FunctionState `json:"functionState"`

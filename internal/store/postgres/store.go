@@ -364,32 +364,43 @@ func (s *Store) ListFunctionVersionsByProject(ctx context.Context, projectID str
 }
 
 func (s *Store) PutBuildJob(ctx context.Context, job *domain.BuildJob) error {
-	_, err := s.pool.Exec(ctx, `
-		insert into build_jobs (id, function_version_id, target_region, state, error, logs_key, request, created_at, updated_at)
-		values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+	metadata, err := json.Marshal(job.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		insert into build_jobs (id, function_version_id, target_region, metadata, state, error, logs_key, request, created_at, updated_at)
+		values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9, $10)
 		on conflict (id) do update set
 			function_version_id = excluded.function_version_id,
 			target_region = excluded.target_region,
+			metadata = excluded.metadata,
 			state = excluded.state,
 			error = excluded.error,
 			logs_key = excluded.logs_key,
 			request = excluded.request,
 			updated_at = excluded.updated_at
-	`, job.ID, job.FunctionVersionID, nullableText(job.TargetRegion), job.State, nullableText(job.Error), nullableText(job.LogsKey), normalizeRawJSON(job.Request), job.CreatedAt, job.UpdatedAt)
+	`, job.ID, job.FunctionVersionID, nullableText(job.TargetRegion), metadata, job.State, nullableText(job.Error), nullableText(job.LogsKey), normalizeRawJSON(job.Request), job.CreatedAt, job.UpdatedAt)
 	return err
 }
 
 func (s *Store) GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob, error) {
 	var job domain.BuildJob
+	var rawMetadata []byte
 	var rawRequest []byte
 	if err := s.pool.QueryRow(ctx, `
-		select id, function_version_id, coalesce(target_region, ''), state, coalesce(error, ''), coalesce(logs_key, ''), request, created_at, updated_at
+		select id, function_version_id, coalesce(target_region, ''), metadata, state, coalesce(error, ''), coalesce(logs_key, ''), request, created_at, updated_at
 		from build_jobs
 		where id = $1
 	`, jobID).Scan(
-		&job.ID, &job.FunctionVersionID, &job.TargetRegion, &job.State, &job.Error, &job.LogsKey, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
+		&job.ID, &job.FunctionVersionID, &job.TargetRegion, &rawMetadata, &job.State, &job.Error, &job.LogsKey, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
 	); err != nil {
 		return nil, mapNotFound(err)
+	}
+	if len(rawMetadata) > 0 && string(rawMetadata) != "null" {
+		if err := json.Unmarshal(rawMetadata, &job.Metadata); err != nil {
+			return nil, err
+		}
 	}
 	job.Request = append([]byte(nil), rawRequest...)
 	return &job, nil
@@ -397,7 +408,7 @@ func (s *Store) GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob
 
 func (s *Store) ListBuildJobsByProject(ctx context.Context, projectID string) ([]domain.BuildJob, error) {
 	rows, err := s.pool.Query(ctx, `
-		select bj.id, bj.function_version_id, coalesce(bj.target_region, ''), bj.state, coalesce(bj.error, ''),
+		select bj.id, bj.function_version_id, coalesce(bj.target_region, ''), bj.metadata, bj.state, coalesce(bj.error, ''),
 		       coalesce(bj.logs_key, ''), bj.request, bj.created_at, bj.updated_at
 		from build_jobs bj
 		join function_versions fv on fv.id = bj.function_version_id
@@ -412,11 +423,17 @@ func (s *Store) ListBuildJobsByProject(ctx context.Context, projectID string) ([
 	jobs := make([]domain.BuildJob, 0)
 	for rows.Next() {
 		var job domain.BuildJob
+		var rawMetadata []byte
 		var rawRequest []byte
 		if err := rows.Scan(
-			&job.ID, &job.FunctionVersionID, &job.TargetRegion, &job.State, &job.Error, &job.LogsKey, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
+			&job.ID, &job.FunctionVersionID, &job.TargetRegion, &rawMetadata, &job.State, &job.Error, &job.LogsKey, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
 		); err != nil {
 			return nil, err
+		}
+		if len(rawMetadata) > 0 && string(rawMetadata) != "null" {
+			if err := json.Unmarshal(rawMetadata, &job.Metadata); err != nil {
+				return nil, err
+			}
 		}
 		job.Request = append([]byte(nil), rawRequest...)
 		jobs = append(jobs, job)

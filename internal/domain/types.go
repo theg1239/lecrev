@@ -128,15 +128,16 @@ type FunctionVersion struct {
 }
 
 type BuildJob struct {
-	ID                string    `json:"id"`
-	FunctionVersionID string    `json:"functionVersionId"`
-	TargetRegion      string    `json:"targetRegion,omitempty"`
-	State             string    `json:"state"`
-	Error             string    `json:"error,omitempty"`
-	LogsKey           string    `json:"logsKey,omitempty"`
-	Request           []byte    `json:"-"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	ID                string            `json:"id"`
+	FunctionVersionID string            `json:"functionVersionId"`
+	TargetRegion      string            `json:"targetRegion,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	State             string            `json:"state"`
+	Error             string            `json:"error,omitempty"`
+	LogsKey           string            `json:"logsKey,omitempty"`
+	Request           []byte            `json:"-"`
+	CreatedAt         time.Time         `json:"createdAt"`
+	UpdatedAt         time.Time         `json:"updatedAt"`
 }
 
 type JobResult struct {

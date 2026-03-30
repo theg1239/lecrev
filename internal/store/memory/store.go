@@ -657,6 +657,12 @@ func cloneFunctionVersion(v domain.FunctionVersion) domain.FunctionVersion {
 
 func cloneBuildJob(job domain.BuildJob) domain.BuildJob {
 	cp := job
+	if job.Metadata != nil {
+		cp.Metadata = make(map[string]string, len(job.Metadata))
+		for key, value := range job.Metadata {
+			cp.Metadata[key] = value
+		}
+	}
 	cp.Request = append([]byte(nil), job.Request...)
 	return cp
 }

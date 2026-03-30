@@ -877,6 +877,7 @@ func summarizeDeployments(project domain.Project, versions []domain.FunctionVers
 			jobSummary   *executionJobSummary
 			environment  string
 			branch       string
+			commitSHA    string
 			gitURL       string
 			updatedAt    = version.CreatedAt
 		)
@@ -887,10 +888,20 @@ func summarizeDeployments(project domain.Project, versions []domain.FunctionVers
 			if buildJob.UpdatedAt.After(updatedAt) {
 				updatedAt = buildJob.UpdatedAt
 			}
+			environment = strings.TrimSpace(buildJob.Metadata["environment"])
+			branch = strings.TrimSpace(buildJob.Metadata["branch"])
+			commitSHA = strings.TrimSpace(buildJob.Metadata["commitSha"])
+			gitURL = strings.TrimSpace(buildJob.Metadata["gitUrl"])
 			if request, ok := decodeDeploymentRequest(buildJob.Request); ok {
-				environment = deploymentEnvironment(request.Source)
-				branch = strings.TrimSpace(request.Source.GitRef)
-				gitURL = strings.TrimSpace(request.Source.GitURL)
+				if environment == "" {
+					environment = deploymentEnvironment(request.Source)
+				}
+				if branch == "" {
+					branch = strings.TrimSpace(request.Source.GitRef)
+				}
+				if gitURL == "" {
+					gitURL = strings.TrimSpace(request.Source.GitURL)
+				}
 			}
 		}
 
@@ -912,6 +923,7 @@ func summarizeDeployments(project domain.Project, versions []domain.FunctionVers
 			SourceType:        version.SourceType,
 			Environment:       environment,
 			Branch:            branch,
+			CommitSHA:         commitSHA,
 			GitURL:            gitURL,
 			Status:            deploymentStatus(version, buildSummary, jobSummary),
 			FunctionState:     version.State,

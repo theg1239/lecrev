@@ -269,6 +269,7 @@ func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest)
 		ID:                buildJobID,
 		FunctionVersionID: versionID,
 		TargetRegion:      pickBuildRegion(req.Regions),
+		Metadata:          buildMetadataForRequest(req),
 		State:             "queued",
 		Request:           requestPayload,
 		CreatedAt:         now,
@@ -312,10 +313,11 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	recorder.Printf("build job %s started for function version %s in region %s", buildJob.ID, version.ID, buildJob.TargetRegion)
 	recorder.Printf("source type=%s runtime=%s entrypoint=%s", req.Source.Type, req.Runtime, req.Entrypoint)
 
-	bundle, startup, err := s.prepareBundle(ctx, req, recorder)
+	bundle, startup, metadata, err := s.prepareBundle(ctx, req, recorder)
 	if err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
+	buildJob.Metadata = mergeBuildMetadata(buildJob.Metadata, metadata)
 	if len(bundle) > maxArtifactSizeBytes {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, fmt.Errorf("artifact size %d exceeds limit of %d bytes", len(bundle), maxArtifactSizeBytes))
 	}
@@ -398,6 +400,57 @@ func pickBuildRegion(targetRegions []string) string {
 	return targetRegions[0]
 }
 
+func buildMetadataForRequest(req domain.DeployRequest) map[string]string {
+	metadata := make(map[string]string)
+	if environment := deploymentEnvironment(req.Source); environment != "" {
+		metadata["environment"] = environment
+	}
+	if branch := strings.TrimSpace(req.Source.GitRef); branch != "" {
+		metadata["branch"] = branch
+	}
+	if gitURL := strings.TrimSpace(req.Source.GitURL); gitURL != "" {
+		metadata["gitUrl"] = gitURL
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func deploymentEnvironment(source domain.DeploySource) string {
+	if source.Metadata != nil {
+		if environment := strings.TrimSpace(source.Metadata["environment"]); environment != "" {
+			return environment
+		}
+	}
+	if source.Labels != nil {
+		if environment := strings.TrimSpace(source.Labels["environment"]); environment != "" {
+			return environment
+		}
+	}
+	return ""
+}
+
+func mergeBuildMetadata(base map[string]string, extra map[string]string) map[string]string {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(extra))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		merged[key] = value
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
 func deployRequestHash(req domain.DeployRequest) (string, error) {
 	return idempotency.Hash(struct {
 		ProjectID     string               `json:"projectId"`
@@ -426,7 +479,7 @@ func deployRequestHash(req domain.DeployRequest) (string, error) {
 	})
 }
 
-func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) ([]byte, []byte, error) {
+func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) ([]byte, []byte, map[string]string, error) {
 	functionManifest, err := json.MarshalIndent(map[string]any{
 		"name":          req.Name,
 		"runtime":       req.Runtime,
@@ -439,7 +492,7 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, r
 		"maxRetries":    req.MaxRetries,
 	}, "", "  ")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	startup, err := json.MarshalIndent(map[string]any{
 		"entrypoint": req.Entrypoint,
@@ -447,7 +500,7 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, r
 		"preparedAt": s.now(),
 	}, "", "  ")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	switch req.Source.Type {
@@ -461,32 +514,32 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, r
 			recorder.Printf("decoding bundleBase64 payload")
 			decoded, err := base64.StdEncoding.DecodeString(req.Source.BundleBase64)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			tmpDir, err := os.MkdirTemp("", "lecrev-bundle-*")
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			defer os.RemoveAll(tmpDir)
 			if err := artifact.ExtractTarGz(decoded, tmpDir); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			recorder.Printf("extracted uploaded bundle archive for smoke validation")
 			bundle, err := artifact.BundleFromDirectory(tmpDir, map[string][]byte{
 				"function.json": functionManifest,
 				"startup.json":  startup,
 			})
-			return bundle, startup, err
+			return bundle, startup, nil, err
 		}
 		files["function.json"] = functionManifest
 		files["startup.json"] = startup
 		recorder.Printf("packaging inline source files into immutable bundle")
 		bundle, err := artifact.BundleFromFiles(files)
-		return bundle, startup, err
+		return bundle, startup, nil, err
 	case domain.SourceTypeGit:
-		root, cleanup, err := s.prepareGitWorkspace(ctx, req, recorder)
+		root, metadata, cleanup, err := s.prepareGitWorkspace(ctx, req, recorder)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		defer cleanup()
 		recorder.Printf("packaging prepared git workspace from %s", root)
@@ -494,9 +547,9 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, r
 			"function.json": functionManifest,
 			"startup.json":  startup,
 		})
-		return bundle, startup, err
+		return bundle, startup, metadata, err
 	default:
-		return nil, nil, fmt.Errorf("unsupported source type %q", req.Source.Type)
+		return nil, nil, nil, fmt.Errorf("unsupported source type %q", req.Source.Type)
 	}
 }
 
@@ -505,14 +558,14 @@ type packageManifest struct {
 	Scripts        map[string]string `json:"scripts"`
 }
 
-func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (string, func(), error) {
+func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (string, map[string]string, func(), error) {
 	if strings.TrimSpace(req.Source.GitURL) == "" {
-		return "", nil, fmt.Errorf("gitUrl is required for git source")
+		return "", nil, nil, fmt.Errorf("gitUrl is required for git source")
 	}
 
 	tmpDir, err := os.MkdirTemp("", "lecrev-git-*")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(tmpDir) }
 
@@ -523,24 +576,26 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 	cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
 	if err := runCommand(ctx, recorder, "", "git", cloneArgs...); err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("git clone failed: %w", err)
+		return "", nil, nil, fmt.Errorf("git clone failed: %w", err)
 	}
+	metadata := buildMetadataForRequest(req)
+	metadata = mergeBuildMetadata(metadata, captureGitMetadata(ctx, recorder, tmpDir))
 
 	root, err := resolveBuildRoot(tmpDir, req.Source.SubPath)
 	if err != nil {
 		cleanup()
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	recorder.Printf("resolved build root to %s", root)
 	if err := prepareNodeWorkspace(ctx, recorder, root); err != nil {
 		cleanup()
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if err := verifyEntrypoint(root, req.Entrypoint); err != nil {
 		cleanup()
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return root, cleanup, nil
+	return root, metadata, cleanup, nil
 }
 
 func resolveBuildRoot(repoRoot, subPath string) (string, error) {
@@ -708,7 +763,39 @@ func (r *buildRecorder) Bytes() []byte {
 	return []byte(r.builder.String())
 }
 
+func captureGitMetadata(ctx context.Context, recorder *buildRecorder, repoRoot string) map[string]string {
+	metadata := make(map[string]string)
+
+	commitSHA, err := runCommandOutput(ctx, recorder, repoRoot, "git", "rev-parse", "HEAD")
+	if err != nil {
+		if recorder != nil {
+			recorder.Printf("warning: unable to resolve git commit sha: %v", err)
+		}
+	} else if commitSHA != "" {
+		metadata["commitSha"] = commitSHA
+	}
+
+	branch, err := runCommandOutput(ctx, recorder, repoRoot, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		if recorder != nil {
+			recorder.Printf("warning: unable to resolve git branch: %v", err)
+		}
+	} else if branch != "" && branch != "HEAD" {
+		metadata["branch"] = branch
+	}
+
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
 func runCommand(ctx context.Context, recorder *buildRecorder, dir, name string, args ...string) error {
+	_, err := runCommandOutput(ctx, recorder, dir, name, args...)
+	return err
+}
+
+func runCommandOutput(ctx context.Context, recorder *buildRecorder, dir, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -721,11 +808,12 @@ func runCommand(ctx context.Context, recorder *buildRecorder, dir, name string, 
 		}
 	}
 	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
 	if recorder != nil && len(output) > 0 {
-		recorder.Printf("%s", strings.TrimSpace(string(output)))
+		recorder.Printf("%s", trimmed)
 	}
 	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, trimmed)
 	}
-	return nil
+	return trimmed, nil
 }

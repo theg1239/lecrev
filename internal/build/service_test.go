@@ -407,6 +407,27 @@ await fs.copyFile(path.join(root, 'src/index.mjs'), path.join(root, 'dist/index.
 	if err != nil {
 		t.Fatalf("get build job: %v", err)
 	}
+	repoParsed, err := url.Parse(repoURL)
+	if err != nil {
+		t.Fatalf("parse repo url: %v", err)
+	}
+	repoDir := repoParsed.Path
+	revisionCmd := exec.Command("git", "rev-parse", "HEAD")
+	revisionCmd.Dir = repoDir
+	revisionBytes, err := revisionCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve git revision: %v: %s", err, string(revisionBytes))
+	}
+	commitSHA := strings.TrimSpace(string(revisionBytes))
+	if buildJob.Metadata["gitUrl"] != repoURL {
+		t.Fatalf("expected build metadata gitUrl=%s, got %+v", repoURL, buildJob.Metadata)
+	}
+	if buildJob.Metadata["branch"] != "main" {
+		t.Fatalf("expected build metadata branch=main, got %+v", buildJob.Metadata)
+	}
+	if buildJob.Metadata["commitSha"] != commitSHA {
+		t.Fatalf("expected build metadata commitSha=%s, got %+v", commitSHA, buildJob.Metadata)
+	}
 	if strings.TrimSpace(buildJob.LogsKey) == "" {
 		t.Fatal("expected build logs key for git source build")
 	}
