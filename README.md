@@ -132,6 +132,7 @@ Run the real Firecracker driver on a Linux execution host:
 go build -o ./dist/lecrev-guest-runner ./cmd/lecrev-guest-runner
 
 export LECREV_EXECUTION_DRIVER='firecracker'
+export LECREV_EXECUTION_HOST_SLOTS='1'
 export LECREV_FIRECRACKER_BINARY='/usr/local/bin/firecracker'
 export LECREV_JAILER_BINARY='/usr/local/bin/jailer'
 export LECREV_FIRECRACKER_USE_JAILER='false'
@@ -143,23 +144,29 @@ export LECREV_FIRECRACKER_GUEST_INIT='/usr/local/bin/lecrev-guest-runner'
 go run ./cmd/lecrev devstack
 ```
 
-The Firecracker rootfs image is expected to contain:
+On EC2, use the deployment helpers instead of hand-building the guest image:
 
-- `node` on the guest `PATH`
-- `lecrev-guest-runner` at the configured guest init path
-- a writable root filesystem, because the Firecracker driver copies the base rootfs into per-VM workspaces and persists separate snapshot rootfs images for prepared function snapshots
+```bash
+bash deploy/ec2/install-firecracker-host.sh
+bash deploy/ec2/build-firecracker-rootfs.sh
+bash deploy/ec2/check-firecracker-host.sh
+```
 
-The Linux Firecracker path now keeps a host-local snapshot cache under `LECREV_FIRECRACKER_SNAPSHOT_DIR`. It boots a clean guest runner as PID 1, creates a blank host-local snapshot for prep work, and after the first successful invoke of a function version it builds a per-function snapshot that later invocations can restore directly.
+The Linux Firecracker path now keeps a host-local snapshot cache under `LECREV_FIRECRACKER_SNAPSHOT_DIR`. It boots a clean guest runner as PID 1, creates a blank host-local snapshot for prep work, proactively builds per-function snapshots once versions become ready, and later invocations restore those snapshots directly when warm capacity exists.
 
 For `networkPolicy=full`, configure a host tap device and guest network tuple as well:
 
 ```bash
+bash deploy/ec2/configure-firecracker-network.sh
+
 export LECREV_FIRECRACKER_TAP_DEVICE='tap0'
 export LECREV_FIRECRACKER_GUEST_MAC='06:00:ac:10:00:02'
 export LECREV_FIRECRACKER_GUEST_IP='172.16.0.2'
 export LECREV_FIRECRACKER_GATEWAY_IP='172.16.0.1'
 export LECREV_FIRECRACKER_NETMASK='255.255.255.252'
 ```
+
+The current EC2 helper uses a single static tap device, so keep `LECREV_EXECUTION_HOST_SLOTS=1` when you need outbound guest networking.
 
 If you already have `devstack` running and want to smoke the live HTTP API instead of the embedded stack:
 

@@ -30,6 +30,8 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${TMP_DIR}/lecrev-guest-runne
 cp deploy/ec2/lecrev.service "${TMP_DIR}/"
 cp deploy/ec2/nats-server.service "${TMP_DIR}/"
 cp deploy/ec2/nginx.lecrev.conf "${TMP_DIR}/"
+cp deploy/ec2/build-firecracker-rootfs.sh "${TMP_DIR}/"
+cp deploy/ec2/check-firecracker-host.sh "${TMP_DIR}/"
 mkdir -p "${TMP_DIR}/frontend-dist"
 cp -R "${FRONTEND_DIR}/dist/." "${TMP_DIR}/frontend-dist/"
 
@@ -46,6 +48,12 @@ ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no ec2-user@"${HOST}" "\
   sudo rm -rf /var/www/lecrev/* && \
   sudo cp -R '${REMOTE_TMP}/frontend-dist/.' /var/www/lecrev/ && \
   sudo chown -R nginx:nginx /var/www/lecrev && \
+  if sudo test -x /usr/local/bin/firecracker || sudo grep -q '^LECREV_EXECUTION_DRIVER=firecracker$' /etc/lecrev/lecrev.env; then \
+    sudo install -m 0755 '${REMOTE_TMP}/build-firecracker-rootfs.sh' /usr/local/bin/lecrev-build-firecracker-rootfs && \
+    sudo install -m 0755 '${REMOTE_TMP}/check-firecracker-host.sh' /usr/local/bin/lecrev-check-firecracker-host && \
+    sudo APP_USER=lecrev bash /usr/local/bin/lecrev-build-firecracker-rootfs && \
+    sudo APP_USER=lecrev bash /usr/local/bin/lecrev-check-firecracker-host; \
+  fi && \
   sudo nginx -t && \
   sudo systemctl daemon-reload && \
   sudo systemctl enable --now nats-server nginx lecrev"

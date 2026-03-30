@@ -63,10 +63,19 @@ func guestPort() (uint32, error) {
 }
 
 func mountGuestFilesystems() error {
-	for _, path := range []string{"/proc", "/sys", "/tmp", preparedRoot} {
+	for _, path := range []string{"/dev", "/dev/pts", "/dev/shm", "/proc", "/sys", "/tmp", preparedRoot} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return err
 		}
+	}
+	if err := unix.Mount("devtmpfs", "/dev", "devtmpfs", 0, "mode=0755"); err != nil && !errors.Is(err, syscall.EBUSY) {
+		return err
+	}
+	if err := unix.Mount("devpts", "/dev/pts", "devpts", 0, "newinstance,ptmxmode=0666,mode=0620"); err != nil && !errors.Is(err, syscall.EBUSY) {
+		return err
+	}
+	if err := unix.Mount("tmpfs", "/dev/shm", "tmpfs", 0, "mode=1777"); err != nil && !errors.Is(err, syscall.EBUSY) {
+		return err
 	}
 	if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil && !errors.Is(err, syscall.EBUSY) {
 		return err

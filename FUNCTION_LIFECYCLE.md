@@ -62,7 +62,8 @@ Step-by-step:
 6. Uploads artifact to S3.
 7. Replicates artifact to target execution regions.
 8. Marks function version as ready.
-9. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
+9. Queues best-effort function snapshot preparation in each target execution region.
+10. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
 
 ### B) Bundle source deploy
 
@@ -72,7 +73,8 @@ Step-by-step:
 4. Uploads to S3.
 5. Replicates to target regions.
 6. Marks function version as ready.
-7. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
+7. Queues best-effort function snapshot preparation in each target execution region.
+8. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
 
 Builder isolation notes:
 
@@ -155,13 +157,14 @@ Node agent manages full microVM lifecycle:
 - cold boot from base image
 - warm restore from blank snapshot
 - hot restore from function snapshot
-2. Configures Firecracker + jailer + cgroups + networking + vsock.
-3. Ensures required artifact digest is local (fetch if missing).
-4. Retrieves scoped secrets via secrets proxy.
-5. Injects env and secrets to guest over controlled channel.
-6. Guest runner executes handler subprocess.
-7. Guest streams structured logs and result back.
-8. Node agent finalizes attempt and either tears down VM or preserves safe reusable snapshot.
+2. Function snapshots can be prepared proactively when a version becomes ready, so first invoke in a region can land on already-prepared warm state.
+3. Configures Firecracker + jailer + cgroups + networking + vsock.
+4. Ensures required artifact digest is local (fetch if missing).
+5. Retrieves scoped secrets via secrets proxy.
+6. Injects env and secrets to guest over controlled channel.
+7. Guest runner executes handler subprocess.
+8. Guest streams structured logs and result back.
+9. Node agent finalizes attempt and either tears down VM or preserves safe reusable snapshot.
 
 Isolation rule:
 
