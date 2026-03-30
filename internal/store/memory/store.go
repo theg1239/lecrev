@@ -135,7 +135,7 @@ func (s *Store) GetIdempotencyRecord(_ context.Context, scope, projectID, key st
 	defer s.mu.RUnlock()
 	record, ok := s.idempotency[idempotencyKey(scope, projectID, key)]
 	if !ok {
-		return nil, fmt.Errorf("idempotency record %q not found", idempotencyKey(scope, projectID, key))
+		return nil, fmt.Errorf("%w: idempotency record %q", store.ErrNotFound, idempotencyKey(scope, projectID, key))
 	}
 	cp := cloneIdempotencyRecord(record)
 	return &cp, nil
@@ -154,7 +154,7 @@ func (s *Store) GetArtifact(_ context.Context, digest string) (*domain.Artifact,
 	defer s.mu.RUnlock()
 	artifact, ok := s.artifacts[digest]
 	if !ok {
-		return nil, fmt.Errorf("artifact %q not found", digest)
+		return nil, fmt.Errorf("%w: artifact %q", store.ErrNotFound, digest)
 	}
 	cp := cloneArtifact(artifact)
 	return &cp, nil
@@ -173,7 +173,7 @@ func (s *Store) GetFunctionVersion(_ context.Context, versionID string) (*domain
 	defer s.mu.RUnlock()
 	version, ok := s.functions[versionID]
 	if !ok {
-		return nil, fmt.Errorf("function version %q not found", versionID)
+		return nil, fmt.Errorf("%w: function version %q", store.ErrNotFound, versionID)
 	}
 	cp := cloneFunctionVersion(version)
 	return &cp, nil
@@ -216,7 +216,7 @@ func (s *Store) GetExecutionJob(_ context.Context, jobID string) (*domain.Execut
 	defer s.mu.RUnlock()
 	job, ok := s.executionJobs[jobID]
 	if !ok {
-		return nil, fmt.Errorf("job %q not found", jobID)
+		return nil, fmt.Errorf("%w: job %q", store.ErrNotFound, jobID)
 	}
 	cp := cloneExecutionJob(job)
 	return &cp, nil
@@ -314,7 +314,7 @@ func (s *Store) GetAttempt(_ context.Context, attemptID string) (*domain.Attempt
 	defer s.mu.RUnlock()
 	attempt, ok := s.attempts[attemptID]
 	if !ok {
-		return nil, fmt.Errorf("attempt %q not found", attemptID)
+		return nil, fmt.Errorf("%w: attempt %q", store.ErrNotFound, attemptID)
 	}
 	cp := attempt
 	return &cp, nil
@@ -397,7 +397,7 @@ func (s *Store) GetHost(_ context.Context, hostID string) (*domain.Host, error) 
 	defer s.mu.RUnlock()
 	host, ok := s.hosts[hostID]
 	if !ok {
-		return nil, fmt.Errorf("host %q not found", hostID)
+		return nil, fmt.Errorf("%w: host %q", store.ErrNotFound, hostID)
 	}
 	cp := cloneHost(host)
 	return &cp, nil
@@ -463,7 +463,7 @@ func (s *Store) GetWebhookTrigger(_ context.Context, token string) (*domain.Webh
 	defer s.mu.RUnlock()
 	trigger, ok := s.webhookTriggers[token]
 	if !ok {
-		return nil, fmt.Errorf("webhook trigger %q not found", token)
+		return nil, fmt.Errorf("%w: webhook trigger %q", store.ErrNotFound, token)
 	}
 	cp := trigger
 	return &cp, nil
@@ -493,7 +493,7 @@ func (s *Store) GetRegion(_ context.Context, region string) (*domain.Region, err
 	defer s.mu.RUnlock()
 	value, ok := s.regions[region]
 	if !ok {
-		return nil, fmt.Errorf("region %q not found", region)
+		return nil, fmt.Errorf("%w: region %q", store.ErrNotFound, region)
 	}
 	cp := value
 	return &cp, nil
