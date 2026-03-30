@@ -138,6 +138,7 @@ export LECREV_FIRECRACKER_USE_JAILER='false'
 export LECREV_FIRECRACKER_KERNEL_IMAGE='/var/lib/lecrev/vmlinux'
 export LECREV_FIRECRACKER_ROOTFS='/var/lib/lecrev/rootfs.ext4'
 export LECREV_FIRECRACKER_WORKSPACE_DIR='/var/lib/lecrev/runtime'
+export LECREV_FIRECRACKER_SNAPSHOT_DIR='/var/lib/lecrev/runtime/snapshots'
 export LECREV_FIRECRACKER_GUEST_INIT='/usr/local/bin/lecrev-guest-runner'
 go run ./cmd/lecrev devstack
 ```
@@ -146,7 +147,9 @@ The Firecracker rootfs image is expected to contain:
 
 - `node` on the guest `PATH`
 - `lecrev-guest-runner` at the configured guest init path
-- a writable root filesystem, because the current Firecracker driver copies the base rootfs per invocation and runs the guest runner as PID 1
+- a writable root filesystem, because the Firecracker driver copies the base rootfs into per-VM workspaces and persists separate snapshot rootfs images for prepared function snapshots
+
+The Linux Firecracker path now keeps a host-local snapshot cache under `LECREV_FIRECRACKER_SNAPSHOT_DIR`. It boots a clean guest runner as PID 1, creates a blank host-local snapshot for prep work, and after the first successful invoke of a function version it builds a per-function snapshot that later invocations can restore directly.
 
 For `networkPolicy=full`, configure a host tap device and guest network tuple as well:
 
@@ -388,4 +391,4 @@ This repo intentionally keeps the driver boundary thin. The local `node` driver 
 
 The default execution topology is APAC-only. Unsupported regions such as `us-east-1` are rejected at deploy time to keep the platform aligned with an `ap-south-1` primary and nearby failover regions.
 
-The current production-oriented pieces in the repo are the metadata model, async build-job flow, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, a scoped secrets proxy in front of the backend secrets provider, Postgres migrations, optional NATS and S3 or MinIO adapters, mTLS for the coordinator-to-node-agent stream in local mode, a Linux Firecracker host driver, and a guest-runner binary for Firecracker rootfs images. The remaining major gaps to full production are snapshot restore and warm-pool reuse in the Firecracker driver, artifact replication automation, autoscaling, and AWS host automation.
+The current production-oriented pieces in the repo are the metadata model, async build-job flow, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, a scoped secrets proxy in front of the backend secrets provider, Postgres migrations, optional NATS and S3 or MinIO adapters, mTLS for the coordinator-to-node-agent stream in local mode, a Linux Firecracker host driver with function snapshot restore, and a guest-runner binary for Firecracker rootfs images. The remaining major gaps to full production are policy-aware blank-warm scheduling, artifact replication automation, autoscaling, and AWS host automation.

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,8 @@ import (
 	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/runtime/nodeexec"
 )
+
+const preparedRoot = "/var/lib/lecrev/functions"
 
 func main() {
 	port, err := guestPort()
@@ -60,7 +63,7 @@ func guestPort() (uint32, error) {
 }
 
 func mountGuestFilesystems() error {
-	for _, path := range []string{"/proc", "/sys", "/tmp"} {
+	for _, path := range []string{"/proc", "/sys", "/tmp", preparedRoot} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return err
 		}
@@ -84,44 +87,118 @@ func serve(port uint32) error {
 	}
 	defer listener.Close()
 
-	conn, err := listener.Accept()
-	if err != nil {
-		return err
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		shouldShutdown, err := handleConnection(conn)
+		_ = conn.Close()
+		if err != nil {
+			return err
+		}
+		if shouldShutdown {
+			time.Sleep(250 * time.Millisecond)
+			_ = unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
+			return nil
+		}
 	}
-	defer conn.Close()
-
-	var request firecracker.GuestInvocationRequest
-	if err := json.NewDecoder(conn).Decode(&request); err != nil {
-		return err
-	}
-
-	response, execErr := execute(request)
-	if execErr != nil {
-		response.Error = execErr.Error()
-	}
-	if err := json.NewEncoder(conn).Encode(response); err != nil {
-		return err
-	}
-
-	time.Sleep(250 * time.Millisecond)
-	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
-	return nil
 }
 
-func execute(request firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
-	result, err := nodeexec.ExecuteBundle(context.Background(), nodeexec.Request{
-		AttemptID:      request.AttemptID,
-		JobID:          request.JobID,
-		FunctionID:     request.FunctionID,
-		Entrypoint:     request.Entrypoint,
-		ArtifactBundle: request.ArtifactBundle,
-		Payload:        request.Payload,
-		Env:            request.Env,
-		Timeout:        time.Duration(request.TimeoutMillis) * time.Millisecond,
-		Region:         request.Region,
-		HostID:         request.HostID,
-		NodeBinary:     "node",
-	})
+func handleConnection(conn io.ReadWriteCloser) (bool, error) {
+	var request firecracker.GuestRequest
+	if err := json.NewDecoder(conn).Decode(&request); err != nil {
+		return false, err
+	}
+
+	var response firecracker.GuestResponse
+	shouldShutdown := false
+	switch request.Action {
+	case firecracker.GuestActionPing:
+		response.Ping = &firecracker.GuestPingResponse{Ready: true}
+	case firecracker.GuestActionPrepare:
+		prepareResp, err := prepare(request.Prepare)
+		if err != nil {
+			response.Error = err.Error()
+		}
+		response.Prepare = prepareResp
+	case firecracker.GuestActionExecute:
+		invokeResp, err := execute(request.Invocation)
+		if err != nil {
+			invokeResp.Error = err.Error()
+		}
+		response.Invocation = invokeResp
+		shouldShutdown = true
+	default:
+		response.Error = fmt.Sprintf("unsupported guest action %q", request.Action)
+	}
+
+	if err := json.NewEncoder(conn).Encode(&response); err != nil {
+		return false, err
+	}
+	return shouldShutdown, nil
+}
+
+func prepare(request *firecracker.GuestPrepareRequest) (*firecracker.GuestPrepareResponse, error) {
+	if request == nil {
+		return &firecracker.GuestPrepareResponse{Prepared: false}, fmt.Errorf("missing prepare request")
+	}
+	workspace := preparedWorkspace(request.FunctionID)
+	if err := os.RemoveAll(workspace); err != nil {
+		return &firecracker.GuestPrepareResponse{Prepared: false}, err
+	}
+	if err := nodeexec.PrepareWorkspace(request.ArtifactBundle, workspace); err != nil {
+		return &firecracker.GuestPrepareResponse{Prepared: false}, err
+	}
+	entrypoint := filepath.Join(workspace, filepath.FromSlash(request.Entrypoint))
+	if _, err := os.Stat(entrypoint); err != nil {
+		return &firecracker.GuestPrepareResponse{Prepared: false}, fmt.Errorf("prepared entrypoint %s: %w", request.Entrypoint, err)
+	}
+	return &firecracker.GuestPrepareResponse{Prepared: true}, nil
+}
+
+func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
+	if request == nil {
+		return &firecracker.GuestInvocationResponse{
+			ExitCode:   1,
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		}, fmt.Errorf("missing invocation request")
+	}
+
+	var (
+		result *nodeexec.Result
+		err    error
+	)
+	if request.UsePreparedRoot {
+		result, err = nodeexec.ExecuteWorkspace(context.Background(), nodeexec.WorkspaceRequest{
+			AttemptID:  request.AttemptID,
+			JobID:      request.JobID,
+			FunctionID: request.FunctionID,
+			Workspace:  preparedWorkspace(request.FunctionID),
+			Entrypoint: request.Entrypoint,
+			Payload:    request.Payload,
+			Env:        request.Env,
+			Timeout:    time.Duration(request.TimeoutMillis) * time.Millisecond,
+			Region:     request.Region,
+			HostID:     request.HostID,
+			NodeBinary: "node",
+		})
+	} else {
+		result, err = nodeexec.ExecuteBundle(context.Background(), nodeexec.Request{
+			AttemptID:      request.AttemptID,
+			JobID:          request.JobID,
+			FunctionID:     request.FunctionID,
+			Entrypoint:     request.Entrypoint,
+			ArtifactBundle: request.ArtifactBundle,
+			Payload:        request.Payload,
+			Env:            request.Env,
+			Timeout:        time.Duration(request.TimeoutMillis) * time.Millisecond,
+			Region:         request.Region,
+			HostID:         request.HostID,
+			NodeBinary:     "node",
+		})
+	}
 	if result == nil {
 		result = &nodeexec.Result{
 			ExitCode:   1,
@@ -136,6 +213,32 @@ func execute(request firecracker.GuestInvocationRequest) (*firecracker.GuestInvo
 		StartedAt:  result.StartedAt,
 		FinishedAt: result.FinishedAt,
 	}, err
+}
+
+func preparedWorkspace(functionID string) string {
+	return filepath.Join(preparedRoot, sanitizeID(functionID))
+}
+
+func sanitizeID(input string) string {
+	if input == "" {
+		return "unknown"
+	}
+	var builder strings.Builder
+	for _, r := range input {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-', r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	return builder.String()
 }
 
 func listenVsock(port uint32) (*vsockListener, error) {

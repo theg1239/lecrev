@@ -34,3 +34,20 @@ type Driver interface {
 	Name() string
 	Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error)
 }
+
+type WarmInventory struct {
+	BlankWarm    int
+	FunctionWarm map[string]int
+}
+
+type InventoryProvider interface {
+	WarmInventory() WarmInventory
+}
+
+type BlankWarmEnsurer interface {
+	EnsureBlankWarm(ctx context.Context) error
+}
+
+type PostExecutionWarmer interface {
+	PrepareFunctionWarm(ctx context.Context, req ExecuteRequest) error
+}

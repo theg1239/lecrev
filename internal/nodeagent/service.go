@@ -72,6 +72,10 @@ func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, obje
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	if err := s.prepareDriver(ctx); err != nil {
+		return err
+	}
+
 	conn, err := grpc.DialContext(ctx, s.coordinatorAddr, s.dialOptions...)
 	if err != nil {
 		return err
@@ -155,6 +159,10 @@ func (s *Service) RegistrationMessage() *regionv1.RegisterHost {
 }
 
 func (s *Service) RunEmbeddedHeartbeatLoop(ctx context.Context, coordinator EmbeddedCoordinator) error {
+	if err := s.prepareDriver(ctx); err != nil {
+		return err
+	}
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -294,12 +302,28 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		sendHeartbeat()
 		return
 	}
-	if result.SnapshotEligible {
+	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, logs, output, "", exitCode)
+	sendHeartbeat()
+	if warmer, ok := s.driver.(firecracker.PostExecutionWarmer); ok {
+		_ = warmer.PrepareFunctionWarm(ctx, firecracker.ExecuteRequest{
+			AttemptID:      msg.AttemptId,
+			JobID:          msg.JobId,
+			FunctionID:     msg.FunctionVersionId,
+			Entrypoint:     msg.Entrypoint,
+			ArtifactBundle: bundle,
+			Payload:        msg.PayloadJson,
+			Env:            env,
+			Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
+			MemoryMB:       version.MemoryMB,
+			NetworkPolicy:  msg.NetworkPolicy,
+			Region:         s.region,
+			HostID:         s.hostID,
+		})
+	} else if result.SnapshotEligible {
 		s.mu.Lock()
 		s.functionWarm[msg.FunctionVersionId] = 1
 		s.mu.Unlock()
 	}
-	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, logs, output, "", exitCode)
 	releaseSlot()
 	sendHeartbeat()
 }
@@ -375,15 +399,17 @@ func (s *Service) assignmentHeartbeatLoop(ctx context.Context, sendRunningHeartb
 }
 
 func (s *Service) registrationMessage() *regionv1.RegisterHost {
+	inventory := s.warmInventory()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	availableSlots := s.availableSlots
+	s.mu.Unlock()
 	return &regionv1.RegisterHost{
 		HostId:         s.hostID,
 		Region:         s.region,
 		Driver:         s.driverName,
-		AvailableSlots: int32(s.availableSlots),
-		BlankWarm:      int32(s.blankWarm),
-		FunctionWarm:   warmMetrics(s.functionWarm),
+		AvailableSlots: int32(availableSlots),
+		BlankWarm:      int32(inventory.BlankWarm),
+		FunctionWarm:   warmMetrics(inventory.FunctionWarm),
 	}
 }
 
@@ -394,14 +420,41 @@ func (s *Service) send(stream grpc.BidiStreamingClient[regionv1.AgentMessage, re
 }
 
 func (s *Service) heartbeatMessage() *regionv1.HostHeartbeat {
+	inventory := s.warmInventory()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	availableSlots := s.availableSlots
+	s.mu.Unlock()
 	return &regionv1.HostHeartbeat{
 		HostId:         s.hostID,
 		Region:         s.region,
-		AvailableSlots: int32(s.availableSlots),
-		BlankWarm:      int32(s.blankWarm),
-		FunctionWarm:   warmMetrics(s.functionWarm),
+		AvailableSlots: int32(availableSlots),
+		BlankWarm:      int32(inventory.BlankWarm),
+		FunctionWarm:   warmMetrics(inventory.FunctionWarm),
+	}
+}
+
+func (s *Service) prepareDriver(ctx context.Context) error {
+	if warmer, ok := s.driver.(firecracker.BlankWarmEnsurer); ok {
+		if err := warmer.EnsureBlankWarm(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) warmInventory() firecracker.WarmInventory {
+	if provider, ok := s.driver.(firecracker.InventoryProvider); ok {
+		return provider.WarmInventory()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	functionWarm := make(map[string]int, len(s.functionWarm))
+	for functionID, count := range s.functionWarm {
+		functionWarm[functionID] = count
+	}
+	return firecracker.WarmInventory{
+		BlankWarm:    s.blankWarm,
+		FunctionWarm: functionWarm,
 	}
 }
 

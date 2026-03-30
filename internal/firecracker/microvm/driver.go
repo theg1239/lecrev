@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ type Config struct {
 	RootFSPath        string
 
 	WorkspaceDir   string
+	SnapshotDir    string
 	ChrootBaseDir  string
 	UseJailer      bool
 	GuestInitPath  string
@@ -48,6 +48,7 @@ type Config struct {
 
 	StartTimeout    time.Duration
 	ConnectTimeout  time.Duration
+	PrepareTimeout  time.Duration
 	ShutdownTimeout time.Duration
 
 	JailerUID int
@@ -55,9 +56,10 @@ type Config struct {
 }
 
 type Driver struct {
-	config  Config
-	mu      sync.Mutex
-	nextCID uint32
+	config     Config
+	mu         sync.Mutex
+	snapshotMu sync.Mutex
+	nextCID    uint32
 }
 
 func New(cfg Config) (*Driver, error) {
@@ -76,135 +78,36 @@ func (d *Driver) Name() string {
 }
 
 func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
-	if runtime.GOOS != "linux" {
-		return nil, fmt.Errorf("firecracker driver requires linux hosts")
-	}
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		return nil, fmt.Errorf("firecracker driver requires /dev/kvm: %w", err)
+	if err := d.validateHost(); err != nil {
+		return nil, err
 	}
 	if req.MemoryMB <= 0 {
 		req.MemoryMB = int(d.config.DefaultMemoryMB)
 	}
+	if asset, ok := d.functionSnapshotAsset(req.FunctionID); ok {
+		return d.executeFromSnapshot(ctx, req, asset)
+	}
+	return d.executeCold(ctx, req)
+}
 
-	layout, vmID, err := d.prepareLayout(req.AttemptID)
-	if err != nil {
-		return nil, err
+func (d *Driver) WarmInventory() firecracker.WarmInventory {
+	functionWarm := d.functionWarmInventory()
+	return firecracker.WarmInventory{
+		BlankWarm:    0,
+		FunctionWarm: functionWarm,
 	}
-	defer layout.cleanup()
+}
 
-	if err := stageKernel(layout.kernelPath, d.config.KernelImagePath); err != nil {
-		return nil, err
-	}
-	if err := copyFile(d.config.RootFSPath, layout.rootFSPath); err != nil {
-		return nil, err
-	}
-	if d.config.UseJailer {
-		if err := os.Chown(layout.rootDir, d.config.JailerUID, d.config.JailerGID); err != nil && !errors.Is(err, os.ErrPermission) {
-			return nil, err
-		}
-		for _, path := range []string{layout.kernelPath, layout.rootFSPath} {
-			if err := os.Chown(path, d.config.JailerUID, d.config.JailerGID); err != nil && !errors.Is(err, os.ErrPermission) {
-				return nil, err
-			}
-		}
-	}
+func (d *Driver) EnsureBlankWarm(ctx context.Context) error {
+	d.snapshotMu.Lock()
+	defer d.snapshotMu.Unlock()
+	return d.ensureBlankSnapshotLocked(ctx)
+}
 
-	proc, err := d.startVM(ctx, vmID, layout)
-	if err != nil {
-		return nil, err
-	}
-	defer proc.close()
-
-	if err := waitForFile(ctx, layout.apiSocketHost, d.config.StartTimeout, proc); err != nil {
-		return nil, fmt.Errorf("wait for firecracker api socket: %w; logs: %s", err, proc.logs())
-	}
-
-	api := newAPIClient(layout.apiSocketHost)
-	guestCID := d.allocCID()
-	bootArgs, err := d.bootArgs(req)
-	if err != nil {
-		return nil, err
-	}
-	if err := api.put(ctx, "/machine-config", machineConfig{
-		VCPUCount:  d.config.VCPUCount,
-		MemSizeMib: int64(req.MemoryMB),
-		Smt:        false,
-	}); err != nil {
-		return nil, fmt.Errorf("configure machine: %w; logs: %s", err, proc.logs())
-	}
-	if err := api.put(ctx, "/boot-source", bootSource{
-		KernelImagePath: layout.guestKernelPath,
-		BootArgs:        bootArgs,
-	}); err != nil {
-		return nil, fmt.Errorf("configure boot source: %w; logs: %s", err, proc.logs())
-	}
-	if err := api.put(ctx, "/drives/rootfs", drive{
-		DriveID:      "rootfs",
-		PathOnHost:   layout.guestRootFSPath,
-		IsRootDevice: true,
-		IsReadOnly:   false,
-	}); err != nil {
-		return nil, fmt.Errorf("configure rootfs: %w; logs: %s", err, proc.logs())
-	}
-	if strings.EqualFold(req.NetworkPolicy, "full") {
-		if err := api.put(ctx, "/network-interfaces/eth0", networkInterface{
-			IfaceID:     "eth0",
-			HostDevName: d.config.TapDevice,
-			GuestMAC:    d.config.GuestMAC,
-		}); err != nil {
-			return nil, fmt.Errorf("configure network interface: %w; logs: %s", err, proc.logs())
-		}
-	}
-	if err := api.put(ctx, "/vsock", vsockDevice{
-		VsockID:  "vsock0",
-		GuestCID: guestCID,
-		UDSPath:  layout.guestVSockPath,
-	}); err != nil {
-		return nil, fmt.Errorf("configure vsock: %w; logs: %s", err, proc.logs())
-	}
-	if err := api.put(ctx, "/actions", action{ActionType: "InstanceStart"}); err != nil {
-		return nil, fmt.Errorf("start vm: %w; logs: %s", err, proc.logs())
-	}
-
-	invokeCtx, cancel := context.WithTimeout(ctx, d.config.ConnectTimeout+req.Timeout)
-	defer cancel()
-
-	response, err := invokeGuest(invokeCtx, layout.vsockSocketHost, d.config.GuestVSockPort, firecracker.GuestInvocationRequest{
-		AttemptID:      req.AttemptID,
-		JobID:          req.JobID,
-		FunctionID:     req.FunctionID,
-		Entrypoint:     req.Entrypoint,
-		ArtifactBundle: req.ArtifactBundle,
-		Payload:        req.Payload,
-		Env:            req.Env,
-		TimeoutMillis:  req.Timeout.Milliseconds(),
-		Region:         req.Region,
-		HostID:         req.HostID,
-	})
-
-	_ = api.put(context.Background(), "/actions", action{ActionType: "SendCtrlAltDel"})
-	_ = proc.wait(d.config.ShutdownTimeout)
-
-	if response == nil {
-		return nil, fmt.Errorf("guest execution failed: %w; firecracker logs: %s", err, proc.logs())
-	}
-	result := &firecracker.ExecuteResult{
-		ExitCode:         response.ExitCode,
-		Logs:             response.Logs,
-		Output:           response.Output,
-		SnapshotEligible: false,
-		StartedAt:        response.StartedAt,
-		FinishedAt:       response.FinishedAt,
-	}
-	if err != nil {
-		result.Logs = combineLogs(response.Logs, proc.logs())
-		return result, err
-	}
-	if response.Error != "" {
-		result.Logs = combineLogs(response.Logs, proc.logs())
-		return result, errors.New(response.Error)
-	}
-	return result, nil
+func (d *Driver) PrepareFunctionWarm(ctx context.Context, req firecracker.ExecuteRequest) error {
+	d.snapshotMu.Lock()
+	defer d.snapshotMu.Unlock()
+	return d.ensureFunctionSnapshotLocked(ctx, req)
 }
 
 func (d *Driver) allocCID() uint32 {
@@ -244,6 +147,9 @@ func (c Config) withDefaults() Config {
 	if strings.TrimSpace(c.WorkspaceDir) == "" {
 		c.WorkspaceDir = os.TempDir()
 	}
+	if strings.TrimSpace(c.SnapshotDir) == "" {
+		c.SnapshotDir = filepath.Join(c.WorkspaceDir, "snapshots")
+	}
 	if strings.TrimSpace(c.ChrootBaseDir) == "" {
 		c.ChrootBaseDir = filepath.Join(c.WorkspaceDir, "jailer")
 	}
@@ -267,6 +173,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ConnectTimeout == 0 {
 		c.ConnectTimeout = 10 * time.Second
+	}
+	if c.PrepareTimeout == 0 {
+		c.PrepareTimeout = 20 * time.Second
 	}
 	if c.ShutdownTimeout == 0 {
 		c.ShutdownTimeout = 5 * time.Second
@@ -460,6 +369,14 @@ func newAPIClient(socketPath string) *apiClient {
 }
 
 func (c *apiClient) put(ctx context.Context, path string, body any) error {
+	return c.request(ctx, http.MethodPut, path, body)
+}
+
+func (c *apiClient) patch(ctx context.Context, path string, body any) error {
+	return c.request(ctx, http.MethodPatch, path, body)
+}
+
+func (c *apiClient) request(ctx context.Context, method, path string, body any) error {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -468,7 +385,7 @@ func (c *apiClient) put(ctx context.Context, path string, body any) error {
 		}
 		payload = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://firecracker"+path, payload)
+	req, err := http.NewRequestWithContext(ctx, method, "http://firecracker"+path, payload)
 	if err != nil {
 		return err
 	}
@@ -519,21 +436,69 @@ type action struct {
 	ActionType string `json:"action_type"`
 }
 
+func pingGuest(ctx context.Context, socketPath string, port uint32) error {
+	response, err := guestRequest(ctx, socketPath, port, firecracker.GuestRequest{
+		Action: firecracker.GuestActionPing,
+		Ping:   &firecracker.GuestPingRequest{},
+	})
+	if err != nil {
+		return err
+	}
+	if response == nil || response.Ping == nil || !response.Ping.Ready {
+		return fmt.Errorf("guest did not report ready state")
+	}
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+	return nil
+}
+
+func prepareGuest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestPrepareRequest) error {
+	response, err := guestRequest(ctx, socketPath, port, firecracker.GuestRequest{
+		Action:  firecracker.GuestActionPrepare,
+		Prepare: &request,
+	})
+	if err != nil {
+		return err
+	}
+	if response == nil || response.Prepare == nil || !response.Prepare.Prepared {
+		if response != nil && response.Error != "" {
+			return errors.New(response.Error)
+		}
+		return fmt.Errorf("guest did not confirm prepared state")
+	}
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+	return nil
+}
+
 func invokeGuest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
-	return invokeGuestWithDialer(ctx, func(ctx context.Context) (net.Conn, error) {
+	response, err := guestRequest(ctx, socketPath, port, firecracker.GuestRequest{
+		Action:     firecracker.GuestActionExecute,
+		Invocation: &request,
+	})
+	if response == nil {
+		return nil, err
+	}
+	return response.Invocation, err
+}
+
+func guestRequest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestRequest) (*firecracker.GuestResponse, error) {
+	return guestRequestWithDialer(ctx, func(ctx context.Context) (net.Conn, error) {
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, "unix", socketPath)
 	}, port, request)
 }
 
-func invokeGuestWithDialer(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
+func guestRequestWithDialer(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestRequest) (*firecracker.GuestResponse, error) {
 	var lastErr error
 	deadline := time.Now().Add(10 * time.Second)
 	if cut, ok := ctx.Deadline(); ok {
 		deadline = cut
 	}
 	for time.Now().Before(deadline) {
-		response, err := invokeGuestOnce(ctx, dial, port, request)
+		response, err := guestRequestOnce(ctx, dial, port, request)
 		if err == nil {
 			return response, nil
 		}
@@ -550,7 +515,7 @@ func invokeGuestWithDialer(ctx context.Context, dial func(context.Context) (net.
 	return nil, lastErr
 }
 
-func invokeGuestOnce(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
+func guestRequestOnce(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestRequest) (*firecracker.GuestResponse, error) {
 	conn, err := dial(ctx)
 	if err != nil {
 		return nil, err
@@ -571,7 +536,7 @@ func invokeGuestOnce(ctx context.Context, dial func(context.Context) (net.Conn, 
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		return nil, err
 	}
-	var response firecracker.GuestInvocationResponse
+	var response firecracker.GuestResponse
 	if err := json.NewDecoder(reader).Decode(&response); err != nil {
 		return nil, err
 	}

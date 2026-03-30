@@ -55,21 +55,22 @@ type Config struct {
 	EnableMTLS          bool
 	ExecutionDriver     string
 
-	FirecrackerBinary     string
-	JailerBinary          string
-	FirecrackerUseJailer  bool
-	FirecrackerKernelPath string
-	FirecrackerRootFSPath string
-	FirecrackerWorkspace  string
-	FirecrackerChrootBase string
-	FirecrackerGuestInit  string
-	FirecrackerTapDevice  string
-	FirecrackerGuestMAC   string
-	FirecrackerGuestIP    string
-	FirecrackerGatewayIP  string
-	FirecrackerNetmask    string
-	FirecrackerVCPUCount  int
-	FirecrackerMemoryMB   int
+	FirecrackerBinary      string
+	JailerBinary           string
+	FirecrackerUseJailer   bool
+	FirecrackerKernelPath  string
+	FirecrackerRootFSPath  string
+	FirecrackerWorkspace   string
+	FirecrackerSnapshotDir string
+	FirecrackerChrootBase  string
+	FirecrackerGuestInit   string
+	FirecrackerTapDevice   string
+	FirecrackerGuestMAC    string
+	FirecrackerGuestIP     string
+	FirecrackerGatewayIP   string
+	FirecrackerNetmask     string
+	FirecrackerVCPUCount   int
+	FirecrackerMemoryMB    int
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -149,6 +150,9 @@ func prepareConfig(cfg *Config) error {
 	}
 	if cfg.LoadEnv && cfg.FirecrackerWorkspace == "" {
 		cfg.FirecrackerWorkspace = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_WORKSPACE_DIR"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerSnapshotDir == "" {
+		cfg.FirecrackerSnapshotDir = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_SNAPSHOT_DIR"))
 	}
 	if cfg.LoadEnv && cfg.FirecrackerChrootBase == "" {
 		cfg.FirecrackerChrootBase = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_CHROOT_BASE_DIR"))
@@ -474,6 +478,7 @@ func buildExecutionDriver(cfg Config) (firecracker.Driver, error) {
 			KernelImagePath:   cfg.FirecrackerKernelPath,
 			RootFSPath:        cfg.FirecrackerRootFSPath,
 			WorkspaceDir:      cfg.FirecrackerWorkspace,
+			SnapshotDir:       cfg.FirecrackerSnapshotDir,
 			ChrootBaseDir:     cfg.FirecrackerChrootBase,
 			UseJailer:         cfg.FirecrackerUseJailer,
 			GuestInitPath:     cfg.FirecrackerGuestInit,

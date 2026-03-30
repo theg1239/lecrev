@@ -56,7 +56,7 @@ func TestBootArgsIncludeGuestRunnerAndNetwork(t *testing.T) {
 func TestInvokeGuestUsesFirecrackerVsockHandshake(t *testing.T) {
 	t.Parallel()
 
-	requestCh := make(chan firecracker.GuestInvocationRequest, 1)
+	requestCh := make(chan firecracker.GuestRequest, 1)
 	serverConn, clientConn := net.Pipe()
 	go func() {
 		defer serverConn.Close()
@@ -71,44 +71,49 @@ func TestInvokeGuestUsesFirecrackerVsockHandshake(t *testing.T) {
 		}
 		_, _ = serverConn.Write([]byte("OK 5005\n"))
 
-		var request firecracker.GuestInvocationRequest
+		var request firecracker.GuestRequest
 		if err := json.NewDecoder(reader).Decode(&request); err != nil {
 			return
 		}
 		requestCh <- request
-		_ = json.NewEncoder(serverConn).Encode(&firecracker.GuestInvocationResponse{
-			ExitCode:   0,
-			Logs:       "guest log",
-			Output:     json.RawMessage(`{"ok":true}`),
-			StartedAt:  time.Now().UTC(),
-			FinishedAt: time.Now().UTC(),
+		_ = json.NewEncoder(serverConn).Encode(&firecracker.GuestResponse{
+			Invocation: &firecracker.GuestInvocationResponse{
+				ExitCode:   0,
+				Logs:       "guest log",
+				Output:     json.RawMessage(`{"ok":true}`),
+				StartedAt:  time.Now().UTC(),
+				FinishedAt: time.Now().UTC(),
+			},
 		})
 	}()
 
-	response, err := invokeGuestWithDialer(context.Background(), func(context.Context) (net.Conn, error) {
+	response, err := guestRequestWithDialer(context.Background(), func(context.Context) (net.Conn, error) {
 		return clientConn, nil
-	}, 5005, firecracker.GuestInvocationRequest{
-		AttemptID:      "attempt-1",
-		JobID:          "job-1",
-		FunctionID:     "fn-1",
-		Entrypoint:     "index.mjs",
-		ArtifactBundle: []byte("bundle"),
-		Payload:        json.RawMessage(`{"hello":"world"}`),
-		Env:            map[string]string{"A": "B"},
-		TimeoutMillis:  1000,
-		Region:         "ap-south-1",
-		HostID:         "host-ap-south-1-a",
+	}, 5005, firecracker.GuestRequest{
+		Action: firecracker.GuestActionExecute,
+		Invocation: &firecracker.GuestInvocationRequest{
+			AttemptID:      "attempt-1",
+			JobID:          "job-1",
+			FunctionID:     "fn-1",
+			Entrypoint:     "index.mjs",
+			ArtifactBundle: []byte("bundle"),
+			Payload:        json.RawMessage(`{"hello":"world"}`),
+			Env:            map[string]string{"A": "B"},
+			TimeoutMillis:  1000,
+			Region:         "ap-south-1",
+			HostID:         "host-ap-south-1-a",
+		},
 	})
 	if err != nil {
 		t.Fatalf("invoke guest: %v", err)
 	}
-	if response.ExitCode != 0 || string(response.Output) != `{"ok":true}` {
+	if response.Invocation == nil || response.Invocation.ExitCode != 0 || string(response.Invocation.Output) != `{"ok":true}` {
 		t.Fatalf("unexpected guest response: %+v", response)
 	}
 
 	select {
 	case request := <-requestCh:
-		if request.JobID != "job-1" {
+		if request.Invocation == nil || request.Invocation.JobID != "job-1" {
 			t.Fatalf("expected guest request to include job id, got %+v", request)
 		}
 	case <-time.After(2 * time.Second):
@@ -137,5 +142,42 @@ func TestStageKernelFallsBackToCopy(t *testing.T) {
 	}
 	if string(raw) != "kernel" {
 		t.Fatalf("expected copied kernel contents, got %q", string(raw))
+	}
+}
+
+func TestWarmInventoryReturnsPreparedFunctionSnapshots(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	driver, err := New(Config{
+		FirecrackerBinary: "/usr/bin/firecracker",
+		KernelImagePath:   filepath.Join(dir, "vmlinux"),
+		RootFSPath:        filepath.Join(dir, "rootfs.ext4"),
+		WorkspaceDir:      dir,
+		SnapshotDir:       filepath.Join(dir, "snapshots"),
+	})
+	if err != nil {
+		t.Fatalf("new driver: %v", err)
+	}
+
+	asset := driver.functionSnapshotPath("fn-1")
+	if err := os.MkdirAll(asset.dir, 0o755); err != nil {
+		t.Fatalf("mkdir asset: %v", err)
+	}
+	for _, path := range []string{asset.statePath, asset.memoryPath, asset.rootFSPath} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatalf("write asset file %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(asset.metadataPath, []byte(`{"kind":"function","functionId":"fn-1"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	inventory := driver.WarmInventory()
+	if inventory.BlankWarm != 0 {
+		t.Fatalf("expected blank warm inventory to remain 0, got %d", inventory.BlankWarm)
+	}
+	if inventory.FunctionWarm["fn-1"] != 1 {
+		t.Fatalf("expected function warm inventory for fn-1, got %+v", inventory.FunctionWarm)
 	}
 }

@@ -29,6 +29,20 @@ type Request struct {
 	NodeBinary     string
 }
 
+type WorkspaceRequest struct {
+	AttemptID  string
+	JobID      string
+	FunctionID string
+	Workspace  string
+	Entrypoint string
+	Payload    json.RawMessage
+	Env        map[string]string
+	Timeout    time.Duration
+	Region     string
+	HostID     string
+	NodeBinary string
+}
+
 type Result struct {
 	ExitCode   int
 	Logs       string
@@ -37,22 +51,45 @@ type Result struct {
 	FinishedAt time.Time
 }
 
-func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
-	startedAt := time.Now().UTC()
+func PrepareWorkspace(artifactBundle []byte, workspace string) error {
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		return err
+	}
+	return artifact.ExtractTarGz(artifactBundle, workspace)
+}
 
+func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
 	workspace, err := os.MkdirTemp("", "lecrev-run-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(workspace)
 
-	if err := artifact.ExtractTarGz(req.ArtifactBundle, workspace); err != nil {
+	if err := PrepareWorkspace(req.ArtifactBundle, workspace); err != nil {
 		return nil, err
 	}
 
-	payloadPath := filepath.Join(workspace, "__lecrev_payload.json")
-	resultPath := filepath.Join(workspace, "__lecrev_result.json")
-	wrapperPath := filepath.Join(workspace, "__lecrev_invoke.mjs")
+	return ExecuteWorkspace(ctx, WorkspaceRequest{
+		AttemptID:  req.AttemptID,
+		JobID:      req.JobID,
+		FunctionID: req.FunctionID,
+		Workspace:  workspace,
+		Entrypoint: req.Entrypoint,
+		Payload:    req.Payload,
+		Env:        req.Env,
+		Timeout:    req.Timeout,
+		Region:     req.Region,
+		HostID:     req.HostID,
+		NodeBinary: req.NodeBinary,
+	})
+}
+
+func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error) {
+	startedAt := time.Now().UTC()
+
+	payloadPath := filepath.Join(req.Workspace, "__lecrev_payload.json")
+	resultPath := filepath.Join(req.Workspace, "__lecrev_result.json")
+	wrapperPath := filepath.Join(req.Workspace, "__lecrev_invoke.mjs")
 
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`null`)
@@ -71,7 +108,10 @@ func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
 	invokeCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	entrypoint := filepath.Join(workspace, filepath.FromSlash(req.Entrypoint))
+	entrypoint := filepath.Join(req.Workspace, filepath.FromSlash(req.Entrypoint))
+	if _, err := os.Stat(entrypoint); err != nil {
+		return nil, fmt.Errorf("entrypoint %s: %w", req.Entrypoint, err)
+	}
 	contextJSON, err := json.Marshal(map[string]any{
 		"attemptId":  req.AttemptID,
 		"jobId":      req.JobID,
@@ -84,7 +124,7 @@ func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	cmd := exec.CommandContext(invokeCtx, req.NodeBinary, wrapperPath, payloadPath, entrypoint, resultPath)
-	cmd.Dir = workspace
+	cmd.Dir = req.Workspace
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

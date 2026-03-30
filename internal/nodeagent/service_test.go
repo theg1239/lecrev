@@ -105,6 +105,40 @@ func TestExecuteAssignmentFailsWhenOutputExceedsLimit(t *testing.T) {
 	}
 }
 
+func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
+	t.Parallel()
+
+	driver := &inventoryDriver{
+		result: &firecracker.ExecuteResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"ok":true}`),
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		},
+		inventory: firecracker.WarmInventory{
+			BlankWarm:    0,
+			FunctionWarm: map[string]int{},
+		},
+	}
+	svc, _ := newTestService(t, driver)
+
+	if err := svc.prepareDriver(context.Background()); err != nil {
+		t.Fatalf("prepare driver: %v", err)
+	}
+
+	register := svc.RegistrationMessage()
+	if register.BlankWarm != 1 {
+		t.Fatalf("expected blank warm inventory from driver, got %d", register.BlankWarm)
+	}
+
+	svc.executeAssignment(context.Background(), testAssignment(), func(*regionv1.AssignmentUpdate) {}, func() {})
+
+	heartbeat := svc.heartbeatMessage()
+	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 1 {
+		t.Fatalf("expected prepared function warm inventory, got %+v", heartbeat.FunctionWarm)
+	}
+}
+
 type stubDriver struct {
 	result *firecracker.ExecuteResult
 	err    error
@@ -116,6 +150,43 @@ func (d stubDriver) Name() string {
 
 func (d stubDriver) Execute(context.Context, firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
 	return d.result, d.err
+}
+
+type inventoryDriver struct {
+	result    *firecracker.ExecuteResult
+	inventory firecracker.WarmInventory
+}
+
+func (d *inventoryDriver) Name() string {
+	return "inventory-driver"
+}
+
+func (d *inventoryDriver) Execute(context.Context, firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
+	return d.result, nil
+}
+
+func (d *inventoryDriver) WarmInventory() firecracker.WarmInventory {
+	functionWarm := make(map[string]int, len(d.inventory.FunctionWarm))
+	for functionID, count := range d.inventory.FunctionWarm {
+		functionWarm[functionID] = count
+	}
+	return firecracker.WarmInventory{
+		BlankWarm:    d.inventory.BlankWarm,
+		FunctionWarm: functionWarm,
+	}
+}
+
+func (d *inventoryDriver) EnsureBlankWarm(context.Context) error {
+	d.inventory.BlankWarm = 1
+	return nil
+}
+
+func (d *inventoryDriver) PrepareFunctionWarm(_ context.Context, req firecracker.ExecuteRequest) error {
+	if d.inventory.FunctionWarm == nil {
+		d.inventory.FunctionWarm = map[string]int{}
+	}
+	d.inventory.FunctionWarm[req.FunctionID] = 1
+	return nil
 }
 
 func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact.Store) {
