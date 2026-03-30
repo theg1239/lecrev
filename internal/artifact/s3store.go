@@ -3,6 +3,7 @@ package artifact
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -86,6 +87,9 @@ func (s *S3Store) Get(ctx context.Context, key string) ([]byte, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if isObjectNotFound(err) {
+			return nil, fmt.Errorf("%w: %q", ErrNotFound, key)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -104,4 +108,16 @@ func errorAs(err error, target any) bool {
 		return v.As(target)
 	}
 	return false
+}
+
+func isObjectNotFound(err error) bool {
+	var noSuchKey *types.NoSuchKey
+	if errorAs(err, &noSuchKey) {
+		return true
+	}
+	message := err.Error()
+	return errors.Is(err, ErrNotFound) ||
+		strings.Contains(message, "NoSuchKey") ||
+		strings.Contains(message, "NotFound") ||
+		strings.Contains(message, "404")
 }

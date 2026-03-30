@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/theg1239/lecrev/internal/apikey"
+	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/scheduler"
@@ -23,6 +24,7 @@ import (
 
 type Server struct {
 	store     store.Store
+	objects   artifact.Store
 	builder   *build.Service
 	scheduler *scheduler.Service
 	admins    map[string]RegionAdmin
@@ -33,13 +35,14 @@ type RegionAdmin interface {
 	DrainHost(ctx context.Context, hostID, reason string) error
 }
 
-func New(store store.Store, builder *build.Service, scheduler *scheduler.Service, admins ...RegionAdmin) http.Handler {
+func New(store store.Store, objects artifact.Store, builder *build.Service, scheduler *scheduler.Service, admins ...RegionAdmin) http.Handler {
 	adminIndex := make(map[string]RegionAdmin, len(admins))
 	for _, admin := range admins {
 		adminIndex[admin.Region()] = admin
 	}
 	srv := &Server{
 		store:     store,
+		objects:   objects,
 		builder:   builder,
 		scheduler: scheduler,
 		admins:    adminIndex,
@@ -52,6 +55,8 @@ func New(store store.Store, builder *build.Service, scheduler *scheduler.Service
 		r.Get("/build-jobs/{jobID}", srv.getBuildJob)
 		r.Post("/functions/{versionID}/invoke", srv.invokeFunction)
 		r.Get("/jobs/{jobID}", srv.getJob)
+		r.Get("/jobs/{jobID}/logs", srv.getJobLogs)
+		r.Get("/jobs/{jobID}/output", srv.getJobOutput)
 		r.Get("/functions/{versionID}", srv.getFunction)
 		r.Post("/functions/{versionID}/triggers/webhook", srv.createWebhookTrigger)
 		r.Get("/functions/{versionID}/triggers/webhook", srv.listWebhookTriggers)
@@ -194,13 +199,8 @@ func (s *Server) getBuildJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
-	jobID := chi.URLParam(r, "jobID")
-	job, err := s.store.GetExecutionJob(r.Context(), jobID)
+	job, err := s.authorizedJob(r.Context(), chi.URLParam(r, "jobID"))
 	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	if err := s.authorizeProject(r.Context(), job.ProjectID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -209,12 +209,8 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listJobAttempts(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobID")
-	job, err := s.store.GetExecutionJob(r.Context(), jobID)
+	_, err := s.authorizedJob(r.Context(), jobID)
 	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	if err := s.authorizeProject(r.Context(), job.ProjectID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -228,12 +224,8 @@ func (s *Server) listJobAttempts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listJobCosts(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobID")
-	job, err := s.store.GetExecutionJob(r.Context(), jobID)
+	_, err := s.authorizedJob(r.Context(), jobID)
 	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	if err := s.authorizeProject(r.Context(), job.ProjectID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -243,6 +235,44 @@ func (s *Server) listJobCosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) getJobLogs(w http.ResponseWriter, r *http.Request) {
+	job, err := s.authorizedJob(r.Context(), chi.URLParam(r, "jobID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	key, err := jobResultKey(job, "logs")
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	data, err := s.objects.Get(r.Context(), key)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeRaw(w, http.StatusOK, "text/plain; charset=utf-8", data)
+}
+
+func (s *Server) getJobOutput(w http.ResponseWriter, r *http.Request) {
+	job, err := s.authorizedJob(r.Context(), chi.URLParam(r, "jobID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	key, err := jobResultKey(job, "output")
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	data, err := s.objects.Get(r.Context(), key)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeRaw(w, http.StatusOK, "application/json", data)
 }
 
 func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
@@ -416,16 +446,24 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+func writeRaw(w http.ResponseWriter, status int, contentType string, data []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
 func writeServiceError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
+	case errors.Is(err, artifact.ErrNotFound):
+		status = http.StatusNotFound
 	case errors.Is(err, store.ErrAccessDenied):
 		status = http.StatusForbidden
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, domain.ErrFunctionVersionNotReady):
+	case errors.Is(err, domain.ErrFunctionVersionNotReady), errors.Is(err, domain.ErrExecutionResultNotReady):
 		status = http.StatusConflict
 	case errors.Is(err, domain.ErrIdempotencyConflict), errors.Is(err, domain.ErrIdempotencyInProgress), errors.Is(err, store.ErrAlreadyExists):
 		status = http.StatusConflict
@@ -518,6 +556,37 @@ func authFromContext(ctx context.Context) authContext {
 
 func tenantIDFromContext(ctx context.Context) string {
 	return authFromContext(ctx).TenantID
+}
+
+func (s *Server) authorizedJob(ctx context.Context, jobID string) (*domain.ExecutionJob, error) {
+	job, err := s.store.GetExecutionJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeProject(ctx, job.ProjectID); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+func jobResultKey(job *domain.ExecutionJob, kind string) (string, error) {
+	if job.Result == nil {
+		return "", domain.ErrExecutionResultNotReady
+	}
+	switch kind {
+	case "logs":
+		if strings.TrimSpace(job.Result.LogsKey) == "" {
+			return "", domain.ErrExecutionResultNotReady
+		}
+		return job.Result.LogsKey, nil
+	case "output":
+		if strings.TrimSpace(job.Result.OutputKey) == "" {
+			return "", domain.ErrExecutionResultNotReady
+		}
+		return job.Result.OutputKey, nil
+	default:
+		return "", fmt.Errorf("unsupported execution artifact %q", kind)
+	}
 }
 
 func (s *Server) authorizeProject(ctx context.Context, projectID string) error {

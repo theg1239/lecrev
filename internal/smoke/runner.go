@@ -28,14 +28,16 @@ type Config struct {
 }
 
 type Result struct {
-	BuildJob  domain.BuildJob        `json:"buildJob"`
-	Version   domain.FunctionVersion `json:"version"`
-	Job       domain.ExecutionJob    `json:"job"`
-	Attempts  []domain.Attempt       `json:"attempts"`
-	Costs     []domain.CostRecord    `json:"costs"`
-	Regions   []domain.Region        `json:"regions"`
-	Hosts     []domain.Host          `json:"hosts"`
-	WarmPools []domain.WarmPool      `json:"warmPools"`
+	BuildJob       domain.BuildJob        `json:"buildJob"`
+	Version        domain.FunctionVersion `json:"version"`
+	Job            domain.ExecutionJob    `json:"job"`
+	ArchivedLogs   string                 `json:"archivedLogs"`
+	ArchivedOutput json.RawMessage        `json:"archivedOutput"`
+	Attempts       []domain.Attempt       `json:"attempts"`
+	Costs          []domain.CostRecord    `json:"costs"`
+	Regions        []domain.Region        `json:"regions"`
+	Hosts          []domain.Host          `json:"hosts"`
+	WarmPools      []domain.WarmPool      `json:"warmPools"`
 }
 
 func Run(ctx context.Context, cfg Config) (*Result, error) {
@@ -129,6 +131,20 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err := validateOutput(job.Result.Output, payload); err != nil {
 		return nil, err
 	}
+	archivedLogs, err := doRaw(runCtx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodGet, "/v1/jobs/"+job.ID+"/logs", http.StatusOK)
+	if err != nil {
+		return nil, fmt.Errorf("get archived logs: %w", err)
+	}
+	if string(archivedLogs) != job.Result.Logs {
+		return nil, fmt.Errorf("expected archived logs %q, got %q", job.Result.Logs, string(archivedLogs))
+	}
+	archivedOutput, err := doRaw(runCtx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodGet, "/v1/jobs/"+job.ID+"/output", http.StatusOK)
+	if err != nil {
+		return nil, fmt.Errorf("get archived output: %w", err)
+	}
+	if string(archivedOutput) != string(job.Result.Output) {
+		return nil, fmt.Errorf("expected archived output %s, got %s", string(job.Result.Output), string(archivedOutput))
+	}
 
 	var attempts []domain.Attempt
 	if err := doJSON(runCtx, cfg.Client, cfg.BaseURL, cfg.APIKey, http.MethodGet, "/v1/jobs/"+job.ID+"/attempts", nil, http.StatusOK, &attempts); err != nil {
@@ -165,14 +181,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	return &Result{
-		BuildJob:  buildJob,
-		Version:   version,
-		Job:       job,
-		Attempts:  attempts,
-		Costs:     costs,
-		Regions:   regionInventory,
-		Hosts:     hosts,
-		WarmPools: warmPools,
+		BuildJob:       buildJob,
+		Version:        version,
+		Job:            job,
+		ArchivedLogs:   string(archivedLogs),
+		ArchivedOutput: append(json.RawMessage(nil), archivedOutput...),
+		Attempts:       attempts,
+		Costs:          costs,
+		Regions:        regionInventory,
+		Hosts:          hosts,
+		WarmPools:      warmPools,
 	}, nil
 }
 
@@ -300,6 +318,27 @@ func doJSON(ctx context.Context, client *http.Client, baseURL, apiKey, method, p
 		return nil
 	}
 	return json.Unmarshal(raw, target)
+}
+
+func doRaw(ctx context.Context, client *http.Client, baseURL, apiKey, method, path string, expectedStatus int) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("unexpected status %d for %s %s: %s", resp.StatusCode, method, path, strings.TrimSpace(string(raw)))
+	}
+	return raw, nil
 }
 
 func NewHandlerClient(handler http.Handler) *http.Client {

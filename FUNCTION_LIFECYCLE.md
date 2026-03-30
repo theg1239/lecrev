@@ -159,6 +159,7 @@ On success:
 4. Logs/outputs are stored and indexed.
 5. Cost records are updated.
 6. Client polls `GET /v1/jobs/{jobId}` to terminal status.
+7. Client can fetch archived artifacts via `GET /v1/jobs/{jobId}/logs` and `GET /v1/jobs/{jobId}/output`.
 
 ## 11) Failure scenarios and outcomes
 

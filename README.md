@@ -235,6 +235,16 @@ curl -sS http://localhost:8080/v1/jobs/<job-id> \
 
 Terminal job results include inline `logs` and `output` for quick inspection plus deterministic `logsKey` and `outputKey` fields pointing at the archived raw execution artifacts in object storage.
 
+Fetch the archived execution artifacts through the public API:
+
+```bash
+curl -sS http://localhost:8080/v1/jobs/<job-id>/logs \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS http://localhost:8080/v1/jobs/<job-id>/output \
+  -H 'X-API-Key: dev-root-key'
+```
+
 Inspect the live region and host inventory:
 
 ```bash

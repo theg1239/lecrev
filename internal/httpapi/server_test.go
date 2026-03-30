@@ -45,7 +45,8 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
@@ -69,7 +70,7 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 		t.Fatalf("put function version: %v", err)
 	}
 
-	handler := New(meta, builder, sched)
+	handler := New(meta, objects, builder, sched)
 
 	createReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-webhook/triggers/webhook", bytes.NewBufferString(`{"description":"github push"}`))
 	createReq.Header.Set("Content-Type", "application/json")
@@ -128,7 +129,8 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
@@ -143,10 +145,27 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 		ProjectID:         "demo",
 		State:             domain.JobStateSucceeded,
 		Payload:           []byte(`{"hello":"world"}`),
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			Logs:       "hello from host\n",
+			LogsKey:    "jobs/job-observe/logs.txt",
+			Output:     json.RawMessage(`{"ok":true}`),
+			OutputKey:  "jobs/job-observe/output.json",
+			HostID:     "host-ap-south-1-a",
+			Region:     "ap-south-1",
+			StartedAt:  now,
+			FinishedAt: now,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("put job: %v", err)
+	}
+	if err := objects.Put(context.Background(), "jobs/job-observe/logs.txt", []byte("hello from host\n")); err != nil {
+		t.Fatalf("put archived logs: %v", err)
+	}
+	if err := objects.Put(context.Background(), "jobs/job-observe/output.json", []byte(`{"ok":true}`)); err != nil {
+		t.Fatalf("put archived output: %v", err)
 	}
 	if err := meta.PutAttempt(context.Background(), &domain.Attempt{
 		ID:                "attempt-observe",
@@ -199,7 +218,7 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 
 	admin := &testAdmin{region: "ap-south-1"}
-	handler := New(meta, builder, sched, admin)
+	handler := New(meta, objects, builder, sched, admin)
 
 	attemptsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/attempts", nil)
 	attemptsReq.Header.Set("X-API-Key", "dev-root-key")
@@ -214,6 +233,34 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 	if len(attempts) != 1 || attempts[0].ID != "attempt-observe" {
 		t.Fatalf("unexpected attempts payload: %+v", attempts)
+	}
+
+	logsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/logs", nil)
+	logsReq.Header.Set("X-API-Key", "dev-root-key")
+	logsResp := httptest.NewRecorder()
+	handler.ServeHTTP(logsResp, logsReq)
+	if logsResp.Code != http.StatusOK {
+		t.Fatalf("expected logs status %d, got %d: %s", http.StatusOK, logsResp.Code, logsResp.Body.String())
+	}
+	if got := logsResp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("expected logs content type text/plain; charset=utf-8, got %s", got)
+	}
+	if body := logsResp.Body.String(); body != "hello from host\n" {
+		t.Fatalf("unexpected archived logs body %q", body)
+	}
+
+	outputReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/output", nil)
+	outputReq.Header.Set("X-API-Key", "dev-root-key")
+	outputResp := httptest.NewRecorder()
+	handler.ServeHTTP(outputResp, outputReq)
+	if outputResp.Code != http.StatusOK {
+		t.Fatalf("expected output status %d, got %d: %s", http.StatusOK, outputResp.Code, outputResp.Body.String())
+	}
+	if got := outputResp.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected output content type application/json, got %s", got)
+	}
+	if body := outputResp.Body.String(); body != `{"ok":true}` {
+		t.Fatalf("unexpected archived output body %q", body)
 	}
 
 	costsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-observe/costs", nil)
@@ -263,7 +310,8 @@ func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
@@ -272,7 +320,7 @@ func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
 		t.Fatalf("ensure project: %v", err)
 	}
 
-	handler := New(meta, builder, sched)
+	handler := New(meta, objects, builder, sched)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/projects/project-b/functions", bytes.NewBufferString(`{
 		"name":"echo",
@@ -294,7 +342,8 @@ func TestCreateFunctionRejectsInvalidAdmissionRequest(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
@@ -303,7 +352,7 @@ func TestCreateFunctionRejectsInvalidAdmissionRequest(t *testing.T) {
 		t.Fatalf("ensure project: %v", err)
 	}
 
-	handler := New(meta, builder, sched)
+	handler := New(meta, objects, builder, sched)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/projects/demo/functions", bytes.NewBufferString(`{
 		"name":"echo",
@@ -329,7 +378,8 @@ func TestBuildJobInspectionAndInvokeBlockedUntilReady(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
@@ -364,7 +414,7 @@ func TestBuildJobInspectionAndInvokeBlockedUntilReady(t *testing.T) {
 		t.Fatalf("put build job: %v", err)
 	}
 
-	handler := New(meta, builder, sched)
+	handler := New(meta, objects, builder, sched)
 
 	buildReq := httptest.NewRequest(http.MethodGet, "/v1/build-jobs/build-1", nil)
 	buildReq.Header.Set("X-API-Key", "dev-root-key")
@@ -395,13 +445,14 @@ func TestAuthRejectsInvalidAndDisabledAPIKeys(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
 	mustSeedAPIKey(t, meta, "disabled-key", "tenant-dev", true, false)
 
-	handler := New(meta, builder, sched)
+	handler := New(meta, objects, builder, sched)
 
 	invalidReq := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
 	invalidReq.Header.Set("X-API-Key", "missing-key")
@@ -424,13 +475,14 @@ func TestInfraEndpointsRequireAdminAPIKey(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
-	builder := build.New(meta, artifact.NewMemoryStore())
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
 	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
 
-	handler := New(meta, builder, sched)
+	handler := New(meta, objects, builder, sched)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
 	req.Header.Set("X-API-Key", "tenant-key")

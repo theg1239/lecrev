@@ -9,6 +9,7 @@ var (
 	ErrIdempotencyConflict     = errors.New("idempotency key reused with different request")
 	ErrIdempotencyInProgress   = errors.New("idempotent request already in progress")
 	ErrFunctionVersionNotReady = errors.New("function version not ready")
+	ErrExecutionResultNotReady = errors.New("execution result not ready")
 )
 
 type IdempotencyStatus string

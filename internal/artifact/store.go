@@ -2,9 +2,12 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
+
+var ErrNotFound = errors.New("artifact not found")
 
 type Store interface {
 	Put(ctx context.Context, key string, data []byte) error
@@ -33,7 +36,7 @@ func (m *MemoryStore) Get(_ context.Context, key string) ([]byte, error) {
 	defer m.mu.RUnlock()
 	data, ok := m.data[key]
 	if !ok {
-		return nil, fmt.Errorf("artifact key %q not found", key)
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, key)
 	}
 	return append([]byte(nil), data...), nil
 }

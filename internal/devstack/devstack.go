@@ -206,7 +206,7 @@ func runNetworked(ctx context.Context, cfg Config) error {
 		admins = append(admins, region.svc)
 	}
 
-	apiHandler := httpapi.New(metaStore, builder, schedulerService, admins...)
+	apiHandler := httpapi.New(metaStore, objectStore, builder, schedulerService, admins...)
 	controlHandler := composeControlPlaneHandler(apiHandler, secretsProxy)
 	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: controlHandler}
 	secretsClient := secrets.NewProxyClient(controlPlaneBaseURL(cfg.APIAddr), cfg.SecretsProxyToken, http.DefaultClient)

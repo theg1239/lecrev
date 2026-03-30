@@ -56,6 +56,12 @@ func TestRunEmbeddedStackEndToEnd(t *testing.T) {
 	if strings.TrimSpace(result.Job.Result.OutputKey) == "" {
 		t.Fatal("expected archived output key to be recorded")
 	}
+	if result.ArchivedLogs != result.Job.Result.Logs {
+		t.Fatalf("expected archived logs %q, got %q", result.Job.Result.Logs, result.ArchivedLogs)
+	}
+	if !bytes.Equal(result.ArchivedOutput, result.Job.Result.Output) {
+		t.Fatalf("expected archived output %s, got %s", string(result.Job.Result.Output), string(result.ArchivedOutput))
+	}
 	if len(result.Attempts) == 0 {
 		t.Fatal("expected at least one attempt")
 	}
@@ -70,11 +76,11 @@ func TestRunEmbeddedStackEndToEnd(t *testing.T) {
 	if len(output) == 0 {
 		t.Fatal("expected archived output content")
 	}
-	if string(logs) != result.Job.Result.Logs {
-		t.Fatalf("expected archived logs %q, got %q", result.Job.Result.Logs, string(logs))
+	if string(logs) != result.ArchivedLogs {
+		t.Fatalf("expected stored archived logs %q, got %q", result.ArchivedLogs, string(logs))
 	}
-	if string(output) != string(result.Job.Result.Output) {
-		t.Fatalf("expected archived output %s, got %s", string(result.Job.Result.Output), string(output))
+	if string(output) != string(result.ArchivedOutput) {
+		t.Fatalf("expected stored archived output %s, got %s", string(result.ArchivedOutput), string(output))
 	}
 	lastAttempt := result.Attempts[len(result.Attempts)-1]
 	if got := artifact.ExecutionLogsKey(result.Job.ID, lastAttempt.ID); result.Job.Result.LogsKey != got {
@@ -181,6 +187,20 @@ await fs.copyFile(path.join(root, 'src/index.mjs'), path.join(root, 'dist/index.
 	}
 	if err := validateOutput(job.Result.Output, payload); err != nil {
 		t.Fatalf("validate git output: %v", err)
+	}
+	archivedLogs, err := doRaw(ctx, client, "http://embedded.lecrev", stack.APIKey, http.MethodGet, "/v1/jobs/"+job.ID+"/logs", http.StatusOK)
+	if err != nil {
+		t.Fatalf("fetch archived git logs: %v", err)
+	}
+	if string(archivedLogs) != job.Result.Logs {
+		t.Fatalf("expected archived git logs %q, got %q", job.Result.Logs, string(archivedLogs))
+	}
+	archivedOutputAPI, err := doRaw(ctx, client, "http://embedded.lecrev", stack.APIKey, http.MethodGet, "/v1/jobs/"+job.ID+"/output", http.StatusOK)
+	if err != nil {
+		t.Fatalf("fetch archived git output via api: %v", err)
+	}
+	if !bytes.Equal(archivedOutputAPI, job.Result.Output) {
+		t.Fatalf("expected archived git output via api %s, got %s", string(job.Result.Output), string(archivedOutputAPI))
 	}
 	archivedOutput, err := stack.Objects.Get(ctx, job.Result.OutputKey)
 	if err != nil {

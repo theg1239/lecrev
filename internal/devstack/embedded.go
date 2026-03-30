@@ -141,7 +141,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		admins = append(admins, region.svc)
 	}
 
-	apiHandler := httpapi.New(metaStore, builder, schedulerService, admins...)
+	apiHandler := httpapi.New(metaStore, objectStore, builder, schedulerService, admins...)
 	controlHandler := composeControlPlaneHandler(apiHandler, secretsProxy)
 	stack := &EmbeddedStack{
 		Handler: controlHandler,
