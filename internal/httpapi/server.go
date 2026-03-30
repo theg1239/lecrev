@@ -22,6 +22,7 @@ import (
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/metrics"
 	"github.com/theg1239/lecrev/internal/scheduler"
 	"github.com/theg1239/lecrev/internal/store"
 )
@@ -55,6 +56,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	r.Use(srv.corsMiddleware)
 	r.Options("/*", srv.handlePreflight)
 	r.Get("/healthz", srv.healthz)
+	r.Handle("/metrics", metrics.NewHandler(store))
 	r.HandleFunc("/f/{token}", srv.invokeHTTPTrigger)
 	r.HandleFunc("/f/{token}/*", srv.invokeHTTPTrigger)
 	r.Post("/v1/triggers/webhook/{token}", srv.invokeWebhook)

@@ -455,6 +455,18 @@ func (s *Store) CountBuildJobsByProjectStates(ctx context.Context, projectID str
 	return count, nil
 }
 
+func (s *Store) CountBuildJobsByStates(ctx context.Context, states []string) (int, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from build_jobs
+		where state = any($1)
+	`, states).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error {
 	return s.upsertExecutionJob(ctx, job)
 }
@@ -576,6 +588,22 @@ func (s *Store) CountExecutionJobsByProjectStates(ctx context.Context, projectID
 		where project_id = $1
 		  and state = any($2)
 	`, projectID, stateStrings).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Store) CountExecutionJobsByStates(ctx context.Context, states []domain.JobState) (int, error) {
+	stateStrings := make([]string, 0, len(states))
+	for _, state := range states {
+		stateStrings = append(stateStrings, string(state))
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from execution_jobs
+		where state = any($1)
+	`, stateStrings).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil

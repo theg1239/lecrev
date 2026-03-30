@@ -218,6 +218,7 @@ Public health:
 
 ```bash
 curl -sS "http://${CONTROL_PLANE_PUBLIC_HOST}/healthz"
+curl -sS "http://${CONTROL_PLANE_PUBLIC_HOST}/metrics"
 ```
 
 Region and host inventory:

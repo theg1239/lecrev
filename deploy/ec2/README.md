@@ -157,6 +157,7 @@ Control plane:
 
 ```bash
 curl -sS http://<control-plane-host>/healthz
+curl -sS http://<control-plane-host>/metrics
 curl -sS http://<control-plane-host>/v1/regions -H 'X-API-Key: <bootstrap-api-key>'
 ```
 

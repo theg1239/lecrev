@@ -27,11 +27,13 @@ type Store interface {
 	GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob, error)
 	ListBuildJobsByProject(ctx context.Context, projectID string) ([]domain.BuildJob, error)
 	CountBuildJobsByProjectStates(ctx context.Context, projectID string, states []string) (int, error)
+	CountBuildJobsByStates(ctx context.Context, states []string) (int, error)
 	PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	UpdateExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	GetExecutionJob(ctx context.Context, jobID string) (*domain.ExecutionJob, error)
 	ListExecutionJobsByProject(ctx context.Context, projectID string) ([]domain.ExecutionJob, error)
 	CountExecutionJobsByProjectStates(ctx context.Context, projectID string, states []domain.JobState) (int, error)
+	CountExecutionJobsByStates(ctx context.Context, states []domain.JobState) (int, error)
 	ClaimNextExecutionJob(ctx context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error)
 	RequeueStaleExecutionJobs(ctx context.Context, fromState, toState domain.JobState, staleBefore, now time.Time, errorMessage string) (int, error)
 	CountActiveExecutionJobsByRegion(ctx context.Context, region string) (int, error)

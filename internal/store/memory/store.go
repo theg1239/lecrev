@@ -285,6 +285,24 @@ func (s *Store) CountBuildJobsByProjectStates(_ context.Context, projectID strin
 	return count, nil
 }
 
+func (s *Store) CountBuildJobsByStates(_ context.Context, states []string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	allowed := make(map[string]struct{}, len(states))
+	for _, state := range states {
+		allowed[state] = struct{}{}
+	}
+
+	var count int
+	for _, job := range s.buildJobs {
+		if _, ok := allowed[job.State]; ok {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (s *Store) PutExecutionJob(_ context.Context, job *domain.ExecutionJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -343,6 +361,24 @@ func (s *Store) CountExecutionJobsByProjectStates(_ context.Context, projectID s
 		if job.ProjectID != projectID {
 			continue
 		}
+		if _, ok := allowed[job.State]; ok {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (s *Store) CountExecutionJobsByStates(_ context.Context, states []domain.JobState) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	allowed := make(map[domain.JobState]struct{}, len(states))
+	for _, state := range states {
+		allowed[state] = struct{}{}
+	}
+
+	var count int
+	for _, job := range s.executionJobs {
 		if _, ok := allowed[job.State]; ok {
 			count++
 		}
