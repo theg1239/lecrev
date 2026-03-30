@@ -401,14 +401,14 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
-	if s.warmer != nil && version.NetworkPolicy == domain.NetworkPolicyNone {
+	if s.warmer != nil && len(version.EnvRefs) == 0 {
 		if err := s.warmer.PrepareFunctionVersion(ctx, version); err != nil {
 			recorder.Printf("warm preparation deferred for function version %s: %v", version.ID, err)
 		} else {
 			recorder.Printf("queued function warm preparation for function version %s", version.ID)
 		}
 	} else if s.warmer != nil {
-		recorder.Printf("warm preparation skipped for function version %s because networkPolicy=%s", version.ID, version.NetworkPolicy)
+		recorder.Printf("warm preparation skipped for function version %s because envRefs are configured", version.ID)
 	}
 
 	recorder.Printf("build job %s completed successfully", buildJob.ID)

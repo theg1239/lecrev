@@ -87,9 +87,15 @@ func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
 func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error) {
 	startedAt := time.Now().UTC()
 
-	payloadPath := filepath.Join(req.Workspace, "__lecrev_payload.json")
-	resultPath := filepath.Join(req.Workspace, "__lecrev_result.json")
-	wrapperPath := filepath.Join(req.Workspace, "__lecrev_invoke.mjs")
+	scratchDir, err := os.MkdirTemp("", "lecrev-nodeexec-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(scratchDir)
+
+	payloadPath := filepath.Join(scratchDir, "__lecrev_payload.json")
+	resultPath := filepath.Join(scratchDir, "__lecrev_result.json")
+	wrapperPath := filepath.Join(scratchDir, "__lecrev_invoke.mjs")
 
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`null`)
@@ -112,13 +118,7 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	if _, err := os.Stat(entrypoint); err != nil {
 		return nil, fmt.Errorf("entrypoint %s: %w", req.Entrypoint, err)
 	}
-	contextJSON, err := json.Marshal(map[string]any{
-		"attemptId":  req.AttemptID,
-		"jobId":      req.JobID,
-		"functionId": req.FunctionID,
-		"region":     req.Region,
-		"hostId":     req.HostID,
-	})
+	contextJSON, err := invocationContextJSON(req)
 	if err != nil {
 		return nil, err
 	}
@@ -129,10 +129,7 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), "LECREV_CONTEXT="+string(contextJSON))
-	for key, value := range req.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
-	}
+	cmd.Env = commandEnv(req.Env, contextJSON)
 
 	runErr := cmd.Run()
 	logParts := make([]string, 0, 2)
@@ -185,6 +182,24 @@ func exitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return 1
+}
+
+func invocationContextJSON(req WorkspaceRequest) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"attemptId":  req.AttemptID,
+		"jobId":      req.JobID,
+		"functionId": req.FunctionID,
+		"region":     req.Region,
+		"hostId":     req.HostID,
+	})
+}
+
+func commandEnv(env map[string]string, contextJSON []byte) []string {
+	cmdEnv := append(os.Environ(), "LECREV_CONTEXT="+string(contextJSON))
+	for key, value := range env {
+		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", key, value))
+	}
+	return cmdEnv
 }
 
 const wrapperScript = `import fs from 'node:fs/promises';

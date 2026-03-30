@@ -24,6 +24,7 @@ import (
 
 const preparedRoot = "/var/lib/lecrev/functions"
 const guestNodeBinary = "/usr/local/bin/node"
+const preparedWorkerStartupTimeout = 10 * time.Second
 
 func main() {
 	if err := mountGuestFilesystems(); err != nil {
@@ -164,7 +165,27 @@ func prepare(request *firecracker.GuestPrepareRequest) (*firecracker.GuestPrepar
 	if _, err := os.Stat(entrypoint); err != nil {
 		return &firecracker.GuestPrepareResponse{Prepared: false}, fmt.Errorf("prepared entrypoint %s: %w", request.Entrypoint, err)
 	}
-	return &firecracker.GuestPrepareResponse{Prepared: true}, nil
+	workerPrepared := false
+	if len(request.Env) == 0 {
+		workerCtx, cancel := context.WithTimeout(context.Background(), preparedWorkerStartupTimeout)
+		defer cancel()
+		if err := nodeexec.StartPreparedWorker(workerCtx, nodeexec.PrepareWorkerRequest{
+			FunctionID:     request.FunctionID,
+			Workspace:      workspace,
+			Entrypoint:     request.Entrypoint,
+			Env:            request.Env,
+			NodeBinary:     guestNodeBinary,
+			StartupTimeout: preparedWorkerStartupTimeout,
+		}); err != nil {
+			return &firecracker.GuestPrepareResponse{
+				Prepared:       true,
+				WorkerPrepared: false,
+				Logs:           err.Error(),
+			}, nil
+		}
+		workerPrepared = true
+	}
+	return &firecracker.GuestPrepareResponse{Prepared: true, WorkerPrepared: workerPrepared}, nil
 }
 
 func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
@@ -180,20 +201,24 @@ func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInv
 		result *nodeexec.Result
 		err    error
 	)
+	workspaceReq := nodeexec.WorkspaceRequest{
+		AttemptID:  request.AttemptID,
+		JobID:      request.JobID,
+		FunctionID: request.FunctionID,
+		Workspace:  preparedWorkspace(request.FunctionID),
+		Entrypoint: request.Entrypoint,
+		Payload:    request.Payload,
+		Env:        request.Env,
+		Timeout:    time.Duration(request.TimeoutMillis) * time.Millisecond,
+		Region:     request.Region,
+		HostID:     request.HostID,
+		NodeBinary: guestNodeBinary,
+	}
 	if request.UsePreparedRoot {
-		result, err = nodeexec.ExecuteWorkspace(context.Background(), nodeexec.WorkspaceRequest{
-			AttemptID:  request.AttemptID,
-			JobID:      request.JobID,
-			FunctionID: request.FunctionID,
-			Workspace:  preparedWorkspace(request.FunctionID),
-			Entrypoint: request.Entrypoint,
-			Payload:    request.Payload,
-			Env:        request.Env,
-			Timeout:    time.Duration(request.TimeoutMillis) * time.Millisecond,
-			Region:     request.Region,
-			HostID:     request.HostID,
-			NodeBinary: guestNodeBinary,
-		})
+		result, err = nodeexec.ExecutePreparedWorker(context.Background(), workspaceReq)
+		if err != nil && errors.Is(err, nodeexec.ErrPreparedWorkerUnavailable) {
+			result, err = nodeexec.ExecuteWorkspace(context.Background(), workspaceReq)
+		}
 	} else {
 		result, err = nodeexec.ExecuteBundle(context.Background(), nodeexec.Request{
 			AttemptID:      request.AttemptID,

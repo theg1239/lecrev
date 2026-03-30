@@ -34,6 +34,8 @@ type Service struct {
 	availableSlots int
 	blankWarm      int
 	functionWarm   map[string]int
+	bundleMu       sync.RWMutex
+	bundleCache    map[string][]byte
 }
 
 const (
@@ -83,6 +85,7 @@ func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver fi
 		availableSlots:  cfg.MaxConcurrentAssignments,
 		blankWarm:       1,
 		functionWarm:    map[string]int{},
+		bundleCache:     map[string][]byte{},
 	}
 }
 
@@ -251,7 +254,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, "assignment missing artifact_bundle_key", 1)
 		return
 	}
-	bundle, err := s.objects.Get(ctx, bundleKey)
+	bundle, err := s.loadBundle(ctx, bundleKey)
 	if err != nil {
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
 		return
@@ -374,7 +377,7 @@ func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnap
 		if !ok {
 			return
 		}
-		bundle, err := s.objects.Get(ctx, bundleKey)
+		bundle, err := s.loadBundle(ctx, bundleKey)
 		if err != nil {
 			return
 		}
@@ -391,6 +394,34 @@ func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnap
 			HostID:         s.hostID,
 		})
 	}
+}
+
+func (s *Service) loadBundle(ctx context.Context, bundleKey string) ([]byte, error) {
+	bundleKey = strings.TrimSpace(bundleKey)
+	if bundleKey == "" {
+		return nil, fmt.Errorf("artifact bundle key is required")
+	}
+
+	s.bundleMu.RLock()
+	cached, ok := s.bundleCache[bundleKey]
+	s.bundleMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
+	bundle, err := s.objects.Get(ctx, bundleKey)
+	if err != nil {
+		return nil, err
+	}
+
+	s.bundleMu.Lock()
+	if existing, ok := s.bundleCache[bundleKey]; ok {
+		s.bundleMu.Unlock()
+		return existing, nil
+	}
+	s.bundleCache[bundleKey] = bundle
+	s.bundleMu.Unlock()
+	return bundle, nil
 }
 
 func (s *Service) archiveExecutionArtifacts(ctx context.Context, jobID, attemptID, logs string, output []byte) error {

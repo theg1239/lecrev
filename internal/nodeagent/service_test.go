@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -176,6 +177,32 @@ func TestPrepareSnapshotUsesDriverWarmPreparation(t *testing.T) {
 	}
 }
 
+func TestLoadBundleCachesImmutableArtifact(t *testing.T) {
+	t.Parallel()
+
+	objects := &countingArtifactStore{Store: artifact.NewMemoryStore()}
+	if err := objects.Put(context.Background(), "artifacts/digest/bundle.tgz", []byte("bundle")); err != nil {
+		t.Fatalf("put bundle: %v", err)
+	}
+
+	svc := NewWithConfig(Config{}, "host-ap-south-1-a", "ap-south-1", "", stubDriver{}, objects, stubResolver{})
+
+	first, err := svc.loadBundle(context.Background(), "artifacts/digest/bundle.tgz")
+	if err != nil {
+		t.Fatalf("load bundle first: %v", err)
+	}
+	second, err := svc.loadBundle(context.Background(), "artifacts/digest/bundle.tgz")
+	if err != nil {
+		t.Fatalf("load bundle second: %v", err)
+	}
+	if string(first) != "bundle" || string(second) != "bundle" {
+		t.Fatalf("unexpected bundle contents: %q / %q", string(first), string(second))
+	}
+	if objects.getCount() != 1 {
+		t.Fatalf("expected a single backing-store read, got %d", objects.getCount())
+	}
+}
+
 type stubDriver struct {
 	result *firecracker.ExecuteResult
 	err    error
@@ -315,4 +342,23 @@ type stubResolver struct{}
 
 func (stubResolver) ResolveExecution(context.Context, secrets.ExecutionRequest) (map[string]string, error) {
 	return map[string]string{}, nil
+}
+
+type countingArtifactStore struct {
+	artifact.Store
+	mu   sync.Mutex
+	gets int
+}
+
+func (s *countingArtifactStore) Get(ctx context.Context, key string) ([]byte, error) {
+	s.mu.Lock()
+	s.gets++
+	s.mu.Unlock()
+	return s.Store.Get(ctx, key)
+}
+
+func (s *countingArtifactStore) getCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets
 }

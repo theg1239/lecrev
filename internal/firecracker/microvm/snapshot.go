@@ -23,12 +23,13 @@ type snapshotAsset struct {
 }
 
 type snapshotMetadata struct {
-	Kind          string    `json:"kind"`
-	FunctionID    string    `json:"functionId,omitempty"`
-	Entrypoint    string    `json:"entrypoint,omitempty"`
-	NetworkPolicy string    `json:"networkPolicy,omitempty"`
-	MemoryMB      int       `json:"memoryMb,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
+	Kind           string    `json:"kind"`
+	FunctionID     string    `json:"functionId,omitempty"`
+	Entrypoint     string    `json:"entrypoint,omitempty"`
+	NetworkPolicy  string    `json:"networkPolicy,omitempty"`
+	MemoryMB       int       `json:"memoryMb,omitempty"`
+	WorkerPrepared bool      `json:"workerPrepared,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 type vmInstance struct {
@@ -329,21 +330,24 @@ func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecrack
 
 	prepareCtx, cancel := context.WithTimeout(ctx, d.config.PrepareTimeout)
 	defer cancel()
-	if err := prepareGuest(prepareCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, firecracker.GuestPrepareRequest{
+	prepareResp, err := prepareGuest(prepareCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, firecracker.GuestPrepareRequest{
 		FunctionID:     req.FunctionID,
 		Entrypoint:     req.Entrypoint,
 		ArtifactBundle: req.ArtifactBundle,
-	}); err != nil {
+		Env:            req.Env,
+	})
+	if err != nil {
 		return fmt.Errorf("prepare function snapshot for %s: %w; firecracker logs: %s", req.FunctionID, err, instance.proc.logs())
 	}
 
 	return d.createSnapshotAsset(ctx, instance, asset, snapshotMetadata{
-		Kind:          "function",
-		FunctionID:    req.FunctionID,
-		Entrypoint:    req.Entrypoint,
-		NetworkPolicy: req.NetworkPolicy,
-		MemoryMB:      req.MemoryMB,
-		CreatedAt:     time.Now().UTC(),
+		Kind:           "function",
+		FunctionID:     req.FunctionID,
+		Entrypoint:     req.Entrypoint,
+		NetworkPolicy:  req.NetworkPolicy,
+		MemoryMB:       req.MemoryMB,
+		WorkerPrepared: prepareResp != nil && prepareResp.WorkerPrepared,
+		CreatedAt:      time.Now().UTC(),
 	})
 }
 

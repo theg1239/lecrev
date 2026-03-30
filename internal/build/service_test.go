@@ -472,12 +472,12 @@ func TestCreateFunctionVersionQueuesWarmPreparationWhenReady(t *testing.T) {
 	svc.SetWarmPreparer(warmer)
 
 	version, err := svc.CreateFunctionVersion(context.Background(), domain.DeployRequest{
-		ProjectID:  "demo",
-		Name:       "warm-echo",
-		Runtime:    "node22",
-		Entrypoint: "index.mjs",
+		ProjectID:     "demo",
+		Name:          "warm-echo",
+		Runtime:       "node22",
+		Entrypoint:    "index.mjs",
 		NetworkPolicy: domain.NetworkPolicyNone,
-		Regions:    []string{"ap-south-1", "ap-southeast-1"},
+		Regions:       []string{"ap-south-1", "ap-southeast-1"},
 		Source: domain.DeploySource{
 			Type: domain.SourceTypeBundle,
 			InlineFiles: map[string]string{
@@ -496,7 +496,7 @@ func TestCreateFunctionVersionQueuesWarmPreparationWhenReady(t *testing.T) {
 	}
 }
 
-func TestCreateFunctionVersionSkipsWarmPreparationForFullNetworkPolicy(t *testing.T) {
+func TestCreateFunctionVersionQueuesWarmPreparationForFullNetworkPolicy(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
@@ -525,8 +525,43 @@ func TestCreateFunctionVersionSkipsWarmPreparationForFullNetworkPolicy(t *testin
 	if version.State != domain.FunctionStateReady {
 		t.Fatalf("expected ready function version, got %s", version.State)
 	}
+	if len(warmer.preparedVersionIDs) != 1 || warmer.preparedVersionIDs[0] != version.ID {
+		t.Fatalf("expected warm preparation for %s, got %+v", version.ID, warmer.preparedVersionIDs)
+	}
+}
+
+func TestCreateFunctionVersionSkipsWarmPreparationWhenEnvRefsConfigured(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	svc := New(meta, objects)
+	warmer := &recordingWarmPreparer{}
+	svc.SetWarmPreparer(warmer)
+
+	version, err := svc.CreateFunctionVersion(context.Background(), domain.DeployRequest{
+		ProjectID:     "demo",
+		Name:          "envful",
+		Runtime:       "node22",
+		Entrypoint:    "index.mjs",
+		NetworkPolicy: domain.NetworkPolicyNone,
+		Regions:       []string{"ap-south-1"},
+		EnvRefs:       []string{"API_TOKEN"},
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create function version: %v", err)
+	}
+	if version.State != domain.FunctionStateReady {
+		t.Fatalf("expected ready function version, got %s", version.State)
+	}
 	if len(warmer.preparedVersionIDs) != 0 {
-		t.Fatalf("expected no warm preparation for full network policy, got %+v", warmer.preparedVersionIDs)
+		t.Fatalf("expected warm preparation to be skipped when env refs are configured, got %+v", warmer.preparedVersionIDs)
 	}
 }
 

@@ -476,24 +476,24 @@ func pingGuest(ctx context.Context, socketPath string, port uint32) error {
 	return nil
 }
 
-func prepareGuest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestPrepareRequest) error {
+func prepareGuest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestPrepareRequest) (*firecracker.GuestPrepareResponse, error) {
 	response, err := guestRequest(ctx, socketPath, port, firecracker.GuestRequest{
 		Action:  firecracker.GuestActionPrepare,
 		Prepare: &request,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if response == nil || response.Prepare == nil || !response.Prepare.Prepared {
 		if response != nil && response.Error != "" {
-			return errors.New(response.Error)
+			return nil, errors.New(response.Error)
 		}
-		return fmt.Errorf("guest did not confirm prepared state")
+		return nil, fmt.Errorf("guest did not confirm prepared state")
 	}
 	if response.Error != "" {
-		return errors.New(response.Error)
+		return nil, errors.New(response.Error)
 	}
-	return nil
+	return response.Prepare, nil
 }
 
 func invokeGuest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
@@ -611,6 +611,16 @@ func copyFile(sourcePath, targetPath string) error {
 		return err
 	}
 	defer dst.Close()
+
+	if err := cloneFile(dst, src); err == nil {
+		return nil
+	}
+	if _, err := dst.Seek(0, 0); err != nil {
+		return err
+	}
+	if err := dst.Truncate(0); err != nil {
+		return err
+	}
 
 	_, err = io.Copy(dst, src)
 	return err

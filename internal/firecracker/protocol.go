@@ -34,14 +34,16 @@ type GuestPingResponse struct {
 }
 
 type GuestPrepareRequest struct {
-	FunctionID     string `json:"functionId"`
-	Entrypoint     string `json:"entrypoint"`
-	ArtifactBundle []byte `json:"artifactBundle"`
+	FunctionID     string            `json:"functionId"`
+	Entrypoint     string            `json:"entrypoint"`
+	ArtifactBundle []byte            `json:"artifactBundle"`
+	Env            map[string]string `json:"env,omitempty"`
 }
 
 type GuestPrepareResponse struct {
-	Prepared bool   `json:"prepared"`
-	Logs     string `json:"logs,omitempty"`
+	Prepared       bool   `json:"prepared"`
+	WorkerPrepared bool   `json:"workerPrepared,omitempty"`
+	Logs           string `json:"logs,omitempty"`
 }
 
 type GuestInvocationRequest struct {
