@@ -262,6 +262,46 @@ func TestHTTPTriggerLifecycleUsesConfiguredPublicBaseURL(t *testing.T) {
 	}
 }
 
+func TestHTTPTriggerCreationRejectsNonReadyVersion(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:            "fn-http-building",
+		ProjectID:     "demo",
+		Name:          "echo",
+		Runtime:       "node22",
+		Entrypoint:    "index.mjs",
+		TimeoutSec:    5,
+		NetworkPolicy: domain.NetworkPolicyFull,
+		Regions:       []string{"ap-south-1"},
+		State:         domain.FunctionStateBuilding,
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-http-building/triggers/http", bytes.NewBufferString(`{"description":"public echo","authMode":"none"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "dev-root-key")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, resp.Code, resp.Body.String())
+	}
+}
+
 func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 	t.Parallel()
 

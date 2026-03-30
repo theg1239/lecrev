@@ -38,38 +38,43 @@ import (
 )
 
 type Config struct {
-	LoadEnv              bool
-	APIAddr              string
-	ExecutionRegions     []string
-	CoordinatorBasePort  int
-	CoordinatorBindHost  string
-	ControlPlaneBaseURL  string
-	NodeAgentHostID      string
-	NodeAgentRegion      string
-	NodeAgentCoordinator string
-	PostgresDSN          string
-	NATSURL              string
-	S3Region             string
-	S3RegionBuckets      map[string]string
-	S3Endpoint           string
-	S3AccessKey          string
-	S3SecretKey          string
-	S3Bucket             string
-	SecretsBackend       string
-	AWSRegion            string
-	AWSAccessKey         string
-	AWSSecretKey         string
-	SecretsProxyToken    string
-	BootstrapAdminAPIKey string
-	EnableMTLS           bool
-	GRPCCACertPath       string
-	GRPCServerCertPath   string
-	GRPCServerKeyPath    string
-	GRPCClientCertPath   string
-	GRPCClientKeyPath    string
-	GRPCServerName       string
-	ExecutionDriver      string
-	ExecutionHostSlots   int
+	LoadEnv                bool
+	APIAddr                string
+	ExecutionRegions       []string
+	CoordinatorBasePort    int
+	CoordinatorBindHost    string
+	ControlPlaneBaseURL    string
+	NodeAgentHostID        string
+	NodeAgentRegion        string
+	NodeAgentCoordinator   string
+	PostgresDSN            string
+	NATSURL                string
+	S3Region               string
+	S3RegionBuckets        map[string]string
+	S3Endpoint             string
+	S3AccessKey            string
+	S3SecretKey            string
+	S3Bucket               string
+	SecretsBackend         string
+	AWSRegion              string
+	AWSAccessKey           string
+	AWSSecretKey           string
+	SecretsProxyToken      string
+	BootstrapAdminAPIKey   string
+	EnableMTLS             bool
+	GRPCCACertPath         string
+	GRPCServerCertPath     string
+	GRPCServerKeyPath      string
+	GRPCClientCertPath     string
+	GRPCClientKeyPath      string
+	GRPCServerName         string
+	ExecutionDriver        string
+	ExecutionHostSlots     int
+	BuildWorkersPerRegion  int
+	BuildGitCloneTimeout   time.Duration
+	BuildNPMInstallTimeout time.Duration
+	BuildNPMBuildTimeout   time.Duration
+	BuildNPMPruneTimeout   time.Duration
 
 	FirecrackerBinary      string
 	JailerBinary           string
@@ -192,6 +197,51 @@ func prepareConfig(cfg *Config) error {
 			cfg.ExecutionHostSlots = value
 		}
 	}
+	if cfg.LoadEnv && cfg.BuildWorkersPerRegion == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_BUILD_WORKERS_PER_REGION")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_BUILD_WORKERS_PER_REGION: %w", err)
+			}
+			cfg.BuildWorkersPerRegion = value
+		}
+	}
+	if cfg.LoadEnv && cfg.BuildGitCloneTimeout == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_BUILD_GIT_CLONE_TIMEOUT_SEC")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_BUILD_GIT_CLONE_TIMEOUT_SEC: %w", err)
+			}
+			cfg.BuildGitCloneTimeout = time.Duration(value) * time.Second
+		}
+	}
+	if cfg.LoadEnv && cfg.BuildNPMInstallTimeout == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_BUILD_NPM_INSTALL_TIMEOUT_SEC")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_BUILD_NPM_INSTALL_TIMEOUT_SEC: %w", err)
+			}
+			cfg.BuildNPMInstallTimeout = time.Duration(value) * time.Second
+		}
+	}
+	if cfg.LoadEnv && cfg.BuildNPMBuildTimeout == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_BUILD_NPM_BUILD_TIMEOUT_SEC")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_BUILD_NPM_BUILD_TIMEOUT_SEC: %w", err)
+			}
+			cfg.BuildNPMBuildTimeout = time.Duration(value) * time.Second
+		}
+	}
+	if cfg.LoadEnv && cfg.BuildNPMPruneTimeout == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_BUILD_NPM_PRUNE_TIMEOUT_SEC")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_BUILD_NPM_PRUNE_TIMEOUT_SEC: %w", err)
+			}
+			cfg.BuildNPMPruneTimeout = time.Duration(value) * time.Second
+		}
+	}
 	if cfg.LoadEnv && cfg.FirecrackerBinary == "" {
 		cfg.FirecrackerBinary = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_BINARY"))
 	}
@@ -269,6 +319,21 @@ func prepareConfig(cfg *Config) error {
 	}
 	if cfg.ExecutionHostSlots <= 0 {
 		cfg.ExecutionHostSlots = 1
+	}
+	if cfg.BuildWorkersPerRegion <= 0 {
+		cfg.BuildWorkersPerRegion = 2
+	}
+	if cfg.BuildGitCloneTimeout <= 0 {
+		cfg.BuildGitCloneTimeout = 90 * time.Second
+	}
+	if cfg.BuildNPMInstallTimeout <= 0 {
+		cfg.BuildNPMInstallTimeout = 3 * time.Minute
+	}
+	if cfg.BuildNPMBuildTimeout <= 0 {
+		cfg.BuildNPMBuildTimeout = 3 * time.Minute
+	}
+	if cfg.BuildNPMPruneTimeout <= 0 {
+		cfg.BuildNPMPruneTimeout = 90 * time.Second
 	}
 	if cfg.LoadEnv {
 		if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {

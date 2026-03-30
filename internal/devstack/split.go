@@ -135,7 +135,10 @@ func RunControlPlane(ctx context.Context, cfg Config) error {
 			for _, region := range localRegions {
 				region := region
 				runLeader("queue-consumer-"+region.name, func() error {
-					return region.svc.RunExecutionConsumer(runCtx, "coordinator-"+sanitizeRegionToken(region.name))
+					name := "queue-consumer-" + region.name
+					return runRestartingLoop(runCtx, name, 2*time.Second, func(loopCtx context.Context) error {
+						return region.svc.RunExecutionConsumer(loopCtx, "coordinator-"+sanitizeRegionToken(region.name))
+					})
 				})
 			}
 			runLeader("lease-recovery", func() error { return leaseRecovery.Run(runCtx) })
@@ -245,12 +248,13 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 	builder := build.New(metaStore, objectStore)
 	builder.SetArtifactReplicator(artifactReplicator)
 	builder.SetBuildBus(buildBus)
+	builder.SetCommandTimeouts(cfg.BuildGitCloneTimeout, cfg.BuildNPMInstallTimeout, cfg.BuildNPMBuildTimeout, cfg.BuildNPMPruneTimeout)
 	slog.Info("build-worker started", "regions", cfg.ExecutionRegions)
 	return leadership.Run(ctx, leadership.Config{
 		Name: "build-worker",
 		DSN:  cfg.PostgresDSN,
 	}, func(runCtx context.Context) error {
-		errCh := make(chan error, len(cfg.ExecutionRegions))
+		errCh := make(chan error, len(cfg.ExecutionRegions)*cfg.BuildWorkersPerRegion)
 		run := func(name string, fn func() error) {
 			go func() {
 				if err := fn(); err != nil && !errors.Is(err, context.Canceled) {
@@ -261,11 +265,16 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 
 		for _, regionName := range cfg.ExecutionRegions {
 			regionName := regionName
-			consumer := "builder-" + sanitizeRegionToken(regionName)
-			slog.Info("build-worker consumer configured", "region", regionName, "consumer", consumer)
-			run("build-consumer-"+regionName, func() error {
-				return builder.RunBuildConsumer(runCtx, regionName, consumer)
-			})
+			for workerIndex := 1; workerIndex <= cfg.BuildWorkersPerRegion; workerIndex++ {
+				consumer := fmt.Sprintf("builder-%s-%d", sanitizeRegionToken(regionName), workerIndex)
+				name := fmt.Sprintf("build-consumer-%s-%d", regionName, workerIndex)
+				slog.Info("build-worker consumer configured", "region", regionName, "consumer", consumer)
+				run(name, func() error {
+					return runRestartingLoop(runCtx, name, 2*time.Second, func(loopCtx context.Context) error {
+						return builder.RunBuildConsumer(loopCtx, regionName, consumer)
+					})
+				})
+			}
 		}
 
 		select {
@@ -279,4 +288,27 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 
 func stringsEmpty(value string) bool {
 	return len(strings.TrimSpace(value)) == 0
+}
+
+func runRestartingLoop(ctx context.Context, name string, backoff time.Duration, fn func(context.Context) error) error {
+	if backoff <= 0 {
+		backoff = 2 * time.Second
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := fn(ctx)
+		if err == nil || errors.Is(err, context.Canceled) {
+			return err
+		}
+		slog.Warn("background loop exited; restarting", "name", name, "err", err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

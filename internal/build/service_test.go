@@ -354,6 +354,101 @@ func TestCreateFunctionVersionQueuesAsyncBuildAndMarksReady(t *testing.T) {
 	t.Fatalf("timed out waiting for async build to complete")
 }
 
+func TestCreateFunctionVersionQueuesInitialBuildLogsImmediately(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	bus := NewMemoryBus(16)
+	svc := New(meta, objects)
+	svc.SetBuildBus(bus)
+
+	version, err := svc.CreateFunctionVersion(context.Background(), domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "echo",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		Regions:    []string{"ap-south-1"},
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create function version: %v", err)
+	}
+
+	job, err := meta.GetBuildJob(context.Background(), version.BuildJobID)
+	if err != nil {
+		t.Fatalf("get build job: %v", err)
+	}
+	if strings.TrimSpace(job.LogsKey) == "" {
+		t.Fatal("expected queued build job to have logs key")
+	}
+	logs, err := objects.Get(context.Background(), job.LogsKey)
+	if err != nil {
+		t.Fatalf("get queued build logs: %v", err)
+	}
+	if !strings.Contains(string(logs), "queued for function version") {
+		t.Fatalf("expected queued build logs, got %q", string(logs))
+	}
+}
+
+func TestAsyncBuildCreatesDefaultHTTPTrigger(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	bus := NewMemoryBus(16)
+	svc := New(meta, objects)
+	svc.SetBuildBus(bus)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = svc.RunBuildConsumer(ctx, "ap-south-1", "builder-ap-south-1")
+	}()
+
+	version, err := svc.CreateFunctionVersion(ctx, domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "echo",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		Regions:    []string{"ap-south-1"},
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create function version: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		triggers, err := meta.ListHTTPTriggersByFunctionVersion(context.Background(), version.ID)
+		if err != nil {
+			t.Fatalf("list http triggers: %v", err)
+		}
+		if len(triggers) == 1 {
+			if triggers[0].AuthMode != domain.HTTPTriggerAuthModeNone {
+				t.Fatalf("expected public default auth mode, got %s", triggers[0].AuthMode)
+			}
+			if !triggers[0].Enabled {
+				t.Fatal("expected default http trigger to be enabled")
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for default http trigger")
+}
+
 func TestCreateFunctionVersionBuildsGitSourceRepository(t *testing.T) {
 	t.Parallel()
 

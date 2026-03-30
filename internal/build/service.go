@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -32,6 +33,10 @@ type Service struct {
 	now     func() time.Time
 
 	maxActiveBuildJobsPerProject int
+	gitCloneTimeout              time.Duration
+	npmInstallTimeout            time.Duration
+	npmBuildTimeout              time.Duration
+	npmPruneTimeout              time.Duration
 }
 
 type WarmPreparer interface {
@@ -70,6 +75,10 @@ func New(store store.Store, objects artifact.Store) *Service {
 		objects:                      objects,
 		now:                          func() time.Time { return time.Now().UTC() },
 		maxActiveBuildJobsPerProject: maxActiveBuildJobs,
+		gitCloneTimeout:              90 * time.Second,
+		npmInstallTimeout:            3 * time.Minute,
+		npmBuildTimeout:              3 * time.Minute,
+		npmPruneTimeout:              90 * time.Second,
 	}
 }
 
@@ -83,6 +92,21 @@ func (s *Service) SetWarmPreparer(warmer WarmPreparer) {
 
 func (s *Service) SetArtifactReplicator(replica ArtifactReplicator) {
 	s.replica = replica
+}
+
+func (s *Service) SetCommandTimeouts(gitClone, npmInstall, npmBuild, npmPrune time.Duration) {
+	if gitClone > 0 {
+		s.gitCloneTimeout = gitClone
+	}
+	if npmInstall > 0 {
+		s.npmInstallTimeout = npmInstall
+	}
+	if npmBuild > 0 {
+		s.npmBuildTimeout = npmBuild
+	}
+	if npmPrune > 0 {
+		s.npmPruneTimeout = npmPrune
+	}
 }
 
 func (s *Service) RunBuildConsumer(ctx context.Context, region, consumer string) error {
@@ -265,6 +289,7 @@ func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest)
 	now := s.now()
 	versionID := uuid.NewString()
 	buildJobID := uuid.NewString()
+	logsKey := artifact.BuildLogsKey(buildJobID)
 	requestPayload, err := json.Marshal(req)
 	if err != nil {
 		return nil, nil, err
@@ -296,6 +321,7 @@ func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest)
 		FunctionVersionID: versionID,
 		TargetRegion:      pickBuildRegion(req.Regions),
 		Metadata:          buildMetadataForRequest(req),
+		LogsKey:           logsKey,
 		State:             "queued",
 		Request:           requestPayload,
 		CreatedAt:         now,
@@ -303,6 +329,13 @@ func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest)
 	}
 	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
 		return nil, nil, err
+	}
+	if s.objects != nil {
+		queuedLog := fmt.Sprintf("[%s] build job %s queued for function version %s in region %s\n",
+			now.Format(time.RFC3339), buildJob.ID, version.ID, buildJob.TargetRegion)
+		if err := s.objects.Put(ctx, logsKey, []byte(queuedLog)); err != nil {
+			return nil, nil, err
+		}
 	}
 	return version, buildJob, nil
 }
@@ -331,11 +364,20 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 
 	buildJob.State = "running"
 	buildJob.Error = ""
+	if strings.TrimSpace(buildJob.LogsKey) == "" {
+		buildJob.LogsKey = artifact.BuildLogsKey(buildJob.ID)
+	}
 	buildJob.UpdatedAt = s.now()
 	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
 		return err
 	}
 	recorder := newBuildRecorder(s.now)
+	if s.objects != nil && strings.TrimSpace(buildJob.LogsKey) != "" {
+		logsKey := buildJob.LogsKey
+		recorder.onUpdate = func(data []byte) {
+			_ = s.objects.Put(ctx, logsKey, data)
+		}
+	}
 	recorder.Printf("build job %s started for function version %s in region %s", buildJob.ID, version.ID, buildJob.TargetRegion)
 	recorder.Printf("source type=%s runtime=%s entrypoint=%s", req.Source.Type, req.Runtime, req.Entrypoint)
 
@@ -401,6 +443,9 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
+	if err := s.ensureDefaultHTTPTrigger(ctx, version, recorder); err != nil {
+		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
+	}
 	if s.warmer != nil && len(version.EnvRefs) == 0 {
 		if err := s.warmer.PrepareFunctionVersion(ctx, version); err != nil {
 			recorder.Printf("warm preparation deferred for function version %s: %v", version.ID, err)
@@ -450,6 +495,49 @@ func pickBuildRegion(targetRegions []string) string {
 		return regions.DefaultPrimary()
 	}
 	return targetRegions[0]
+}
+
+func (s *Service) ensureDefaultHTTPTrigger(ctx context.Context, version *domain.FunctionVersion, recorder *buildRecorder) error {
+	triggers, err := s.store.ListHTTPTriggersByFunctionVersion(ctx, version.ID)
+	if err != nil {
+		return fmt.Errorf("list http triggers for function version %s: %w", version.ID, err)
+	}
+	if len(triggers) > 0 {
+		recorder.Printf("default public http trigger already exists for function version %s", version.ID)
+		return nil
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		token, err := generateHTTPTriggerToken()
+		if err != nil {
+			return fmt.Errorf("generate default http trigger token: %w", err)
+		}
+		trigger := &domain.HTTPTrigger{
+			Token:             token,
+			ProjectID:         version.ProjectID,
+			FunctionVersionID: version.ID,
+			Description:       "default public function url",
+			AuthMode:          domain.HTTPTriggerAuthModeNone,
+			Enabled:           true,
+			CreatedAt:         s.now(),
+		}
+		if err := s.store.PutHTTPTrigger(ctx, trigger); err != nil {
+			if errors.Is(err, store.ErrAlreadyExists) {
+				continue
+			}
+			return fmt.Errorf("create default http trigger for function version %s: %w", version.ID, err)
+		}
+		recorder.Printf("created default public http trigger for function version %s", version.ID)
+		return nil
+	}
+	return fmt.Errorf("create default http trigger for function version %s: exhausted token retries", version.ID)
+}
+
+func generateHTTPTriggerToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func buildMetadataForRequest(req domain.DeployRequest) map[string]string {
@@ -626,7 +714,7 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 		cloneArgs = append(cloneArgs, "--branch", req.Source.GitRef)
 	}
 	cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
-	if err := runCommand(ctx, recorder, "", "git", cloneArgs...); err != nil {
+	if err := runCommandWithTimeout(ctx, s.gitCloneTimeout, recorder, "", "git", cloneArgs...); err != nil {
 		cleanup()
 		return "", nil, nil, fmt.Errorf("git clone failed: %w", err)
 	}
@@ -639,7 +727,7 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 		return "", nil, nil, err
 	}
 	recorder.Printf("resolved build root to %s", root)
-	if err := prepareNodeWorkspace(ctx, recorder, root); err != nil {
+	if err := prepareNodeWorkspace(ctx, recorder, root, s.npmInstallTimeout, s.npmBuildTimeout, s.npmPruneTimeout); err != nil {
 		cleanup()
 		return "", nil, nil, err
 	}
@@ -676,7 +764,7 @@ func resolveBuildRoot(repoRoot, subPath string) (string, error) {
 	return root, nil
 }
 
-func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root string) error {
+func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root string, installTimeout, buildTimeout, pruneTimeout time.Duration) error {
 	pkgPath := filepath.Join(root, "package.json")
 	rawPkg, err := os.ReadFile(pkgPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -704,17 +792,17 @@ func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root str
 	if !hasBuildScript {
 		installArgs = append(installArgs, "--omit=dev")
 	}
-	if err := runCommand(ctx, recorder, root, "npm", installArgs...); err != nil {
+	if err := runCommandWithTimeout(ctx, installTimeout, recorder, root, "npm", installArgs...); err != nil {
 		return fmt.Errorf("install npm dependencies: %w", err)
 	}
 	if !hasBuildScript {
 		recorder.Printf("no build script detected; skipping npm build")
 		return nil
 	}
-	if err := runCommand(ctx, recorder, root, "npm", "run", "build", "--if-present"); err != nil {
+	if err := runCommandWithTimeout(ctx, buildTimeout, recorder, root, "npm", "run", "build", "--if-present"); err != nil {
 		return fmt.Errorf("run npm build: %w", err)
 	}
-	if err := runCommand(ctx, recorder, root, "npm", "prune", "--omit=dev"); err != nil {
+	if err := runCommandWithTimeout(ctx, pruneTimeout, recorder, root, "npm", "prune", "--omit=dev"); err != nil {
 		return fmt.Errorf("prune npm devDependencies: %w", err)
 	}
 	return nil
@@ -783,8 +871,9 @@ func (s *Service) enforceBuildQuota(ctx context.Context, projectID string) error
 }
 
 type buildRecorder struct {
-	now     func() time.Time
-	builder strings.Builder
+	now      func() time.Time
+	builder  strings.Builder
+	onUpdate func([]byte)
 }
 
 func newBuildRecorder(now func() time.Time) *buildRecorder {
@@ -805,6 +894,9 @@ func (r *buildRecorder) Printf(format string, args ...any) {
 	r.builder.WriteString(fmt.Sprintf(format, args...))
 	if !strings.HasSuffix(format, "\n") {
 		r.builder.WriteString("\n")
+	}
+	if r.onUpdate != nil {
+		r.onUpdate(r.Bytes())
 	}
 }
 
@@ -844,6 +936,17 @@ func captureGitMetadata(ctx context.Context, recorder *buildRecorder, repoRoot s
 
 func runCommand(ctx context.Context, recorder *buildRecorder, dir, name string, args ...string) error {
 	_, err := runCommandOutput(ctx, recorder, dir, name, args...)
+	return err
+}
+
+func runCommandWithTimeout(ctx context.Context, timeout time.Duration, recorder *buildRecorder, dir, name string, args ...string) error {
+	commandCtx := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		commandCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	_, err := runCommandOutput(commandCtx, recorder, dir, name, args...)
 	return err
 }
 

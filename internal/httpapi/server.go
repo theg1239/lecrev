@@ -748,6 +748,10 @@ func (s *Server) createHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	if version.State != domain.FunctionStateReady {
+		writeServiceError(w, domain.ErrFunctionVersionNotReady)
+		return
+	}
 
 	var body createHTTPTriggerRequest
 	if err := decodeOptionalJSON(r, &body); err != nil {
