@@ -7,3 +7,5 @@ dist/
 tmp/
 *.log
 coverage.out
+.env*
+!.env.example

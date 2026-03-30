@@ -1,0 +1,18 @@
+[Unit]
+Description=Lecrev Frontend Auth Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lecrev
+Group=lecrev
+WorkingDirectory=/opt/lecrev/frontend-auth
+EnvironmentFile=-/etc/lecrev/frontend-auth.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/npm run start:auth
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
