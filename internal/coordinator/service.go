@@ -165,6 +165,10 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 	if version == nil {
 		return fmt.Errorf("function version is required")
 	}
+	artifactMeta, err := s.store.GetArtifact(ctx, version.ArtifactDigest)
+	if err != nil {
+		return err
+	}
 	hostID, session, alreadyWarm, err := s.pickWarmHost(version.ID)
 	if err != nil {
 		return err
@@ -176,6 +180,11 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 		HostId:            hostID,
 		SnapshotKind:      regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION,
 		FunctionVersionId: version.ID,
+		ArtifactBundleKey: artifactMeta.BundleKey,
+		Entrypoint:        version.Entrypoint,
+		NetworkPolicy:     string(version.NetworkPolicy),
+		TimeoutSec:        int32(version.TimeoutSec),
+		MemoryMb:          int32(version.MemoryMB),
 	}
 	if session.preparer != nil {
 		go session.preparer(context.Background(), msg)
@@ -220,11 +229,13 @@ func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignm
 		JobId:             assignment.JobID,
 		FunctionVersionId: assignment.FunctionVersionID,
 		ArtifactDigest:    assignment.ArtifactDigest,
+		ArtifactBundleKey: assignment.ArtifactBundleKey,
 		Entrypoint:        assignment.Entrypoint,
 		PayloadJson:       assignment.Payload,
 		EnvRefs:           assignment.EnvRefs,
 		NetworkPolicy:     string(assignment.NetworkPolicy),
 		TimeoutSec:        int32(assignment.TimeoutSec),
+		MemoryMb:          int32(assignment.MemoryMB),
 	}
 	msg := &regionv1.CoordinatorMessage{
 		Body: &regionv1.CoordinatorMessage_Assignment{

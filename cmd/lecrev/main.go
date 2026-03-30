@@ -35,6 +35,20 @@ func main() {
 		}); err != nil {
 			log.Fatal(err)
 		}
+	case "control-plane":
+		if err := devstack.RunControlPlane(ctx, devstack.Config{
+			APIAddr:             strings.TrimSpace(os.Getenv("LECREV_API_ADDR")),
+			CoordinatorBasePort: coordinatorBasePortFromEnv(),
+			ExecutionRegions:    regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
+		}); err != nil {
+			log.Fatal(err)
+		}
+	case "node-agent":
+		if err := devstack.RunNodeAgent(ctx, devstack.Config{
+			ExecutionRegions: regions.ParseCSV(os.Getenv("LECREV_EXECUTION_REGIONS")),
+		}); err != nil {
+			log.Fatal(err)
+		}
 	case "smoke":
 		if err := runSmoke(ctx, os.Args[2:]); err != nil {
 			log.Fatal(err)
@@ -87,7 +101,7 @@ func runSmoke(ctx context.Context, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: lecrev <devstack|smoke>")
+	fmt.Fprintln(os.Stderr, "usage: lecrev <devstack|control-plane|node-agent|smoke>")
 }
 
 func coordinatorBasePortFromEnv() int {

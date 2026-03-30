@@ -78,12 +78,19 @@ message ExecutionAssignment {
   repeated string env_refs = 7;
   string network_policy = 8;
   int32 timeout_sec = 9;
+  string artifact_bundle_key = 10;
+  int32 memory_mb = 11;
 }
 
 message PrepareSnapshot {
   string host_id = 1;
   SnapshotKind snapshot_kind = 2;
   string function_version_id = 3;
+  string artifact_bundle_key = 4;
+  string entrypoint = 5;
+  string network_policy = 6;
+  int32 timeout_sec = 7;
+  int32 memory_mb = 8;
 }
 
 message DrainHost {

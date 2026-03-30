@@ -163,6 +163,11 @@ func TestPrepareSnapshotUsesDriverWarmPreparation(t *testing.T) {
 		HostId:            "host-ap-south-1-a",
 		SnapshotKind:      regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION,
 		FunctionVersionId: "fn-1",
+		ArtifactBundleKey: "artifacts/digest/bundle.tgz",
+		Entrypoint:        "index.mjs",
+		NetworkPolicy:     string(domain.NetworkPolicyFull),
+		TimeoutSec:        10,
+		MemoryMb:          128,
 	}, func() {})
 
 	heartbeat := svc.heartbeatMessage()
@@ -289,7 +294,7 @@ func newConfiguredTestService(t *testing.T, driver firecracker.Driver, cfg Confi
 	}); err != nil {
 		t.Fatalf("put function version: %v", err)
 	}
-	svc := NewWithConfig(cfg, "host-ap-south-1-a", "ap-south-1", "", driver, objects, meta, stubResolver{})
+	svc := NewWithConfig(cfg, "host-ap-south-1-a", "ap-south-1", "", driver, objects, stubResolver{})
 	return svc, objects
 }
 
@@ -299,8 +304,10 @@ func testAssignment() *regionv1.ExecutionAssignment {
 		JobId:             "job-1",
 		FunctionVersionId: "fn-1",
 		ArtifactDigest:    "digest",
+		ArtifactBundleKey: "artifacts/digest/bundle.tgz",
 		Entrypoint:        "index.mjs",
 		TimeoutSec:        10,
+		MemoryMb:          128,
 	}
 }
 

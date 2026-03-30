@@ -130,12 +130,13 @@ This is the Lambda Function URL equivalent in this platform.
 - free CPU/RAM
 - recent host failures
 - artifact cache locality
-3. Coordinator sends assignment to node agent over long-lived outbound mTLS gRPC stream.
+3. Coordinator sends a self-contained assignment to the node agent over long-lived outbound mTLS gRPC stream.
 
 Control model:
 
 - Hosts dial coordinator; control plane does not SSH into hosts.
 - Commands include assignment, snapshot prep, drain, terminate, and ack.
+- Assignment includes the artifact bundle key plus runtime sizing data, so the execution host does not need direct metadata-database access just to run a job.
 
 ## 8) Lease and retry model
 

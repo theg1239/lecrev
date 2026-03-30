@@ -287,6 +287,15 @@ func (s *Service) scheduleNext(ctx context.Context) (bool, error) {
 
 func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.FunctionVersion, job *domain.ExecutionJob) error {
 	now := s.now()
+	artifactMeta, err := s.store.GetArtifact(ctx, version.ArtifactDigest)
+	if err != nil {
+		job.State = domain.JobStateQueued
+		job.TargetRegion = ""
+		job.Error = err.Error()
+		job.UpdatedAt = now
+		_ = s.store.UpdateExecutionJob(ctx, job)
+		return err
+	}
 	candidates, err := s.rankDispatchers(ctx, version)
 	if err != nil {
 		job.State = domain.JobStateQueued
@@ -327,11 +336,13 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 			JobID:             job.ID,
 			FunctionVersionID: version.ID,
 			ArtifactDigest:    version.ArtifactDigest,
+			ArtifactBundleKey: artifactMeta.BundleKey,
 			Entrypoint:        version.Entrypoint,
 			EnvRefs:           append([]string(nil), version.EnvRefs...),
 			Payload:           append([]byte(nil), job.Payload...),
 			NetworkPolicy:     version.NetworkPolicy,
 			TimeoutSec:        version.TimeoutSec,
+			MemoryMB:          version.MemoryMB,
 		}
 		if err := candidate.dispatcher.EnqueueExecution(ctx, assignment); err == nil {
 			job.AttemptCount++

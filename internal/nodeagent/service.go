@@ -16,7 +16,6 @@ import (
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/secrets"
-	"github.com/theg1239/lecrev/internal/store"
 )
 
 type Service struct {
@@ -26,7 +25,6 @@ type Service struct {
 	coordinatorAddr string
 	driver          firecracker.Driver
 	objects         artifact.Store
-	store           store.Store
 	secrets         secrets.ExecutionResolver
 	dialOptions     []grpc.DialOption
 
@@ -59,11 +57,11 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, store store.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
-	return NewWithConfig(Config{}, hostID, region, coordinatorAddr, driver, objects, store, secrets, dialOptions...)
+func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
+	return NewWithConfig(Config{}, hostID, region, coordinatorAddr, driver, objects, secrets, dialOptions...)
 }
 
-func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, store store.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
+func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
 	cfg = cfg.withDefaults()
 	if len(dialOptions) == 0 {
 		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
@@ -79,7 +77,6 @@ func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver fi
 		coordinatorAddr: coordinatorAddr,
 		driver:          driver,
 		objects:         objects,
-		store:           store,
 		secrets:         secrets,
 		dialOptions:     append([]grpc.DialOption(nil), dialOptions...),
 		maxSlots:        cfg.MaxConcurrentAssignments,
@@ -249,17 +246,12 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 
 	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_STARTING, "", nil, "", 0)
 
-	artifactMeta, err := s.store.GetArtifact(ctx, msg.ArtifactDigest)
-	if err != nil {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+	bundleKey := strings.TrimSpace(msg.ArtifactBundleKey)
+	if bundleKey == "" {
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, "assignment missing artifact_bundle_key", 1)
 		return
 	}
-	version, err := s.store.GetFunctionVersion(ctx, msg.FunctionVersionId)
-	if err != nil {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
-		return
-	}
-	bundle, err := s.objects.Get(ctx, artifactMeta.BundleKey)
+	bundle, err := s.objects.Get(ctx, bundleKey)
 	if err != nil {
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
 		return
@@ -291,7 +283,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		Payload:        msg.PayloadJson,
 		Env:            env,
 		Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
-		MemoryMB:       version.MemoryMB,
+		MemoryMB:       int(msg.MemoryMb),
 		NetworkPolicy:  msg.NetworkPolicy,
 		Region:         s.region,
 		HostID:         s.hostID,
@@ -344,7 +336,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 			Payload:        msg.PayloadJson,
 			Env:            env,
 			Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
-			MemoryMB:       version.MemoryMB,
+			MemoryMB:       int(msg.MemoryMb),
 			NetworkPolicy:  msg.NetworkPolicy,
 			Region:         s.region,
 			HostID:         s.hostID,
@@ -374,31 +366,27 @@ func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnap
 		if strings.TrimSpace(msg.FunctionVersionId) == "" {
 			return
 		}
+		bundleKey := strings.TrimSpace(msg.ArtifactBundleKey)
+		if bundleKey == "" {
+			return
+		}
 		warmer, ok := s.driver.(firecracker.PostExecutionWarmer)
 		if !ok {
 			return
 		}
-		version, err := s.store.GetFunctionVersion(ctx, msg.FunctionVersionId)
-		if err != nil {
-			return
-		}
-		artifactMeta, err := s.store.GetArtifact(ctx, version.ArtifactDigest)
-		if err != nil {
-			return
-		}
-		bundle, err := s.objects.Get(ctx, artifactMeta.BundleKey)
+		bundle, err := s.objects.Get(ctx, bundleKey)
 		if err != nil {
 			return
 		}
 		_ = warmer.PrepareFunctionWarm(ctx, firecracker.ExecuteRequest{
-			AttemptID:      "prepare-" + version.ID,
-			JobID:          "prepare-" + version.ID,
-			FunctionID:     version.ID,
-			Entrypoint:     version.Entrypoint,
+			AttemptID:      "prepare-" + msg.FunctionVersionId,
+			JobID:          "prepare-" + msg.FunctionVersionId,
+			FunctionID:     msg.FunctionVersionId,
+			Entrypoint:     msg.Entrypoint,
 			ArtifactBundle: bundle,
-			Timeout:        time.Duration(version.TimeoutSec) * time.Second,
-			MemoryMB:       version.MemoryMB,
-			NetworkPolicy:  string(version.NetworkPolicy),
+			Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
+			MemoryMB:       int(msg.MemoryMb),
+			NetworkPolicy:  msg.NetworkPolicy,
 			Region:         s.region,
 			HostID:         s.hostID,
 		})

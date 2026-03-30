@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"time"
 
 	"google.golang.org/grpc/credentials"
@@ -18,6 +19,13 @@ import (
 type CredentialsBundle struct {
 	Server credentials.TransportCredentials
 	Client credentials.TransportCredentials
+}
+
+type FileCredentialsConfig struct {
+	CACertPath string
+	CertPath   string
+	KeyPath    string
+	ServerName string
 }
 
 func GenerateDevMTLS(hosts []string, ips []net.IP) (*CredentialsBundle, error) {
@@ -76,6 +84,49 @@ func GenerateDevMTLS(hosts []string, ips []net.IP) (*CredentialsBundle, error) {
 	}, nil
 }
 
+func LoadServerMTLS(cfg FileCredentialsConfig) (credentials.TransportCredentials, error) {
+	if cfg.CACertPath == "" || cfg.CertPath == "" || cfg.KeyPath == "" {
+		return nil, fmt.Errorf("ca cert, cert, and key paths are required for server mTLS")
+	}
+	caPool, err := loadCertPool(cfg.CACertPath)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load server keypair: %w", err)
+	}
+	return credentials.NewTLS(&tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+	}), nil
+}
+
+func LoadClientMTLS(cfg FileCredentialsConfig) (credentials.TransportCredentials, error) {
+	if cfg.CACertPath == "" || cfg.CertPath == "" || cfg.KeyPath == "" {
+		return nil, fmt.Errorf("ca cert, cert, and key paths are required for client mTLS")
+	}
+	if cfg.ServerName == "" {
+		return nil, fmt.Errorf("server name is required for client mTLS")
+	}
+	caPool, err := loadCertPool(cfg.CACertPath)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load client keypair: %w", err)
+	}
+	return credentials.NewTLS(&tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caPool,
+		ServerName:   cfg.ServerName,
+	}), nil
+}
+
 func issueLeaf(caCert *x509.Certificate, caKey *rsa.PrivateKey, commonName string, hosts []string, ips []net.IP, usages []x509.ExtKeyUsage) (tls.Certificate, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -108,4 +159,16 @@ func issueLeaf(caCert *x509.Certificate, caKey *rsa.PrivateKey, commonName strin
 		return tls.Certificate{}, fmt.Errorf("build keypair: %w", err)
 	}
 	return cert, nil
+}
+
+func loadCertPool(path string) (*x509.CertPool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read ca cert %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(data); !ok {
+		return nil, fmt.Errorf("append ca certs from %s", path)
+	}
+	return pool, nil
 }

@@ -202,6 +202,18 @@ func TestPrepareFunctionWarmSendsSnapshotPrepCommand(t *testing.T) {
 
 	meta := memstore.New()
 	now := time.Now().UTC()
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:     "digest",
+		SizeBytes:  128,
+		BundleKey:  "artifacts/digest/bundle.tgz",
+		StartupKey: "artifacts/digest/startup.json",
+		Regions: map[string]time.Time{
+			"ap-south-1": now,
+		},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
 	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
 		ID:             "fn-prepare",
 		ProjectID:      "demo",

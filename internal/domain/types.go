@@ -240,11 +240,13 @@ type Assignment struct {
 	JobID             string
 	FunctionVersionID string
 	ArtifactDigest    string
+	ArtifactBundleKey string
 	Entrypoint        string
 	EnvRefs           []string
 	Payload           json.RawMessage
 	NetworkPolicy     NetworkPolicy
 	TimeoutSec        int
+	MemoryMB          int
 }
 
 func (a AttemptState) Terminal() bool {

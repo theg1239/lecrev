@@ -598,6 +598,8 @@ type ExecutionAssignment struct {
 	EnvRefs           []string               `protobuf:"bytes,7,rep,name=env_refs,json=envRefs,proto3" json:"env_refs,omitempty"`
 	NetworkPolicy     string                 `protobuf:"bytes,8,opt,name=network_policy,json=networkPolicy,proto3" json:"network_policy,omitempty"`
 	TimeoutSec        int32                  `protobuf:"varint,9,opt,name=timeout_sec,json=timeoutSec,proto3" json:"timeout_sec,omitempty"`
+	ArtifactBundleKey string                 `protobuf:"bytes,10,opt,name=artifact_bundle_key,json=artifactBundleKey,proto3" json:"artifact_bundle_key,omitempty"`
+	MemoryMb          int32                  `protobuf:"varint,11,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -695,11 +697,30 @@ func (x *ExecutionAssignment) GetTimeoutSec() int32 {
 	return 0
 }
 
+func (x *ExecutionAssignment) GetArtifactBundleKey() string {
+	if x != nil {
+		return x.ArtifactBundleKey
+	}
+	return ""
+}
+
+func (x *ExecutionAssignment) GetMemoryMb() int32 {
+	if x != nil {
+		return x.MemoryMb
+	}
+	return 0
+}
+
 type PrepareSnapshot struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	HostId            string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
 	SnapshotKind      SnapshotKind           `protobuf:"varint,2,opt,name=snapshot_kind,json=snapshotKind,proto3,enum=lecrev.region.v1.SnapshotKind" json:"snapshot_kind,omitempty"`
 	FunctionVersionId string                 `protobuf:"bytes,3,opt,name=function_version_id,json=functionVersionId,proto3" json:"function_version_id,omitempty"`
+	ArtifactBundleKey string                 `protobuf:"bytes,4,opt,name=artifact_bundle_key,json=artifactBundleKey,proto3" json:"artifact_bundle_key,omitempty"`
+	Entrypoint        string                 `protobuf:"bytes,5,opt,name=entrypoint,proto3" json:"entrypoint,omitempty"`
+	NetworkPolicy     string                 `protobuf:"bytes,6,opt,name=network_policy,json=networkPolicy,proto3" json:"network_policy,omitempty"`
+	TimeoutSec        int32                  `protobuf:"varint,7,opt,name=timeout_sec,json=timeoutSec,proto3" json:"timeout_sec,omitempty"`
+	MemoryMb          int32                  `protobuf:"varint,8,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -753,6 +774,41 @@ func (x *PrepareSnapshot) GetFunctionVersionId() string {
 		return x.FunctionVersionId
 	}
 	return ""
+}
+
+func (x *PrepareSnapshot) GetArtifactBundleKey() string {
+	if x != nil {
+		return x.ArtifactBundleKey
+	}
+	return ""
+}
+
+func (x *PrepareSnapshot) GetEntrypoint() string {
+	if x != nil {
+		return x.Entrypoint
+	}
+	return ""
+}
+
+func (x *PrepareSnapshot) GetNetworkPolicy() string {
+	if x != nil {
+		return x.NetworkPolicy
+	}
+	return ""
+}
+
+func (x *PrepareSnapshot) GetTimeoutSec() int32 {
+	if x != nil {
+		return x.TimeoutSec
+	}
+	return 0
+}
+
+func (x *PrepareSnapshot) GetMemoryMb() int32 {
+	if x != nil {
+		return x.MemoryMb
+	}
+	return 0
 }
 
 type DrainHost struct {
@@ -1039,7 +1095,7 @@ const file_lecrev_region_v1_control_proto_rawDesc = "" +
 	"\x04body\"%\n" +
 	"\n" +
 	"Registered\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\"\xca\x02\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\"\x97\x03\n" +
 	"\x13ExecutionAssignment\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n" +
@@ -1053,11 +1109,22 @@ const file_lecrev_region_v1_control_proto_rawDesc = "" +
 	"\benv_refs\x18\a \x03(\tR\aenvRefs\x12%\n" +
 	"\x0enetwork_policy\x18\b \x01(\tR\rnetworkPolicy\x12\x1f\n" +
 	"\vtimeout_sec\x18\t \x01(\x05R\n" +
-	"timeoutSec\"\x9f\x01\n" +
+	"timeoutSec\x12.\n" +
+	"\x13artifact_bundle_key\x18\n" +
+	" \x01(\tR\x11artifactBundleKey\x12\x1b\n" +
+	"\tmemory_mb\x18\v \x01(\x05R\bmemoryMb\"\xd4\x02\n" +
 	"\x0fPrepareSnapshot\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12C\n" +
 	"\rsnapshot_kind\x18\x02 \x01(\x0e2\x1e.lecrev.region.v1.SnapshotKindR\fsnapshotKind\x12.\n" +
-	"\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\"<\n" +
+	"\x13function_version_id\x18\x03 \x01(\tR\x11functionVersionId\x12.\n" +
+	"\x13artifact_bundle_key\x18\x04 \x01(\tR\x11artifactBundleKey\x12\x1e\n" +
+	"\n" +
+	"entrypoint\x18\x05 \x01(\tR\n" +
+	"entrypoint\x12%\n" +
+	"\x0enetwork_policy\x18\x06 \x01(\tR\rnetworkPolicy\x12\x1f\n" +
+	"\vtimeout_sec\x18\a \x01(\x05R\n" +
+	"timeoutSec\x12\x1b\n" +
+	"\tmemory_mb\x18\b \x01(\x05R\bmemoryMb\"<\n" +
 	"\tDrainHost\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"]\n" +

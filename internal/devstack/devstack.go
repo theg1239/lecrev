@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/theg1239/lecrev/internal/transport"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Config struct {
@@ -40,6 +42,11 @@ type Config struct {
 	APIAddr              string
 	ExecutionRegions     []string
 	CoordinatorBasePort  int
+	CoordinatorBindHost  string
+	ControlPlaneBaseURL  string
+	NodeAgentHostID      string
+	NodeAgentRegion      string
+	NodeAgentCoordinator string
 	PostgresDSN          string
 	NATSURL              string
 	S3Region             string
@@ -54,6 +61,12 @@ type Config struct {
 	SecretsProxyToken    string
 	BootstrapAdminAPIKey string
 	EnableMTLS           bool
+	GRPCCACertPath       string
+	GRPCServerCertPath   string
+	GRPCServerKeyPath    string
+	GRPCClientCertPath   string
+	GRPCClientKeyPath    string
+	GRPCServerName       string
 	ExecutionDriver      string
 	ExecutionHostSlots   int
 
@@ -73,6 +86,9 @@ type Config struct {
 	FirecrackerNetmask     string
 	FirecrackerVCPUCount   int
 	FirecrackerMemoryMB    int
+	FirecrackerJailerUID   int
+	FirecrackerJailerGID   int
+	FirecrackerJailerUser  string
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -101,6 +117,21 @@ func prepareConfig(cfg *Config) error {
 	}
 	if cfg.CoordinatorBasePort == 0 {
 		cfg.CoordinatorBasePort = 9091
+	}
+	if cfg.LoadEnv && cfg.CoordinatorBindHost == "" {
+		cfg.CoordinatorBindHost = strings.TrimSpace(os.Getenv("LECREV_COORDINATOR_BIND_HOST"))
+	}
+	if cfg.LoadEnv && cfg.ControlPlaneBaseURL == "" {
+		cfg.ControlPlaneBaseURL = strings.TrimSpace(os.Getenv("LECREV_CONTROL_PLANE_BASE_URL"))
+	}
+	if cfg.LoadEnv && cfg.NodeAgentHostID == "" {
+		cfg.NodeAgentHostID = strings.TrimSpace(os.Getenv("LECREV_NODE_AGENT_HOST_ID"))
+	}
+	if cfg.LoadEnv && cfg.NodeAgentRegion == "" {
+		cfg.NodeAgentRegion = strings.TrimSpace(os.Getenv("LECREV_NODE_AGENT_REGION"))
+	}
+	if cfg.LoadEnv && cfg.NodeAgentCoordinator == "" {
+		cfg.NodeAgentCoordinator = strings.TrimSpace(os.Getenv("LECREV_COORDINATOR_ADDR"))
 	}
 	if cfg.LoadEnv && cfg.PostgresDSN == "" {
 		cfg.PostgresDSN = strings.TrimSpace(os.Getenv("LECREV_POSTGRES_DSN"))
@@ -242,11 +273,53 @@ func prepareConfig(cfg *Config) error {
 			cfg.EnableMTLS = true
 		}
 	}
+	if cfg.LoadEnv && cfg.GRPCCACertPath == "" {
+		cfg.GRPCCACertPath = strings.TrimSpace(os.Getenv("LECREV_GRPC_CA_CERT"))
+	}
+	if cfg.LoadEnv && cfg.GRPCServerCertPath == "" {
+		cfg.GRPCServerCertPath = strings.TrimSpace(os.Getenv("LECREV_GRPC_SERVER_CERT"))
+	}
+	if cfg.LoadEnv && cfg.GRPCServerKeyPath == "" {
+		cfg.GRPCServerKeyPath = strings.TrimSpace(os.Getenv("LECREV_GRPC_SERVER_KEY"))
+	}
+	if cfg.LoadEnv && cfg.GRPCClientCertPath == "" {
+		cfg.GRPCClientCertPath = strings.TrimSpace(os.Getenv("LECREV_GRPC_CLIENT_CERT"))
+	}
+	if cfg.LoadEnv && cfg.GRPCClientKeyPath == "" {
+		cfg.GRPCClientKeyPath = strings.TrimSpace(os.Getenv("LECREV_GRPC_CLIENT_KEY"))
+	}
+	if cfg.LoadEnv && cfg.GRPCServerName == "" {
+		cfg.GRPCServerName = strings.TrimSpace(os.Getenv("LECREV_GRPC_SERVER_NAME"))
+	}
 	normalizedRegions, err := regions.NormalizeExecutionRegions(cfg.ExecutionRegions)
 	if err != nil {
 		return err
 	}
 	cfg.ExecutionRegions = normalizedRegions
+	if cfg.LoadEnv && cfg.FirecrackerJailerUID == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_JAILER_UID")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_JAILER_UID: %w", err)
+			}
+			cfg.FirecrackerJailerUID = value
+		}
+	}
+	if cfg.LoadEnv && cfg.FirecrackerJailerGID == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_JAILER_GID")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_JAILER_GID: %w", err)
+			}
+			cfg.FirecrackerJailerGID = value
+		}
+	}
+	if cfg.LoadEnv && cfg.FirecrackerJailerUser == "" {
+		cfg.FirecrackerJailerUser = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_JAILER_USER"))
+	}
+	if cfg.FirecrackerJailerUser == "" {
+		cfg.FirecrackerJailerUser = "lecrev"
+	}
 	return nil
 }
 
@@ -367,7 +440,7 @@ func runNetworked(ctx context.Context, cfg Config) error {
 			}
 			return nodeagent.NewWithConfig(nodeagent.Config{
 				MaxConcurrentAssignments: cfg.ExecutionHostSlots,
-			}, region.host, region.name, region.addr, driver, objectStore, metaStore, secretsClient, grpcDialOptions...).Run(ctx)
+			}, region.host, region.name, region.addr, driver, objectStore, secretsClient, grpcDialOptions...).Run(ctx)
 		})
 	}
 	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
@@ -502,7 +575,82 @@ func controlPlaneBaseURL(apiAddr string) string {
 	return "http://" + strings.TrimRight(apiAddr, "/")
 }
 
+func coordinatorListenAddr(cfg Config, index int, defaultHost string) string {
+	host := strings.TrimSpace(cfg.CoordinatorBindHost)
+	if host == "" {
+		host = defaultHost
+	}
+	return net.JoinHostPort(host, strconv.Itoa(cfg.CoordinatorBasePort+index))
+}
+
+func hasFileMTLSConfig(cfg Config) bool {
+	return strings.TrimSpace(cfg.GRPCCACertPath) != "" ||
+		strings.TrimSpace(cfg.GRPCServerCertPath) != "" ||
+		strings.TrimSpace(cfg.GRPCServerKeyPath) != "" ||
+		strings.TrimSpace(cfg.GRPCClientCertPath) != "" ||
+		strings.TrimSpace(cfg.GRPCClientKeyPath) != ""
+}
+
+func buildControlPlaneGRPCServerOptions(cfg Config) ([]grpc.ServerOption, error) {
+	if !cfg.EnableMTLS {
+		return nil, nil
+	}
+	if hasFileMTLSConfig(cfg) {
+		serverCreds, err := transport.LoadServerMTLS(transport.FileCredentialsConfig{
+			CACertPath: cfg.GRPCCACertPath,
+			CertPath:   cfg.GRPCServerCertPath,
+			KeyPath:    cfg.GRPCServerKeyPath,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return []grpc.ServerOption{grpc.Creds(serverCreds)}, nil
+	}
+	return nil, fmt.Errorf("mTLS is enabled but no grpc server certificate files are configured")
+}
+
+func buildNodeAgentGRPCDialOptions(cfg Config) ([]grpc.DialOption, error) {
+	if !cfg.EnableMTLS {
+		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
+	}
+	if !hasFileMTLSConfig(cfg) {
+		return nil, fmt.Errorf("mTLS is enabled but no grpc client certificate files are configured")
+	}
+	clientCreds, err := transport.LoadClientMTLS(transport.FileCredentialsConfig{
+		CACertPath: cfg.GRPCCACertPath,
+		CertPath:   cfg.GRPCClientCertPath,
+		KeyPath:    cfg.GRPCClientKeyPath,
+		ServerName: cfg.GRPCServerName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []grpc.DialOption{grpc.WithTransportCredentials(clientCreds)}, nil
+}
+
 func buildExecutionDriver(cfg Config) (firecracker.Driver, error) {
+	jailerUID := cfg.FirecrackerJailerUID
+	jailerGID := cfg.FirecrackerJailerGID
+	if cfg.FirecrackerUseJailer && (jailerUID == 0 || jailerGID == 0) && strings.TrimSpace(cfg.FirecrackerJailerUser) != "" {
+		account, err := user.Lookup(strings.TrimSpace(cfg.FirecrackerJailerUser))
+		if err != nil {
+			return nil, fmt.Errorf("lookup jailer user %q: %w", cfg.FirecrackerJailerUser, err)
+		}
+		if jailerUID == 0 {
+			value, err := strconv.Atoi(account.Uid)
+			if err != nil {
+				return nil, fmt.Errorf("parse uid for jailer user %q: %w", cfg.FirecrackerJailerUser, err)
+			}
+			jailerUID = value
+		}
+		if jailerGID == 0 {
+			value, err := strconv.Atoi(account.Gid)
+			if err != nil {
+				return nil, fmt.Errorf("parse gid for jailer user %q: %w", cfg.FirecrackerJailerUser, err)
+			}
+			jailerGID = value
+		}
+	}
 	switch strings.TrimSpace(strings.ToLower(cfg.ExecutionDriver)) {
 	case "", "local-node":
 		return localnode.New(), nil
@@ -524,6 +672,8 @@ func buildExecutionDriver(cfg Config) (firecracker.Driver, error) {
 			Netmask:           cfg.FirecrackerNetmask,
 			VCPUCount:         int64(cfg.FirecrackerVCPUCount),
 			DefaultMemoryMB:   int64(cfg.FirecrackerMemoryMB),
+			JailerUID:         jailerUID,
+			JailerGID:         jailerGID,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported execution driver %q", cfg.ExecutionDriver)

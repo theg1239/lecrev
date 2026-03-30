@@ -463,11 +463,24 @@ func seedFunctionVersion(t *testing.T, store *memstore.Store, versionID string, 
 	t.Helper()
 
 	now := time.Now().UTC()
+	artifactRegions := make(map[string]time.Time, len(regions))
+	for _, region := range regions {
+		artifactRegions[region] = now
+	}
+	seedArtifact(t, store, &domain.Artifact{
+		Digest:     "digest",
+		SizeBytes:  128,
+		BundleKey:  "artifacts/digest/bundle.tgz",
+		StartupKey: "artifacts/digest/startup.json",
+		Regions:    artifactRegions,
+		CreatedAt:  now,
+	})
 	version := &domain.FunctionVersion{
 		ID:             versionID,
 		ProjectID:      "demo",
 		Name:           "echo",
 		Runtime:        "node22",
+		MemoryMB:       128,
 		Entrypoint:     "index.mjs",
 		TimeoutSec:     5,
 		NetworkPolicy:  domain.NetworkPolicyFull,
