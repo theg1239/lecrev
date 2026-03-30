@@ -15,6 +15,7 @@ import (
 	"github.com/theg1239/lecrev/internal/coordinator"
 	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/httpapi"
+	"github.com/theg1239/lecrev/internal/leadership"
 	"github.com/theg1239/lecrev/internal/nodeagent"
 	"github.com/theg1239/lecrev/internal/recovery"
 	"github.com/theg1239/lecrev/internal/scheduler"
@@ -116,13 +117,37 @@ func RunControlPlane(ctx context.Context, cfg Config) error {
 		region := region
 		slog.Info("control-plane coordinator configured", "region", region.name, "listen", region.addr)
 		run("coordinator-"+region.name, func() error { return region.svc.Listen(ctx, region.addr, grpcServerOptions...) })
-		run("queue-consumer-"+region.name, func() error {
-			return region.svc.RunExecutionConsumer(ctx, "coordinator-"+sanitizeRegionToken(region.name))
-		})
 	}
 
-	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
-	run("global-scheduler", func() error { return schedulerService.Run(ctx) })
+	run("control-plane-background", func() error {
+		return leadership.Run(ctx, leadership.Config{
+			Name: "control-plane-background",
+			DSN:  cfg.PostgresDSN,
+		}, func(runCtx context.Context) error {
+			leaderErrCh := make(chan error, len(localRegions)+2)
+			runLeader := func(name string, fn func() error) {
+				go func() {
+					if err := fn(); err != nil && !errors.Is(err, context.Canceled) {
+						leaderErrCh <- fmt.Errorf("%s: %w", name, err)
+					}
+				}()
+			}
+			for _, region := range localRegions {
+				region := region
+				runLeader("queue-consumer-"+region.name, func() error {
+					return region.svc.RunExecutionConsumer(runCtx, "coordinator-"+sanitizeRegionToken(region.name))
+				})
+			}
+			runLeader("lease-recovery", func() error { return leaseRecovery.Run(runCtx) })
+			runLeader("global-scheduler", func() error { return schedulerService.Run(runCtx) })
+			select {
+			case <-runCtx.Done():
+				return runCtx.Err()
+			case err := <-leaderErrCh:
+				return err
+			}
+		})
+	})
 	run("http-api", func() error { return httpServer.ListenAndServe() })
 
 	slog.Info("control-plane started", "api", cfg.APIAddr, "regions", cfg.ExecutionRegions)
@@ -214,33 +239,36 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 
 	builder := build.New(metaStore, objectStore)
 	builder.SetBuildBus(buildBus)
-
-	errCh := make(chan error, len(cfg.ExecutionRegions))
-	run := func(name string, fn func() error) {
-		go func() {
-			if err := fn(); err != nil && !errors.Is(err, context.Canceled) {
-				errCh <- fmt.Errorf("%s: %w", name, err)
-			}
-		}()
-	}
-
-	for _, regionName := range cfg.ExecutionRegions {
-		regionName := regionName
-		consumer := "builder-" + sanitizeRegionToken(regionName)
-		slog.Info("build-worker configured", "region", regionName, "consumer", consumer)
-		run("build-consumer-"+regionName, func() error {
-			return builder.RunBuildConsumer(ctx, regionName, consumer)
-		})
-	}
-
 	slog.Info("build-worker started", "regions", cfg.ExecutionRegions)
+	return leadership.Run(ctx, leadership.Config{
+		Name: "build-worker",
+		DSN:  cfg.PostgresDSN,
+	}, func(runCtx context.Context) error {
+		errCh := make(chan error, len(cfg.ExecutionRegions))
+		run := func(name string, fn func() error) {
+			go func() {
+				if err := fn(); err != nil && !errors.Is(err, context.Canceled) {
+					errCh <- fmt.Errorf("%s: %w", name, err)
+				}
+			}()
+		}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		return err
-	}
+		for _, regionName := range cfg.ExecutionRegions {
+			regionName := regionName
+			consumer := "builder-" + sanitizeRegionToken(regionName)
+			slog.Info("build-worker consumer configured", "region", regionName, "consumer", consumer)
+			run("build-consumer-"+regionName, func() error {
+				return builder.RunBuildConsumer(runCtx, regionName, consumer)
+			})
+		}
+
+		select {
+		case <-runCtx.Done():
+			return runCtx.Err()
+		case err := <-errCh:
+			return err
+		}
+	})
 }
 
 func stringsEmpty(value string) bool {
