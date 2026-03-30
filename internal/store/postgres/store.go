@@ -605,9 +605,9 @@ func (s *Store) ClaimNextExecutionJob(ctx context.Context, fromStates []domain.J
 		    updated_at = $3
 		from next_job
 		where j.id = next_job.id
-		returning id, function_version_id, project_id, coalesce(target_region, ''), state, payload,
-		          max_retries, attempt_count, coalesce(last_attempt_id, ''), coalesce(error, ''), result,
-		          created_at, updated_at
+		returning j.id, j.function_version_id, j.project_id, coalesce(j.target_region, ''), j.state, j.payload,
+		          j.max_retries, j.attempt_count, coalesce(j.last_attempt_id, ''), coalesce(j.error, ''), j.result,
+		          j.created_at, j.updated_at
 	`, states, string(toState), now).Scan(
 		&job.ID, &job.FunctionVersionID, &job.ProjectID, &job.TargetRegion, &state, &rawPayload,
 		&job.MaxRetries, &job.AttemptCount, &job.LastAttemptID, &job.Error, &rawResult,
