@@ -301,6 +301,32 @@ curl -sS http://localhost:8080/v1/regions/ap-south-1/hosts \
   -H 'X-API-Key: dev-root-key'
 ```
 
+`GET /v1/regions` is tenant-accessible so browser dashboards can discover supported execution regions. Host, warm-pool, and drain endpoints remain admin-only.
+
+Inspect project-scoped dashboard views:
+
+```bash
+curl -sS 'http://localhost:8080/v1/projects?limit=20' \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS http://localhost:8080/v1/projects/demo \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS 'http://localhost:8080/v1/projects/demo/overview?limit=8' \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS 'http://localhost:8080/v1/projects/demo/functions?limit=20' \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS 'http://localhost:8080/v1/projects/demo/build-jobs?limit=20' \
+  -H 'X-API-Key: dev-root-key'
+
+curl -sS 'http://localhost:8080/v1/projects/demo/jobs?limit=20' \
+  -H 'X-API-Key: dev-root-key'
+```
+
+These endpoints are intended for a frontend dashboard. They return compact project, function, build-job, and execution-job summaries rather than the full archived artifacts.
+
 Inspect per-job attempts and cost records:
 
 ```bash
@@ -338,6 +364,10 @@ curl -sS http://localhost:8080/v1/triggers/webhook/<token> \
 ```
 
 Webhook deliveries are public token-authenticated endpoints. Management operations for creating and listing triggers stay behind the normal API key middleware.
+
+## Browser Clients
+
+The HTTP API now emits permissive CORS headers for browser-based frontends. Preflight `OPTIONS` requests are handled on the API routes, and the control plane allows `Content-Type`, `X-API-Key`, and `Idempotency-Key` headers so a separate Vite or Next.js frontend can call the backend directly during development.
 
 ## CLI
 

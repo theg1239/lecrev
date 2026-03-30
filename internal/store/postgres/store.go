@@ -82,6 +82,29 @@ func (s *Store) GetProject(ctx context.Context, projectID string) (*domain.Proje
 	return project, nil
 }
 
+func (s *Store) ListProjectsByTenant(ctx context.Context, tenantID string) ([]domain.Project, error) {
+	rows, err := s.pool.Query(ctx, `
+		select id, tenant_id, name, created_at
+		from projects
+		where tenant_id = $1
+		order by created_at desc, id desc
+	`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	projects := make([]domain.Project, 0)
+	for rows.Next() {
+		var project domain.Project
+		if err := rows.Scan(&project.ID, &project.TenantID, &project.Name, &project.CreatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, project)
+	}
+	return projects, rows.Err()
+}
+
 func (s *Store) PutAPIKey(ctx context.Context, key *domain.APIKey) error {
 	if _, err := s.pool.Exec(ctx, `
 		insert into tenants (id, name, created_at)
@@ -298,6 +321,48 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 	return &version, nil
 }
 
+func (s *Store) ListFunctionVersionsByProject(ctx context.Context, projectID string) ([]domain.FunctionVersion, error) {
+	rows, err := s.pool.Query(ctx, `
+		select id, project_id, name, runtime, entrypoint, memory_mb, timeout_sec, network_policy,
+		       regions, env_refs, max_retries, coalesce(build_job_id, ''), artifact_digest, source_type, state, created_at
+		from function_versions
+		where project_id = $1
+		order by created_at desc, id desc
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	versions := make([]domain.FunctionVersion, 0)
+	for rows.Next() {
+		var version domain.FunctionVersion
+		var rawRegions []byte
+		var rawEnvRefs []byte
+		var networkPolicy string
+		var sourceType string
+		var state string
+		if err := rows.Scan(
+			&version.ID, &version.ProjectID, &version.Name, &version.Runtime, &version.Entrypoint,
+			&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvRefs,
+			&version.MaxRetries, &version.BuildJobID, &version.ArtifactDigest, &sourceType, &state, &version.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		version.NetworkPolicy = domain.NetworkPolicy(networkPolicy)
+		version.SourceType = domain.SourceType(sourceType)
+		version.State = domain.FunctionState(state)
+		if err := json.Unmarshal(rawRegions, &version.Regions); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(rawEnvRefs, &version.EnvRefs); err != nil {
+			return nil, err
+		}
+		versions = append(versions, version)
+	}
+	return versions, rows.Err()
+}
+
 func (s *Store) PutBuildJob(ctx context.Context, job *domain.BuildJob) error {
 	_, err := s.pool.Exec(ctx, `
 		insert into build_jobs (id, function_version_id, target_region, state, error, logs_key, request, created_at, updated_at)
@@ -328,6 +393,35 @@ func (s *Store) GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob
 	}
 	job.Request = append([]byte(nil), rawRequest...)
 	return &job, nil
+}
+
+func (s *Store) ListBuildJobsByProject(ctx context.Context, projectID string) ([]domain.BuildJob, error) {
+	rows, err := s.pool.Query(ctx, `
+		select bj.id, bj.function_version_id, coalesce(bj.target_region, ''), bj.state, coalesce(bj.error, ''),
+		       coalesce(bj.logs_key, ''), bj.request, bj.created_at, bj.updated_at
+		from build_jobs bj
+		join function_versions fv on fv.id = bj.function_version_id
+		where fv.project_id = $1
+		order by bj.created_at desc, bj.id desc
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	jobs := make([]domain.BuildJob, 0)
+	for rows.Next() {
+		var job domain.BuildJob
+		var rawRequest []byte
+		if err := rows.Scan(
+			&job.ID, &job.FunctionVersionID, &job.TargetRegion, &job.State, &job.Error, &job.LogsKey, &rawRequest, &job.CreatedAt, &job.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		job.Request = append([]byte(nil), rawRequest...)
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
 }
 
 func (s *Store) CountBuildJobsByProjectStates(ctx context.Context, projectID string, states []string) (int, error) {
@@ -410,6 +504,47 @@ func (s *Store) GetExecutionJob(ctx context.Context, jobID string) (*domain.Exec
 		job.Result = &result
 	}
 	return &job, nil
+}
+
+func (s *Store) ListExecutionJobsByProject(ctx context.Context, projectID string) ([]domain.ExecutionJob, error) {
+	rows, err := s.pool.Query(ctx, `
+		select id, function_version_id, project_id, coalesce(target_region, ''), state, payload,
+		       max_retries, attempt_count, coalesce(last_attempt_id, ''), coalesce(error, ''), result,
+		       created_at, updated_at
+		from execution_jobs
+		where project_id = $1
+		order by created_at desc, id desc
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	jobs := make([]domain.ExecutionJob, 0)
+	for rows.Next() {
+		var job domain.ExecutionJob
+		var rawPayload []byte
+		var rawResult []byte
+		var state string
+		if err := rows.Scan(
+			&job.ID, &job.FunctionVersionID, &job.ProjectID, &job.TargetRegion, &state, &rawPayload,
+			&job.MaxRetries, &job.AttemptCount, &job.LastAttemptID, &job.Error, &rawResult,
+			&job.CreatedAt, &job.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		job.State = domain.JobState(state)
+		job.Payload = append([]byte(nil), rawPayload...)
+		if len(rawResult) > 0 && string(rawResult) != "null" {
+			var result domain.JobResult
+			if err := json.Unmarshal(rawResult, &result); err != nil {
+				return nil, err
+			}
+			job.Result = &result
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
 }
 
 func (s *Store) CountExecutionJobsByProjectStates(ctx context.Context, projectID string, states []domain.JobState) (int, error) {

@@ -492,6 +492,63 @@ func TestAuthRejectsInvalidAndDisabledAPIKeys(t *testing.T) {
 	}
 }
 
+func TestRegionsEndpointSupportsTenantFrontendClients(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	now := time.Now().UTC()
+	if err := meta.PutRegion(context.Background(), &domain.Region{
+		Name:            "ap-south-1",
+		State:           "healthy",
+		AvailableHosts:  2,
+		BlankWarm:       1,
+		FunctionWarm:    3,
+		LastHeartbeatAt: now,
+	}); err != nil {
+		t.Fatalf("put region: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
+	req.Header.Set("X-API-Key", "tenant-key")
+	req.Header.Set("Origin", "http://localhost:3000")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Fatalf("expected reflected CORS origin, got %q", got)
+	}
+	var regions []domain.Region
+	if err := json.Unmarshal(resp.Body.Bytes(), &regions); err != nil {
+		t.Fatalf("decode regions: %v", err)
+	}
+	if len(regions) != 1 || regions[0].Name != "ap-south-1" {
+		t.Fatalf("unexpected regions payload: %+v", regions)
+	}
+
+	preflightReq := httptest.NewRequest(http.MethodOptions, "/v1/projects/demo/functions", nil)
+	preflightReq.Header.Set("Origin", "http://localhost:3000")
+	preflightReq.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflightReq.Header.Set("Access-Control-Request-Headers", "Content-Type, X-API-Key")
+	preflightResp := httptest.NewRecorder()
+	handler.ServeHTTP(preflightResp, preflightReq)
+	if preflightResp.Code != http.StatusNoContent {
+		t.Fatalf("expected preflight status %d, got %d: %s", http.StatusNoContent, preflightResp.Code, preflightResp.Body.String())
+	}
+	if got := preflightResp.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, X-API-Key, Idempotency-Key" {
+		t.Fatalf("unexpected allow headers value %q", got)
+	}
+}
+
 func TestInfraEndpointsRequireAdminAPIKey(t *testing.T) {
 	t.Parallel()
 
@@ -505,12 +562,210 @@ func TestInfraEndpointsRequireAdminAPIKey(t *testing.T) {
 
 	handler := New(meta, objects, builder, sched)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/regions", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/regions/ap-south-1/hosts", nil)
 	req.Header.Set("X-API-Key", "tenant-key")
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 	if resp.Code != http.StatusForbidden {
 		t.Fatalf("expected admin-only status %d, got %d: %s", http.StatusForbidden, resp.Code, resp.Body.String())
+	}
+}
+
+func TestProjectOverviewEndpoints(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	project, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "Demo Project")
+	if err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-older",
+		ProjectID:      project.ID,
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		BuildJobID:     "build-older",
+		ArtifactDigest: "digest-older",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("put older function version: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-newer",
+		ProjectID:      project.ID,
+		Name:           "worker",
+		Runtime:        "node22",
+		Entrypoint:     "handler.mjs",
+		MemoryMB:       256,
+		TimeoutSec:     45,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-2", "ap-south-1"},
+		BuildJobID:     "build-newer",
+		ArtifactDigest: "",
+		State:          domain.FunctionStateBuilding,
+		CreatedAt:      now.Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("put newer function version: %v", err)
+	}
+	if err := meta.PutBuildJob(context.Background(), &domain.BuildJob{
+		ID:                "build-older",
+		FunctionVersionID: "fn-older",
+		TargetRegion:      "ap-south-1",
+		State:             "succeeded",
+		LogsKey:           "builds/build-older/logs.txt",
+		CreatedAt:         now.Add(-2 * time.Minute),
+		UpdatedAt:         now.Add(-90 * time.Second),
+	}); err != nil {
+		t.Fatalf("put older build job: %v", err)
+	}
+	if err := meta.PutBuildJob(context.Background(), &domain.BuildJob{
+		ID:                "build-newer",
+		FunctionVersionID: "fn-newer",
+		TargetRegion:      "ap-south-2",
+		State:             "running",
+		CreatedAt:         now.Add(-1 * time.Minute),
+		UpdatedAt:         now.Add(-30 * time.Second),
+	}); err != nil {
+		t.Fatalf("put newer build job: %v", err)
+	}
+	if err := meta.PutExecutionJob(context.Background(), &domain.ExecutionJob{
+		ID:                "job-latest",
+		FunctionVersionID: "fn-older",
+		ProjectID:         project.ID,
+		TargetRegion:      "ap-south-1",
+		State:             domain.JobStateSucceeded,
+		MaxRetries:        2,
+		AttemptCount:      1,
+		LastAttemptID:     "attempt-latest",
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			LogsKey:    "jobs/job-latest/logs.txt",
+			OutputKey:  "jobs/job-latest/output.json",
+			HostID:     "host-ap-south-1-a",
+			Region:     "ap-south-1",
+			StartedAt:  now.Add(-20 * time.Second),
+			FinishedAt: now.Add(-10 * time.Second),
+		},
+		CreatedAt: now.Add(-20 * time.Second),
+		UpdatedAt: now.Add(-10 * time.Second),
+	}); err != nil {
+		t.Fatalf("put execution job: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	projectsReq := httptest.NewRequest(http.MethodGet, "/v1/projects?limit=10", nil)
+	projectsReq.Header.Set("X-API-Key", "tenant-key")
+	projectsResp := httptest.NewRecorder()
+	handler.ServeHTTP(projectsResp, projectsReq)
+	if projectsResp.Code != http.StatusOK {
+		t.Fatalf("expected projects status %d, got %d: %s", http.StatusOK, projectsResp.Code, projectsResp.Body.String())
+	}
+	var projects []domain.Project
+	if err := json.Unmarshal(projectsResp.Body.Bytes(), &projects); err != nil {
+		t.Fatalf("decode projects: %v", err)
+	}
+	if len(projects) != 1 || projects[0].ID != "demo" {
+		t.Fatalf("unexpected projects payload: %+v", projects)
+	}
+
+	projectReq := httptest.NewRequest(http.MethodGet, "/v1/projects/demo", nil)
+	projectReq.Header.Set("X-API-Key", "tenant-key")
+	projectResp := httptest.NewRecorder()
+	handler.ServeHTTP(projectResp, projectReq)
+	if projectResp.Code != http.StatusOK {
+		t.Fatalf("expected project status %d, got %d: %s", http.StatusOK, projectResp.Code, projectResp.Body.String())
+	}
+
+	functionsReq := httptest.NewRequest(http.MethodGet, "/v1/projects/demo/functions?limit=5", nil)
+	functionsReq.Header.Set("X-API-Key", "tenant-key")
+	functionsResp := httptest.NewRecorder()
+	handler.ServeHTTP(functionsResp, functionsReq)
+	if functionsResp.Code != http.StatusOK {
+		t.Fatalf("expected functions status %d, got %d: %s", http.StatusOK, functionsResp.Code, functionsResp.Body.String())
+	}
+	var functions []functionVersionSummary
+	if err := json.Unmarshal(functionsResp.Body.Bytes(), &functions); err != nil {
+		t.Fatalf("decode function summaries: %v", err)
+	}
+	if len(functions) != 2 || functions[0].ID != "fn-newer" || functions[1].ID != "fn-older" {
+		t.Fatalf("unexpected function summary ordering: %+v", functions)
+	}
+
+	buildsReq := httptest.NewRequest(http.MethodGet, "/v1/projects/demo/build-jobs?limit=5", nil)
+	buildsReq.Header.Set("X-API-Key", "tenant-key")
+	buildsResp := httptest.NewRecorder()
+	handler.ServeHTTP(buildsResp, buildsReq)
+	if buildsResp.Code != http.StatusOK {
+		t.Fatalf("expected build jobs status %d, got %d: %s", http.StatusOK, buildsResp.Code, buildsResp.Body.String())
+	}
+	var builds []buildJobSummary
+	if err := json.Unmarshal(buildsResp.Body.Bytes(), &builds); err != nil {
+		t.Fatalf("decode build summaries: %v", err)
+	}
+	if len(builds) != 2 || builds[0].ID != "build-newer" || builds[1].ID != "build-older" {
+		t.Fatalf("unexpected build summary ordering: %+v", builds)
+	}
+
+	jobsReq := httptest.NewRequest(http.MethodGet, "/v1/projects/demo/jobs?limit=5", nil)
+	jobsReq.Header.Set("X-API-Key", "tenant-key")
+	jobsResp := httptest.NewRecorder()
+	handler.ServeHTTP(jobsResp, jobsReq)
+	if jobsResp.Code != http.StatusOK {
+		t.Fatalf("expected jobs status %d, got %d: %s", http.StatusOK, jobsResp.Code, jobsResp.Body.String())
+	}
+	var jobs []executionJobSummary
+	if err := json.Unmarshal(jobsResp.Body.Bytes(), &jobs); err != nil {
+		t.Fatalf("decode job summaries: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "job-latest" || jobs[0].Result == nil || !jobs[0].Result.LogsReady || !jobs[0].Result.OutputReady {
+		t.Fatalf("unexpected job summaries payload: %+v", jobs)
+	}
+
+	overviewReq := httptest.NewRequest(http.MethodGet, "/v1/projects/demo/overview?limit=1", nil)
+	overviewReq.Header.Set("X-API-Key", "tenant-key")
+	overviewResp := httptest.NewRecorder()
+	handler.ServeHTTP(overviewResp, overviewReq)
+	if overviewResp.Code != http.StatusOK {
+		t.Fatalf("expected overview status %d, got %d: %s", http.StatusOK, overviewResp.Code, overviewResp.Body.String())
+	}
+	var overview projectOverviewResponse
+	if err := json.Unmarshal(overviewResp.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if overview.Project.ID != "demo" {
+		t.Fatalf("unexpected overview project: %+v", overview.Project)
+	}
+	if overview.Totals.Functions != 2 {
+		t.Fatalf("expected 2 functions in totals, got %d", overview.Totals.Functions)
+	}
+	if overview.Totals.BuildsByState["running"] != 1 || overview.Totals.BuildsByState["succeeded"] != 1 {
+		t.Fatalf("unexpected build totals: %+v", overview.Totals.BuildsByState)
+	}
+	if overview.Totals.JobsByState[string(domain.JobStateSucceeded)] != 1 {
+		t.Fatalf("unexpected job totals: %+v", overview.Totals.JobsByState)
+	}
+	if len(overview.RecentFunctions) != 1 || overview.RecentFunctions[0].ID != "fn-newer" {
+		t.Fatalf("unexpected recent functions payload: %+v", overview.RecentFunctions)
+	}
+	if len(overview.RecentBuildJobs) != 1 || overview.RecentBuildJobs[0].ID != "build-newer" {
+		t.Fatalf("unexpected recent build jobs payload: %+v", overview.RecentBuildJobs)
+	}
+	if len(overview.RecentJobs) != 1 || overview.RecentJobs[0].ID != "job-latest" {
+		t.Fatalf("unexpected recent jobs payload: %+v", overview.RecentJobs)
 	}
 }
 

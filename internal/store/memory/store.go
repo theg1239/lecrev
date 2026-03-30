@@ -54,7 +54,12 @@ func (s *Store) EnsureProject(_ context.Context, projectID, tenantID, name strin
 	defer s.mu.Unlock()
 	project, ok := s.projects[projectID]
 	if !ok {
-		project = domain.Project{ID: projectID, TenantID: tenantID, Name: name}
+		project = domain.Project{
+			ID:        projectID,
+			TenantID:  tenantID,
+			Name:      name,
+			CreatedAt: time.Now().UTC(),
+		}
 		s.projects[projectID] = project
 	} else if project.TenantID != tenantID {
 		return nil, store.ErrAccessDenied
@@ -72,6 +77,25 @@ func (s *Store) GetProject(_ context.Context, projectID string) (*domain.Project
 	}
 	cp := project
 	return &cp, nil
+}
+
+func (s *Store) ListProjectsByTenant(_ context.Context, tenantID string) ([]domain.Project, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	projects := make([]domain.Project, 0)
+	for _, project := range s.projects {
+		if project.TenantID != tenantID {
+			continue
+		}
+		projects = append(projects, project)
+	}
+	sort.SliceStable(projects, func(i, j int) bool {
+		if projects[i].CreatedAt.Equal(projects[j].CreatedAt) {
+			return projects[i].ID > projects[j].ID
+		}
+		return projects[i].CreatedAt.After(projects[j].CreatedAt)
+	})
+	return projects, nil
 }
 
 func (s *Store) PutAPIKey(_ context.Context, key *domain.APIKey) error {
@@ -179,6 +203,25 @@ func (s *Store) GetFunctionVersion(_ context.Context, versionID string) (*domain
 	return &cp, nil
 }
 
+func (s *Store) ListFunctionVersionsByProject(_ context.Context, projectID string) ([]domain.FunctionVersion, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	versions := make([]domain.FunctionVersion, 0)
+	for _, version := range s.functions {
+		if version.ProjectID != projectID {
+			continue
+		}
+		versions = append(versions, cloneFunctionVersion(version))
+	}
+	sort.SliceStable(versions, func(i, j int) bool {
+		if versions[i].CreatedAt.Equal(versions[j].CreatedAt) {
+			return versions[i].ID > versions[j].ID
+		}
+		return versions[i].CreatedAt.After(versions[j].CreatedAt)
+	})
+	return versions, nil
+}
+
 func (s *Store) PutBuildJob(_ context.Context, job *domain.BuildJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,6 +238,26 @@ func (s *Store) GetBuildJob(_ context.Context, jobID string) (*domain.BuildJob, 
 	}
 	cp := cloneBuildJob(job)
 	return &cp, nil
+}
+
+func (s *Store) ListBuildJobsByProject(_ context.Context, projectID string) ([]domain.BuildJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	jobs := make([]domain.BuildJob, 0)
+	for _, job := range s.buildJobs {
+		version, ok := s.functions[job.FunctionVersionID]
+		if !ok || version.ProjectID != projectID {
+			continue
+		}
+		jobs = append(jobs, cloneBuildJob(job))
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		if jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
+			return jobs[i].ID > jobs[j].ID
+		}
+		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
+	})
+	return jobs, nil
 }
 
 func (s *Store) CountBuildJobsByProjectStates(_ context.Context, projectID string, states []string) (int, error) {
@@ -243,6 +306,25 @@ func (s *Store) GetExecutionJob(_ context.Context, jobID string) (*domain.Execut
 	}
 	cp := cloneExecutionJob(job)
 	return &cp, nil
+}
+
+func (s *Store) ListExecutionJobsByProject(_ context.Context, projectID string) ([]domain.ExecutionJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	jobs := make([]domain.ExecutionJob, 0)
+	for _, job := range s.executionJobs {
+		if job.ProjectID != projectID {
+			continue
+		}
+		jobs = append(jobs, cloneExecutionJob(job))
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		if jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
+			return jobs[i].ID > jobs[j].ID
+		}
+		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
+	})
+	return jobs, nil
 }
 
 func (s *Store) CountExecutionJobsByProjectStates(_ context.Context, projectID string, states []domain.JobState) (int, error) {

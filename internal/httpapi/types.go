@@ -1,6 +1,11 @@
 package httpapi
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/theg1239/lecrev/internal/domain"
+)
 
 type createFunctionRequest struct {
 	Name           string          `json:"name"`
@@ -28,4 +33,68 @@ type createWebhookTriggerRequest struct {
 
 type drainHostRequest struct {
 	Reason string `json:"reason"`
+}
+
+type functionVersionSummary struct {
+	ID             string               `json:"id"`
+	Name           string               `json:"name"`
+	Runtime        string               `json:"runtime"`
+	State          domain.FunctionState `json:"state"`
+	Entrypoint     string               `json:"entrypoint"`
+	MemoryMB       int                  `json:"memoryMb"`
+	TimeoutSec     int                  `json:"timeoutSec"`
+	NetworkPolicy  domain.NetworkPolicy `json:"networkPolicy"`
+	Regions        []string             `json:"regions"`
+	BuildJobID     string               `json:"buildJobId,omitempty"`
+	ArtifactDigest string               `json:"artifactDigest,omitempty"`
+	CreatedAt      time.Time            `json:"createdAt"`
+}
+
+type buildJobSummary struct {
+	ID                string    `json:"id"`
+	FunctionVersionID string    `json:"functionVersionId"`
+	TargetRegion      string    `json:"targetRegion,omitempty"`
+	State             string    `json:"state"`
+	Error             string    `json:"error,omitempty"`
+	LogsReady         bool      `json:"logsReady"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+type executionResultSummary struct {
+	ExitCode    int       `json:"exitCode"`
+	HostID      string    `json:"hostId"`
+	Region      string    `json:"region"`
+	StartedAt   time.Time `json:"startedAt"`
+	FinishedAt  time.Time `json:"finishedAt"`
+	LogsReady   bool      `json:"logsReady"`
+	OutputReady bool      `json:"outputReady"`
+}
+
+type executionJobSummary struct {
+	ID                string                  `json:"id"`
+	FunctionVersionID string                  `json:"functionVersionId"`
+	TargetRegion      string                  `json:"targetRegion,omitempty"`
+	State             domain.JobState         `json:"state"`
+	MaxRetries        int                     `json:"maxRetries"`
+	AttemptCount      int                     `json:"attemptCount"`
+	LastAttemptID     string                  `json:"lastAttemptId,omitempty"`
+	Error             string                  `json:"error,omitempty"`
+	Result            *executionResultSummary `json:"result,omitempty"`
+	CreatedAt         time.Time               `json:"createdAt"`
+	UpdatedAt         time.Time               `json:"updatedAt"`
+}
+
+type projectOverviewTotals struct {
+	Functions     int            `json:"functions"`
+	BuildsByState map[string]int `json:"buildsByState"`
+	JobsByState   map[string]int `json:"jobsByState"`
+}
+
+type projectOverviewResponse struct {
+	Project         domain.Project           `json:"project"`
+	Totals          projectOverviewTotals    `json:"totals"`
+	RecentFunctions []functionVersionSummary `json:"recentFunctions"`
+	RecentBuildJobs []buildJobSummary        `json:"recentBuildJobs"`
+	RecentJobs      []executionJobSummary    `json:"recentJobs"`
 }

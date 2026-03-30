@@ -10,6 +10,7 @@ import (
 type Store interface {
 	EnsureProject(ctx context.Context, projectID, tenantID, name string) (*domain.Project, error)
 	GetProject(ctx context.Context, projectID string) (*domain.Project, error)
+	ListProjectsByTenant(ctx context.Context, tenantID string) ([]domain.Project, error)
 	PutAPIKey(ctx context.Context, key *domain.APIKey) error
 	GetAPIKeyByHash(ctx context.Context, keyHash string) (*domain.APIKey, error)
 	TouchAPIKeyLastUsed(ctx context.Context, keyHash string, usedAt time.Time) error
@@ -21,12 +22,15 @@ type Store interface {
 	GetArtifact(ctx context.Context, digest string) (*domain.Artifact, error)
 	PutFunctionVersion(ctx context.Context, version *domain.FunctionVersion) error
 	GetFunctionVersion(ctx context.Context, versionID string) (*domain.FunctionVersion, error)
+	ListFunctionVersionsByProject(ctx context.Context, projectID string) ([]domain.FunctionVersion, error)
 	PutBuildJob(ctx context.Context, job *domain.BuildJob) error
 	GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob, error)
+	ListBuildJobsByProject(ctx context.Context, projectID string) ([]domain.BuildJob, error)
 	CountBuildJobsByProjectStates(ctx context.Context, projectID string, states []string) (int, error)
 	PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	UpdateExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	GetExecutionJob(ctx context.Context, jobID string) (*domain.ExecutionJob, error)
+	ListExecutionJobsByProject(ctx context.Context, projectID string) ([]domain.ExecutionJob, error)
 	CountExecutionJobsByProjectStates(ctx context.Context, projectID string, states []domain.JobState) (int, error)
 	ClaimNextExecutionJob(ctx context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error)
 	RequeueStaleExecutionJobs(ctx context.Context, fromState, toState domain.JobState, staleBefore, now time.Time, errorMessage string) (int, error)

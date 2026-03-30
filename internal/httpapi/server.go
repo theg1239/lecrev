@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,9 +49,18 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		admins:    adminIndex,
 	}
 	r := chi.NewRouter()
+	r.Use(srv.corsMiddleware)
+	r.Options("/*", srv.handlePreflight)
 	r.Post("/v1/triggers/webhook/{token}", srv.invokeWebhook)
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
+		r.Options("/*", srv.handlePreflight)
+		r.Get("/projects", srv.listProjects)
+		r.Get("/projects/{projectID}", srv.getProject)
+		r.Get("/projects/{projectID}/overview", srv.getProjectOverview)
+		r.Get("/projects/{projectID}/functions", srv.listProjectFunctions)
+		r.Get("/projects/{projectID}/build-jobs", srv.listProjectBuildJobs)
+		r.Get("/projects/{projectID}/jobs", srv.listProjectJobs)
 		r.Post("/projects/{projectID}/functions", srv.createFunction)
 		r.Get("/build-jobs/{jobID}", srv.getBuildJob)
 		r.Get("/build-jobs/{jobID}/logs", srv.getBuildJobLogs)
@@ -70,6 +80,12 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	})
 	return r
 }
+
+const (
+	defaultProjectListLimit  = 50
+	defaultOverviewItemLimit = 8
+	maxListLimit             = 200
+)
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +159,130 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, version)
+}
+
+func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
+	limit, err := queryLimit(r, defaultProjectListLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	projects, err := s.store.ListProjectsByTenant(r.Context(), tenantIDFromContext(r.Context()))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if len(projects) > limit {
+		projects = projects[:limit]
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
+	project, err := s.authorizedProject(r.Context(), chi.URLParam(r, "projectID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}
+
+func (s *Server) getProjectOverview(w http.ResponseWriter, r *http.Request) {
+	project, err := s.authorizedProject(r.Context(), chi.URLParam(r, "projectID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	limit, err := queryLimit(r, defaultOverviewItemLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	versions, err := s.store.ListFunctionVersionsByProject(r.Context(), project.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	buildJobs, err := s.store.ListBuildJobsByProject(r.Context(), project.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	jobs, err := s.store.ListExecutionJobsByProject(r.Context(), project.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, projectOverviewResponse{
+		Project: *project,
+		Totals: projectOverviewTotals{
+			Functions:     len(versions),
+			BuildsByState: countBuildJobsByState(buildJobs),
+			JobsByState:   countExecutionJobsByState(jobs),
+		},
+		RecentFunctions: summarizeFunctionVersions(limitFunctionVersions(versions, limit)),
+		RecentBuildJobs: summarizeBuildJobs(limitBuildJobs(buildJobs, limit)),
+		RecentJobs:      summarizeExecutionJobs(limitExecutionJobs(jobs, limit)),
+	})
+}
+
+func (s *Server) listProjectFunctions(w http.ResponseWriter, r *http.Request) {
+	project, err := s.authorizedProject(r.Context(), chi.URLParam(r, "projectID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	limit, err := queryLimit(r, defaultProjectListLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	versions, err := s.store.ListFunctionVersionsByProject(r.Context(), project.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summarizeFunctionVersions(limitFunctionVersions(versions, limit)))
+}
+
+func (s *Server) listProjectBuildJobs(w http.ResponseWriter, r *http.Request) {
+	project, err := s.authorizedProject(r.Context(), chi.URLParam(r, "projectID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	limit, err := queryLimit(r, defaultProjectListLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	buildJobs, err := s.store.ListBuildJobsByProject(r.Context(), project.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summarizeBuildJobs(limitBuildJobs(buildJobs, limit)))
+}
+
+func (s *Server) listProjectJobs(w http.ResponseWriter, r *http.Request) {
+	project, err := s.authorizedProject(r.Context(), chi.URLParam(r, "projectID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	limit, err := queryLimit(r, defaultProjectListLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jobs, err := s.store.ListExecutionJobsByProject(r.Context(), project.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summarizeExecutionJobs(limitExecutionJobs(jobs, limit)))
 }
 
 func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
@@ -299,10 +439,6 @@ func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRegions(w http.ResponseWriter, r *http.Request) {
-	if err := requireAdmin(r.Context()); err != nil {
-		writeServiceError(w, err)
-		return
-	}
 	regions, err := s.store.ListRegions(r.Context())
 	if err != nil {
 		writeServiceError(w, err)
@@ -549,6 +685,156 @@ func buildWebhookPayload(r *http.Request, token string) ([]byte, error) {
 	})
 }
 
+func queryLimit(r *http.Request, fallback int) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return fallback, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid limit %q", raw)
+	}
+	if limit < 1 || limit > maxListLimit {
+		return 0, fmt.Errorf("limit must be between 1 and %d", maxListLimit)
+	}
+	return limit, nil
+}
+
+func limitFunctionVersions(items []domain.FunctionVersion, limit int) []domain.FunctionVersion {
+	if len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func limitBuildJobs(items []domain.BuildJob, limit int) []domain.BuildJob {
+	if len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func limitExecutionJobs(items []domain.ExecutionJob, limit int) []domain.ExecutionJob {
+	if len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func summarizeFunctionVersions(items []domain.FunctionVersion) []functionVersionSummary {
+	summaries := make([]functionVersionSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, functionVersionSummary{
+			ID:             item.ID,
+			Name:           item.Name,
+			Runtime:        item.Runtime,
+			State:          item.State,
+			Entrypoint:     item.Entrypoint,
+			MemoryMB:       item.MemoryMB,
+			TimeoutSec:     item.TimeoutSec,
+			NetworkPolicy:  item.NetworkPolicy,
+			Regions:        append([]string(nil), item.Regions...),
+			BuildJobID:     item.BuildJobID,
+			ArtifactDigest: item.ArtifactDigest,
+			CreatedAt:      item.CreatedAt,
+		})
+	}
+	return summaries
+}
+
+func summarizeBuildJobs(items []domain.BuildJob) []buildJobSummary {
+	summaries := make([]buildJobSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, buildJobSummary{
+			ID:                item.ID,
+			FunctionVersionID: item.FunctionVersionID,
+			TargetRegion:      item.TargetRegion,
+			State:             item.State,
+			Error:             item.Error,
+			LogsReady:         strings.TrimSpace(item.LogsKey) != "",
+			CreatedAt:         item.CreatedAt,
+			UpdatedAt:         item.UpdatedAt,
+		})
+	}
+	return summaries
+}
+
+func summarizeExecutionJobs(items []domain.ExecutionJob) []executionJobSummary {
+	summaries := make([]executionJobSummary, 0, len(items))
+	for _, item := range items {
+		summary := executionJobSummary{
+			ID:                item.ID,
+			FunctionVersionID: item.FunctionVersionID,
+			TargetRegion:      item.TargetRegion,
+			State:             item.State,
+			MaxRetries:        item.MaxRetries,
+			AttemptCount:      item.AttemptCount,
+			LastAttemptID:     item.LastAttemptID,
+			Error:             item.Error,
+			CreatedAt:         item.CreatedAt,
+			UpdatedAt:         item.UpdatedAt,
+		}
+		if item.Result != nil {
+			summary.Result = &executionResultSummary{
+				ExitCode:    item.Result.ExitCode,
+				HostID:      item.Result.HostID,
+				Region:      item.Result.Region,
+				StartedAt:   item.Result.StartedAt,
+				FinishedAt:  item.Result.FinishedAt,
+				LogsReady:   strings.TrimSpace(item.Result.LogsKey) != "",
+				OutputReady: strings.TrimSpace(item.Result.OutputKey) != "",
+			}
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func countBuildJobsByState(items []domain.BuildJob) map[string]int {
+	counts := make(map[string]int)
+	for _, item := range items {
+		counts[item.State]++
+	}
+	return counts
+}
+
+func countExecutionJobsByState(items []domain.ExecutionJob) map[string]int {
+	counts := make(map[string]int)
+	for _, item := range items {
+		counts[string(item.State)]++
+	}
+	return counts
+}
+
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setCORSHeaders(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		origin = "*"
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Idempotency-Key")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Max-Age", "600")
+	w.Header().Add("Vary", "Origin")
+}
+
 type authContext struct {
 	TenantID string
 	IsAdmin  bool
@@ -595,6 +881,18 @@ func (s *Server) authorizedBuildJob(ctx context.Context, jobID string) (*domain.
 	return job, version, nil
 }
 
+func (s *Server) authorizedProject(ctx context.Context, projectID string) (*domain.Project, error) {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	auth := authFromContext(ctx)
+	if !auth.IsAdmin && project.TenantID != auth.TenantID {
+		return nil, store.ErrAccessDenied
+	}
+	return project, nil
+}
+
 func jobResultKey(job *domain.ExecutionJob, kind string) (string, error) {
 	if job.Result == nil {
 		return "", domain.ErrExecutionResultNotReady
@@ -616,14 +914,8 @@ func jobResultKey(job *domain.ExecutionJob, kind string) (string, error) {
 }
 
 func (s *Server) authorizeProject(ctx context.Context, projectID string) error {
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	if project.TenantID != tenantIDFromContext(ctx) {
-		return store.ErrAccessDenied
-	}
-	return nil
+	_, err := s.authorizedProject(ctx, projectID)
+	return err
 }
 
 func requireAdmin(ctx context.Context) error {
