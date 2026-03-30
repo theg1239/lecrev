@@ -51,6 +51,9 @@ type Store interface {
 	PutWebhookTrigger(ctx context.Context, trigger *domain.WebhookTrigger) error
 	GetWebhookTrigger(ctx context.Context, token string) (*domain.WebhookTrigger, error)
 	ListWebhookTriggersByFunctionVersion(ctx context.Context, versionID string) ([]domain.WebhookTrigger, error)
+	PutHTTPTrigger(ctx context.Context, trigger *domain.HTTPTrigger) error
+	GetHTTPTrigger(ctx context.Context, token string) (*domain.HTTPTrigger, error)
+	ListHTTPTriggersByFunctionVersion(ctx context.Context, versionID string) ([]domain.HTTPTrigger, error)
 	PutRegion(ctx context.Context, region *domain.Region) error
 	GetRegion(ctx context.Context, region string) (*domain.Region, error)
 	ListRegions(ctx context.Context) ([]domain.Region, error)

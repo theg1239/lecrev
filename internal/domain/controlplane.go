@@ -42,3 +42,19 @@ type WebhookTrigger struct {
 	Enabled           bool      `json:"enabled"`
 	CreatedAt         time.Time `json:"createdAt"`
 }
+
+type HTTPTriggerAuthMode string
+
+const (
+	HTTPTriggerAuthModeNone HTTPTriggerAuthMode = "none"
+)
+
+type HTTPTrigger struct {
+	Token             string              `json:"token"`
+	ProjectID         string              `json:"projectId"`
+	FunctionVersionID string              `json:"functionVersionId"`
+	Description       string              `json:"description,omitempty"`
+	AuthMode          HTTPTriggerAuthMode `json:"authMode"`
+	Enabled           bool                `json:"enabled"`
+	CreatedAt         time.Time           `json:"createdAt"`
+}

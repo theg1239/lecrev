@@ -32,6 +32,23 @@ type createWebhookTriggerRequest struct {
 	Token       string `json:"token"`
 }
 
+type createHTTPTriggerRequest struct {
+	Description string `json:"description"`
+	Token       string `json:"token"`
+	AuthMode    string `json:"authMode"`
+}
+
+type httpTriggerResponse struct {
+	Token             string                     `json:"token"`
+	ProjectID         string                     `json:"projectId"`
+	FunctionVersionID string                     `json:"functionVersionId"`
+	Description       string                     `json:"description,omitempty"`
+	AuthMode          domain.HTTPTriggerAuthMode `json:"authMode"`
+	Enabled           bool                       `json:"enabled"`
+	URL               string                     `json:"url"`
+	CreatedAt         time.Time                  `json:"createdAt"`
+}
+
 type drainHostRequest struct {
 	Reason string `json:"reason"`
 }

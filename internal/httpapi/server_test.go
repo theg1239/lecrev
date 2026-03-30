@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,6 +142,192 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 	}
 	if firstJob.ID != secondJob.ID {
 		t.Fatalf("expected replayed job id %s, got %s", firstJob.ID, secondJob.ID)
+	}
+}
+
+func TestHTTPTriggerLifecycle(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-trigger",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-http-trigger/triggers/http", bytes.NewBufferString(`{"description":"public echo","authMode":"none"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-API-Key", "dev-root-key")
+	createResp := httptest.NewRecorder()
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected create trigger status %d, got %d: %s", http.StatusCreated, createResp.Code, createResp.Body.String())
+	}
+	var trigger httpTriggerResponse
+	if err := json.Unmarshal(createResp.Body.Bytes(), &trigger); err != nil {
+		t.Fatalf("decode trigger: %v", err)
+	}
+	if trigger.Token == "" {
+		t.Fatal("expected http trigger token to be generated")
+	}
+	if trigger.AuthMode != domain.HTTPTriggerAuthModeNone {
+		t.Fatalf("expected auth mode none, got %s", trigger.AuthMode)
+	}
+	if !strings.HasSuffix(trigger.URL, "/f/"+trigger.Token) {
+		t.Fatalf("expected function url to end with token, got %s", trigger.URL)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/functions/fn-http-trigger/triggers/http", nil)
+	listReq.Header.Set("X-API-Key", "dev-root-key")
+	listResp := httptest.NewRecorder()
+	handler.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list trigger status %d, got %d: %s", http.StatusOK, listResp.Code, listResp.Body.String())
+	}
+	var triggers []httpTriggerResponse
+	if err := json.Unmarshal(listResp.Body.Bytes(), &triggers); err != nil {
+		t.Fatalf("decode trigger list: %v", err)
+	}
+	if len(triggers) != 1 || triggers[0].Token != trigger.Token {
+		t.Fatalf("unexpected http trigger list payload: %+v", triggers)
+	}
+}
+
+func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-invoke",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "public-http-trigger",
+		ProjectID:         "demo",
+		FunctionVersionID: "fn-http-invoke",
+		AuthMode:          domain.HTTPTriggerAuthModeNone,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
+			if err == nil && len(jobs) > 0 {
+				job := jobs[0]
+				now := time.Now().UTC()
+				job.State = domain.JobStateSucceeded
+				job.TargetRegion = "ap-south-1"
+				job.AttemptCount = 1
+				job.Result = &domain.JobResult{
+					ExitCode:   0,
+					Output:     json.RawMessage(`{"statusCode":201,"headers":{"Content-Type":"application/json","X-Demo":"ok"},"body":{"ok":true,"hello":"world"}}`),
+					HostID:     "host-ap-south-1-a",
+					Region:     "ap-south-1",
+					StartedAt:  now,
+					FinishedAt: now,
+				}
+				_ = meta.UpdateExecutionJob(context.Background(), &job)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/f/public-http-trigger/echo?name=ishaan", bytes.NewBufferString(`{"hello":"world"}`))
+	req.Host = "lecrev.test"
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	<-done
+
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected function url status %d, got %d: %s", http.StatusCreated, resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected content type application/json, got %s", got)
+	}
+	if got := resp.Header().Get("X-Demo"); got != "ok" {
+		t.Fatalf("expected X-Demo header to round-trip, got %s", got)
+	}
+	if resp.Header().Get("X-Lecrev-Job-Id") == "" {
+		t.Fatal("expected X-Lecrev-Job-Id header to be set")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if payload["ok"] != true || payload["hello"] != "world" {
+		t.Fatalf("unexpected function url payload: %+v", payload)
+	}
+
+	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("expected one execution job, got jobs=%d err=%v", len(jobs), err)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(jobs[0].Payload, &event); err != nil {
+		t.Fatalf("decode queued payload: %v", err)
+	}
+	if event["trigger"] != "http" {
+		t.Fatalf("expected http trigger payload, got %+v", event)
+	}
+	request, ok := event["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected request envelope in payload, got %+v", event["request"])
+	}
+	if request["method"] != http.MethodPost {
+		t.Fatalf("expected POST method in payload, got %+v", request["method"])
+	}
+	if request["path"] != "/echo" {
+		t.Fatalf("expected function path /echo, got %+v", request["path"])
 	}
 }
 
@@ -563,7 +750,7 @@ func TestRegionsEndpointSupportsTenantFrontendClients(t *testing.T) {
 	if preflightResp.Code != http.StatusNoContent {
 		t.Fatalf("expected preflight status %d, got %d: %s", http.StatusNoContent, preflightResp.Code, preflightResp.Body.String())
 	}
-	if got := preflightResp.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, X-API-Key, Idempotency-Key" {
+	if got := preflightResp.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, X-API-Key, Idempotency-Key, Authorization" {
 		t.Fatalf("unexpected allow headers value %q", got)
 	}
 }

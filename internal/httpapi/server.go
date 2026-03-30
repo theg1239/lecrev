@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,8 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	r.Use(srv.corsMiddleware)
 	r.Options("/*", srv.handlePreflight)
 	r.Get("/healthz", srv.healthz)
+	r.HandleFunc("/f/{token}", srv.invokeHTTPTrigger)
+	r.HandleFunc("/f/{token}/*", srv.invokeHTTPTrigger)
 	r.Post("/v1/triggers/webhook/{token}", srv.invokeWebhook)
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
@@ -76,6 +79,8 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Get("/jobs/{jobID}/logs", srv.getJobLogs)
 		r.Get("/jobs/{jobID}/output", srv.getJobOutput)
 		r.Get("/functions/{versionID}", srv.getFunction)
+		r.Post("/functions/{versionID}/triggers/http", srv.createHTTPTrigger)
+		r.Get("/functions/{versionID}/triggers/http", srv.listHTTPTriggers)
 		r.Post("/functions/{versionID}/triggers/webhook", srv.createWebhookTrigger)
 		r.Get("/functions/{versionID}/triggers/webhook", srv.listWebhookTriggers)
 		r.Get("/regions", srv.listRegions)
@@ -683,6 +688,75 @@ func (s *Server) createWebhookTrigger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, trigger)
 }
 
+func (s *Server) createHTTPTrigger(w http.ResponseWriter, r *http.Request) {
+	versionID := chi.URLParam(r, "versionID")
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	var body createHTTPTriggerRequest
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		return
+	}
+	token := strings.TrimSpace(body.Token)
+	if token == "" {
+		token, err = generateTriggerToken()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	authMode, err := normalizeHTTPTriggerAuthMode(body.AuthMode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	trigger := &domain.HTTPTrigger{
+		Token:             token,
+		ProjectID:         version.ProjectID,
+		FunctionVersionID: version.ID,
+		Description:       strings.TrimSpace(body.Description),
+		AuthMode:          authMode,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}
+	if err := s.store.PutHTTPTrigger(r.Context(), trigger); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, httpTriggerToResponse(*trigger, publicFunctionURL(r, token)))
+}
+
+func (s *Server) listHTTPTriggers(w http.ResponseWriter, r *http.Request) {
+	versionID := chi.URLParam(r, "versionID")
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	triggers, err := s.store.ListHTTPTriggersByFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	response := make([]httpTriggerResponse, 0, len(triggers))
+	for _, trigger := range triggers {
+		response = append(response, httpTriggerToResponse(trigger, publicFunctionURL(r, trigger.Token)))
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (s *Server) listWebhookTriggers(w http.ResponseWriter, r *http.Request) {
 	versionID := chi.URLParam(r, "versionID")
 	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
@@ -700,6 +774,79 @@ func (s *Server) listWebhookTriggers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, triggers)
+}
+
+func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	trigger, err := s.store.GetHTTPTrigger(r.Context(), token)
+	if err != nil || !trigger.Enabled {
+		http.Error(w, "http trigger not found", http.StatusNotFound)
+		return
+	}
+	version, err := s.store.GetFunctionVersion(r.Context(), trigger.FunctionVersionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if version.State != domain.FunctionStateReady {
+		http.Error(w, "function url not ready", http.StatusServiceUnavailable)
+		return
+	}
+	payload, err := buildHTTPPayload(r, token)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	dispatchCtx, cancelDispatch := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancelDispatch()
+
+	job, err := s.scheduler.DispatchExecutionIdempotent(dispatchCtx, trigger.FunctionVersionID, payload, idempotencyKey(r.Header.Get("Idempotency-Key"), ""))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
+	defer cancelWait()
+
+	job, err = s.waitForExecutionJob(waitCtx, job.ID, 100*time.Millisecond)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"jobId":             job.ID,
+				"functionVersionId": version.ID,
+				"state":             "timeout",
+				"message":           "function url execution did not complete before the response deadline",
+			})
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+
+	w.Header().Set("X-Lecrev-Job-Id", job.ID)
+	w.Header().Set("X-Lecrev-Function-Version-Id", version.ID)
+	w.Header().Set("X-Lecrev-Function-Url-Token", token)
+
+	if job.State != domain.JobStateSucceeded || job.Result == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             job.ID,
+			"functionVersionId": version.ID,
+			"state":             job.State,
+			"error":             job.Error,
+		})
+		return
+	}
+
+	if err := writeHTTPFunctionResult(w, job.Result.Output); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             job.ID,
+			"functionVersionId": version.ID,
+			"state":             job.State,
+			"error":             err.Error(),
+		})
+	}
 }
 
 func (s *Server) invokeWebhook(w http.ResponseWriter, r *http.Request) {
@@ -777,12 +924,16 @@ func decodeOptionalJSON(r *http.Request, target any) error {
 	return nil
 }
 
-func generateWebhookToken() (string, error) {
+func generateTriggerToken() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%x", buf), nil
+}
+
+func generateWebhookToken() (string, error) {
+	return generateTriggerToken()
 }
 
 func buildWebhookPayload(r *http.Request, token string) ([]byte, error) {
@@ -822,6 +973,306 @@ func buildWebhookPayload(r *http.Request, token string) ([]byte, error) {
 		"headers": headers,
 		"body":    payloadBody,
 	})
+}
+
+func buildHTTPPayload(r *http.Request, token string) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	payloadBody, rawBodyText, base64Body, isBase64, err := decodeHTTPPayloadBody(body)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := make(map[string]string, len(r.Header))
+	multiValueHeaders := make(map[string][]string, len(r.Header))
+	for key, values := range r.Header {
+		if len(values) > 0 {
+			headers[key] = values[0]
+		}
+		multiValueHeaders[key] = append([]string(nil), values...)
+	}
+
+	queryValues := r.URL.Query()
+	query := make(map[string]string, len(queryValues))
+	multiValueQuery := make(map[string][]string, len(queryValues))
+	for key, values := range queryValues {
+		if len(values) > 0 {
+			query[key] = values[0]
+		}
+		multiValueQuery[key] = append([]string(nil), values...)
+	}
+
+	functionPath := "/"
+	if remainder := strings.TrimSpace(chi.URLParam(r, "*")); remainder != "" {
+		functionPath = "/" + remainder
+	}
+
+	return json.Marshal(map[string]any{
+		"trigger": "http",
+		"token":   token,
+		"request": map[string]any{
+			"method":            r.Method,
+			"scheme":            requestScheme(r),
+			"host":              requestHost(r),
+			"url":               fullRequestURL(r),
+			"path":              functionPath,
+			"rawPath":           r.URL.Path,
+			"rawQuery":          r.URL.RawQuery,
+			"headers":           headers,
+			"multiValueHeaders": multiValueHeaders,
+			"query":             query,
+			"multiValueQuery":   multiValueQuery,
+			"body":              payloadBody,
+			"bodyText":          rawBodyText,
+			"bodyBase64":        base64Body,
+			"isBase64Encoded":   isBase64,
+			"remoteAddr":        r.RemoteAddr,
+		},
+	})
+}
+
+func decodeHTTPPayloadBody(body []byte) (any, string, string, bool, error) {
+	if len(body) == 0 {
+		return nil, "", "", false, nil
+	}
+	rawText := string(body)
+	if json.Valid(body) {
+		var payload any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, "", "", false, err
+		}
+		return payload, rawText, base64.StdEncoding.EncodeToString(body), false, nil
+	}
+	return rawText, rawText, base64.StdEncoding.EncodeToString(body), false, nil
+}
+
+func normalizeHTTPTriggerAuthMode(raw string) (domain.HTTPTriggerAuthMode, error) {
+	mode := domain.HTTPTriggerAuthMode(strings.ToLower(strings.TrimSpace(raw)))
+	if mode == "" {
+		return domain.HTTPTriggerAuthModeNone, nil
+	}
+	switch mode {
+	case domain.HTTPTriggerAuthModeNone:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported http trigger authMode %q", raw)
+	}
+}
+
+func publicFunctionURL(r *http.Request, token string) string {
+	return strings.TrimRight(publicBaseURL(r), "/") + "/f/" + token
+}
+
+func publicBaseURL(r *http.Request) string {
+	return requestScheme(r) + "://" + requestHost(r)
+}
+
+func requestScheme(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
+		return forwarded
+	}
+	if r.URL != nil && strings.TrimSpace(r.URL.Scheme) != "" {
+		return r.URL.Scheme
+	}
+	return "http"
+}
+
+func requestHost(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
+		return forwarded
+	}
+	if strings.TrimSpace(r.Host) != "" {
+		return r.Host
+	}
+	if r.URL != nil && strings.TrimSpace(r.URL.Host) != "" {
+		return r.URL.Host
+	}
+	return "localhost"
+}
+
+func fullRequestURL(r *http.Request) string {
+	path := "/"
+	if r.URL != nil {
+		path = r.URL.RequestURI()
+	}
+	return publicBaseURL(r) + path
+}
+
+func httpTriggerTimeout(timeoutSec int) time.Duration {
+	if timeoutSec <= 0 {
+		return 20 * time.Second
+	}
+	timeout := time.Duration(timeoutSec+5) * time.Second
+	if timeout < 10*time.Second {
+		timeout = 10 * time.Second
+	}
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	return timeout
+}
+
+func (s *Server) waitForExecutionJob(ctx context.Context, jobID string, pollInterval time.Duration) (*domain.ExecutionJob, error) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		job, err := s.store.GetExecutionJob(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if job.State == domain.JobStateSucceeded || job.State == domain.JobStateFailed {
+			return job, nil
+		}
+		select {
+		case <-ctx.Done():
+			return job, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func writeHTTPFunctionResult(w http.ResponseWriter, output json.RawMessage) error {
+	statusCode, headers, body, structured, err := decodeHTTPFunctionResult(output)
+	if err != nil {
+		return err
+	}
+	if !structured {
+		writeRaw(w, http.StatusOK, "application/json", output)
+		return nil
+	}
+	for key, values := range headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(statusCode)
+	if len(body) > 0 {
+		_, _ = w.Write(body)
+	}
+	return nil
+}
+
+func decodeHTTPFunctionResult(output json.RawMessage) (int, http.Header, []byte, bool, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return 0, nil, nil, false, nil
+	}
+	rawStatus, ok := payload["statusCode"]
+	if !ok {
+		return 0, nil, nil, false, nil
+	}
+	statusCode, err := toInt(rawStatus)
+	if err != nil || statusCode < 100 || statusCode > 999 {
+		return 0, nil, nil, true, fmt.Errorf("invalid statusCode in http function output")
+	}
+
+	headers := make(http.Header)
+	if rawHeaders, ok := payload["headers"]; ok {
+		headerMap, err := toHTTPHeader(rawHeaders)
+		if err != nil {
+			return 0, nil, nil, true, err
+		}
+		headers = headerMap
+	}
+
+	bodyBytes, err := encodeHTTPResponseBody(payload["body"], headers, payload["isBase64Encoded"])
+	if err != nil {
+		return 0, nil, nil, true, err
+	}
+	return statusCode, headers, bodyBytes, true, nil
+}
+
+func toHTTPHeader(value any) (http.Header, error) {
+	headers := make(http.Header)
+	if value == nil {
+		return headers, nil
+	}
+	m, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid headers in http function output")
+	}
+	for key, raw := range m {
+		switch typed := raw.(type) {
+		case string:
+			headers.Add(key, typed)
+		case []any:
+			for _, item := range typed {
+				headers.Add(key, fmt.Sprint(item))
+			}
+		default:
+			headers.Add(key, fmt.Sprint(typed))
+		}
+	}
+	return headers, nil
+}
+
+func encodeHTTPResponseBody(value any, headers http.Header, rawBase64Flag any) ([]byte, error) {
+	isBase64Encoded, err := toBool(rawBase64Flag)
+	if err != nil {
+		return nil, err
+	}
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if isBase64Encoded {
+			return base64.StdEncoding.DecodeString(typed)
+		}
+		if headers.Get("Content-Type") == "" {
+			headers.Set("Content-Type", "text/plain; charset=utf-8")
+		}
+		return []byte(typed), nil
+	default:
+		if headers.Get("Content-Type") == "" {
+			headers.Set("Content-Type", "application/json")
+		}
+		return json.Marshal(typed)
+	}
+}
+
+func toInt(value any) (int, error) {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed), nil
+	case float32:
+		return int(typed), nil
+	case int:
+		return typed, nil
+	case int64:
+		return int(typed), nil
+	case json.Number:
+		v, err := typed.Int64()
+		return int(v), err
+	default:
+		return 0, fmt.Errorf("invalid integer value %T", value)
+	}
+}
+
+func toBool(value any) (bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return false, nil
+	case bool:
+		return typed, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value %T", value)
+	}
+}
+
+func httpTriggerToResponse(trigger domain.HTTPTrigger, url string) httpTriggerResponse {
+	return httpTriggerResponse{
+		Token:             trigger.Token,
+		ProjectID:         trigger.ProjectID,
+		FunctionVersionID: trigger.FunctionVersionID,
+		Description:       trigger.Description,
+		AuthMode:          trigger.AuthMode,
+		Enabled:           trigger.Enabled,
+		URL:               url,
+		CreatedAt:         trigger.CreatedAt,
+	}
 }
 
 func queryLimit(r *http.Request, fallback int) (int, error) {
@@ -1118,8 +1569,8 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 		origin = "*"
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Idempotency-Key")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Idempotency-Key, Authorization")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
 	w.Header().Set("Access-Control-Max-Age", "600")
 	w.Header().Add("Vary", "Origin")

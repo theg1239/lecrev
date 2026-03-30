@@ -95,6 +95,9 @@ Effects:
 Request:
 
 - `POST /v1/functions/{versionId}/invoke`
+- `POST /v1/functions/{versionId}/triggers/http`
+- `GET /v1/functions/{versionId}/triggers/http`
+- Public Function URL: `/f/{token}`
 
 Step-by-step:
 
@@ -103,6 +106,19 @@ Step-by-step:
 3. Creates `execution_job` row in Postgres (queued). 
 4. Global scheduler picks best region using policy + health + capacity + queue age + cost + artifact locality.
 5. Job is published to selected region's JetStream stream.
+
+### Function URL flow
+
+This is the Lambda Function URL equivalent in this platform.
+
+1. Authenticated API caller creates an HTTP trigger for a ready function version.
+2. Control plane generates a stable token and returns a public URL in the form `/f/{token}`.
+3. External caller sends an HTTP request to that URL.
+4. Control plane wraps the inbound request into an execution payload with method, path, query, headers, and body.
+5. Control plane dispatches the request through the same execution-job path as normal invoke.
+6. The Function URL handler waits for terminal completion and maps the function output back to the caller:
+- raw JSON output returns `200 application/json`
+- structured output in the shape `{ statusCode, headers, body }` is emitted as an HTTP response directly
 
 ## 7) Regional assignment flow
 

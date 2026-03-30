@@ -26,6 +26,7 @@ type Store struct {
 	hosts           map[string]domain.Host
 	warmPools       map[string]domain.WarmPool
 	webhookTriggers map[string]domain.WebhookTrigger
+	httpTriggers    map[string]domain.HTTPTrigger
 	regions         map[string]domain.Region
 }
 
@@ -45,6 +46,7 @@ func New() *Store {
 		hosts:           make(map[string]domain.Host),
 		warmPools:       make(map[string]domain.WarmPool),
 		webhookTriggers: make(map[string]domain.WebhookTrigger),
+		httpTriggers:    make(map[string]domain.HTTPTrigger),
 		regions:         make(map[string]domain.Region),
 	}
 }
@@ -604,6 +606,45 @@ func (s *Store) ListWebhookTriggersByFunctionVersion(_ context.Context, versionI
 			triggers = append(triggers, trigger)
 		}
 	}
+	return triggers, nil
+}
+
+func (s *Store) PutHTTPTrigger(_ context.Context, trigger *domain.HTTPTrigger) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.httpTriggers[trigger.Token]; exists {
+		return fmt.Errorf("%w: http trigger %s", store.ErrAlreadyExists, trigger.Token)
+	}
+	s.httpTriggers[trigger.Token] = *trigger
+	return nil
+}
+
+func (s *Store) GetHTTPTrigger(_ context.Context, token string) (*domain.HTTPTrigger, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	trigger, ok := s.httpTriggers[token]
+	if !ok {
+		return nil, fmt.Errorf("%w: http trigger %q", store.ErrNotFound, token)
+	}
+	cp := trigger
+	return &cp, nil
+}
+
+func (s *Store) ListHTTPTriggersByFunctionVersion(_ context.Context, versionID string) ([]domain.HTTPTrigger, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	triggers := make([]domain.HTTPTrigger, 0)
+	for _, trigger := range s.httpTriggers {
+		if trigger.FunctionVersionID == versionID {
+			triggers = append(triggers, trigger)
+		}
+	}
+	sort.SliceStable(triggers, func(i, j int) bool {
+		if triggers[i].CreatedAt.Equal(triggers[j].CreatedAt) {
+			return triggers[i].Token < triggers[j].Token
+		}
+		return triggers[i].CreatedAt.Before(triggers[j].CreatedAt)
+	})
 	return triggers, nil
 }
 

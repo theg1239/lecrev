@@ -1029,6 +1029,57 @@ func (s *Store) ListWebhookTriggersByFunctionVersion(ctx context.Context, versio
 	return triggers, rows.Err()
 }
 
+func (s *Store) PutHTTPTrigger(ctx context.Context, trigger *domain.HTTPTrigger) error {
+	_, err := s.pool.Exec(ctx, `
+		insert into http_triggers (token, project_id, function_version_id, description, auth_mode, enabled, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7)
+	`, trigger.Token, trigger.ProjectID, trigger.FunctionVersionID, nullableText(trigger.Description), string(trigger.AuthMode), trigger.Enabled, trigger.CreatedAt)
+	return mapExecError(err)
+}
+
+func (s *Store) GetHTTPTrigger(ctx context.Context, token string) (*domain.HTTPTrigger, error) {
+	var trigger domain.HTTPTrigger
+	var authMode string
+	if err := s.pool.QueryRow(ctx, `
+		select token, project_id, function_version_id, coalesce(description, ''), auth_mode, enabled, created_at
+		from http_triggers
+		where token = $1
+	`, token).Scan(
+		&trigger.Token, &trigger.ProjectID, &trigger.FunctionVersionID, &trigger.Description, &authMode, &trigger.Enabled, &trigger.CreatedAt,
+	); err != nil {
+		return nil, mapNotFound(err)
+	}
+	trigger.AuthMode = domain.HTTPTriggerAuthMode(authMode)
+	return &trigger, nil
+}
+
+func (s *Store) ListHTTPTriggersByFunctionVersion(ctx context.Context, versionID string) ([]domain.HTTPTrigger, error) {
+	rows, err := s.pool.Query(ctx, `
+		select token, project_id, function_version_id, coalesce(description, ''), auth_mode, enabled, created_at
+		from http_triggers
+		where function_version_id = $1
+		order by created_at asc, token asc
+	`, versionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	triggers := make([]domain.HTTPTrigger, 0)
+	for rows.Next() {
+		var trigger domain.HTTPTrigger
+		var authMode string
+		if err := rows.Scan(
+			&trigger.Token, &trigger.ProjectID, &trigger.FunctionVersionID, &trigger.Description, &authMode, &trigger.Enabled, &trigger.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		trigger.AuthMode = domain.HTTPTriggerAuthMode(authMode)
+		triggers = append(triggers, trigger)
+	}
+	return triggers, rows.Err()
+}
+
 func (s *Store) PutRegion(ctx context.Context, region *domain.Region) error {
 	_, err := s.pool.Exec(ctx, `
 		insert into regions (name, state, available_hosts, blank_warm, function_warm, last_heartbeat_at, last_error)

@@ -382,9 +382,28 @@ curl -sS http://localhost:8080/v1/triggers/webhook/<token> \
 
 Webhook deliveries are public token-authenticated endpoints. Management operations for creating and listing triggers stay behind the normal API key middleware.
 
+Create and use a Lambda-style Function URL:
+
+```bash
+curl -sS http://localhost:8080/v1/functions/<version-id>/triggers/http \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev-root-key' \
+  -d '{"description":"public http endpoint","authMode":"none"}'
+
+curl -sS http://localhost:8080/f/<token> \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: request-123' \
+  -d '{"hello":"world"}'
+```
+
+The Function URL path waits for terminal job completion and returns either:
+
+- raw JSON output as `200 application/json`, or
+- a structured HTTP response when the function returns `{ "statusCode": ..., "headers": {...}, "body": ... }`
+
 ## Browser Clients
 
-The HTTP API now emits permissive CORS headers for browser-based frontends. Preflight `OPTIONS` requests are handled on the API routes, and the control plane allows `Content-Type`, `X-API-Key`, and `Idempotency-Key` headers so a separate Vite or Next.js frontend can call the backend directly during development.
+The HTTP API now emits permissive CORS headers for browser-based frontends. Preflight `OPTIONS` requests are handled on the API routes, and the control plane allows `Content-Type`, `X-API-Key`, `Idempotency-Key`, and `Authorization` headers so a separate Vite or Next.js frontend can call the backend directly during development.
 
 ## CLI
 
