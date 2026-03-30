@@ -24,7 +24,9 @@ export LECREV_SSH_PROXY_JUMP="ec2-user@${CONTROL_PLANE_PUBLIC_HOST}"
 Example access pattern once the worker is private-only:
 
 ```bash
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}"
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}"
 ```
 
 ## 2. Control-plane host layout
@@ -78,7 +80,7 @@ cd /Users/ishaan/eeeverc
 bash deploy/ec2/deploy-execution-host.sh "${EXECUTION_HOST_PRIVATE}" "${SSH_KEY_PATH}"
 ```
 
-If the execution host still has a temporary public IP during bootstrap, you can use that first and remove it later.
+If `LECREV_SSH_PROXY_JUMP` is set, the deploy scripts automatically use a proxy command that reuses the same PEM for the jump host. If the execution host still has a temporary public IP during bootstrap, you can use that first and remove it later.
 
 ## 5. Service start, stop, restart
 
@@ -101,16 +103,24 @@ ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
 Execution-host service:
 
 ```bash
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}" \
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}" \
   'sudo systemctl status lecrev-node-agent --no-pager'
 
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}" \
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}" \
   'sudo systemctl restart lecrev-node-agent'
 
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}" \
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}" \
   'sudo systemctl stop lecrev-node-agent'
 
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}" \
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}" \
   'sudo systemctl start lecrev-node-agent'
 ```
 
@@ -129,14 +139,18 @@ ssh -i "${SSH_KEY_PATH}" ec2-user@"${CONTROL_PLANE_PUBLIC_HOST}" \
 Execution-host logs:
 
 ```bash
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}" \
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}" \
   'sudo journalctl -u lecrev-node-agent -n 200 --no-pager'
 ```
 
 Firecracker host check:
 
 ```bash
-ssh -i "${SSH_KEY_PATH}" -J "${LECREV_SSH_PROXY_JUMP}" ec2-user@"${EXECUTION_HOST_PRIVATE}" \
+ssh -i "${SSH_KEY_PATH}" \
+  -o "ProxyCommand=ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${LECREV_SSH_PROXY_JUMP} -W %h:%p" \
+  ec2-user@"${EXECUTION_HOST_PRIVATE}" \
   'sudo APP_USER=lecrev /usr/local/bin/lecrev-check-firecracker-host'
 ```
 

@@ -17,7 +17,7 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 SSH_ARGS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no)
 if [[ -n "${PROXY_JUMP}" ]]; then
-  SSH_ARGS+=(-J "${PROXY_JUMP}")
+  SSH_ARGS+=(-o "ProxyCommand=ssh -i ${KEY_PATH} -o StrictHostKeyChecking=no ${PROXY_JUMP} -W %h:%p")
 fi
 
 cd "${ROOT_DIR}"
