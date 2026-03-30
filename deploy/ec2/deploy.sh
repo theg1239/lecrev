@@ -15,6 +15,9 @@ TMP_DIR="$(mktemp -d)"
 REMOTE_TMP="/tmp/lecrev-deploy"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+export COPYFILE_DISABLE=1
+export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
+
 cd "${ROOT_DIR}"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${TMP_DIR}/lecrev" ./cmd/lecrev
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${TMP_DIR}/lecrev-guest-runner" ./cmd/lecrev-guest-runner
