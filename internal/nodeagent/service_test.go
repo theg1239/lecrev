@@ -110,6 +110,10 @@ type stubDriver struct {
 	err    error
 }
 
+func (d stubDriver) Name() string {
+	return "stub-driver"
+}
+
 func (d stubDriver) Execute(context.Context, firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
 	return d.result, d.err
 }
@@ -140,6 +144,23 @@ func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact
 	}
 	if err := objects.Put(context.Background(), "artifacts/digest/bundle.tgz", bundle); err != nil {
 		t.Fatalf("put bundle object: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-1",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     10,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: digest,
+		SourceType:     domain.SourceTypeBundle,
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
 	}
 	svc := New("host-ap-south-1-a", "ap-south-1", "", driver, objects, meta, stubResolver{})
 	return svc, objects

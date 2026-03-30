@@ -15,6 +15,8 @@ type ExecuteRequest struct {
 	Payload        json.RawMessage
 	Env            map[string]string
 	Timeout        time.Duration
+	MemoryMB       int
+	NetworkPolicy  string
 	Region         string
 	HostID         string
 }
@@ -29,5 +31,6 @@ type ExecuteResult struct {
 }
 
 type Driver interface {
+	Name() string
 	Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error)
 }

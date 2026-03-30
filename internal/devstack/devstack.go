@@ -18,7 +18,9 @@ import (
 	"github.com/theg1239/lecrev/internal/coordinator"
 	"github.com/theg1239/lecrev/internal/dispatch"
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/firecracker/localnode"
+	"github.com/theg1239/lecrev/internal/firecracker/microvm"
 	"github.com/theg1239/lecrev/internal/httpapi"
 	"github.com/theg1239/lecrev/internal/nodeagent"
 	"github.com/theg1239/lecrev/internal/recovery"
@@ -51,6 +53,23 @@ type Config struct {
 	AWSSecretKey        string
 	SecretsProxyToken   string
 	EnableMTLS          bool
+	ExecutionDriver     string
+
+	FirecrackerBinary     string
+	JailerBinary          string
+	FirecrackerUseJailer  bool
+	FirecrackerKernelPath string
+	FirecrackerRootFSPath string
+	FirecrackerWorkspace  string
+	FirecrackerChrootBase string
+	FirecrackerGuestInit  string
+	FirecrackerTapDevice  string
+	FirecrackerGuestMAC   string
+	FirecrackerGuestIP    string
+	FirecrackerGatewayIP  string
+	FirecrackerNetmask    string
+	FirecrackerVCPUCount  int
+	FirecrackerMemoryMB   int
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -104,8 +123,77 @@ func prepareConfig(cfg *Config) error {
 	if cfg.LoadEnv && cfg.SecretsProxyToken == "" {
 		cfg.SecretsProxyToken = strings.TrimSpace(os.Getenv("LECREV_SECRETS_PROXY_TOKEN"))
 	}
+	if cfg.LoadEnv && cfg.ExecutionDriver == "" {
+		cfg.ExecutionDriver = strings.TrimSpace(os.Getenv("LECREV_EXECUTION_DRIVER"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerBinary == "" {
+		cfg.FirecrackerBinary = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_BINARY"))
+	}
+	if cfg.LoadEnv && cfg.JailerBinary == "" {
+		cfg.JailerBinary = strings.TrimSpace(os.Getenv("LECREV_JAILER_BINARY"))
+	}
+	if cfg.LoadEnv {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_USE_JAILER")); raw != "" {
+			enabled, err := strconv.ParseBool(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_USE_JAILER: %w", err)
+			}
+			cfg.FirecrackerUseJailer = enabled
+		}
+	}
+	if cfg.LoadEnv && cfg.FirecrackerKernelPath == "" {
+		cfg.FirecrackerKernelPath = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_KERNEL_IMAGE"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerRootFSPath == "" {
+		cfg.FirecrackerRootFSPath = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_ROOTFS"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerWorkspace == "" {
+		cfg.FirecrackerWorkspace = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_WORKSPACE_DIR"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerChrootBase == "" {
+		cfg.FirecrackerChrootBase = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_CHROOT_BASE_DIR"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerGuestInit == "" {
+		cfg.FirecrackerGuestInit = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_GUEST_INIT"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerTapDevice == "" {
+		cfg.FirecrackerTapDevice = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_TAP_DEVICE"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerGuestMAC == "" {
+		cfg.FirecrackerGuestMAC = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_GUEST_MAC"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerGuestIP == "" {
+		cfg.FirecrackerGuestIP = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_GUEST_IP"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerGatewayIP == "" {
+		cfg.FirecrackerGatewayIP = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_GATEWAY_IP"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerNetmask == "" {
+		cfg.FirecrackerNetmask = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_NETMASK"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerVCPUCount == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_VCPU_COUNT")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_VCPU_COUNT: %w", err)
+			}
+			cfg.FirecrackerVCPUCount = value
+		}
+	}
+	if cfg.LoadEnv && cfg.FirecrackerMemoryMB == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_DEFAULT_MEMORY_MB")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_DEFAULT_MEMORY_MB: %w", err)
+			}
+			cfg.FirecrackerMemoryMB = value
+		}
+	}
 	if strings.TrimSpace(cfg.SecretsProxyToken) == "" {
 		cfg.SecretsProxyToken = "dev-secrets-token"
+	}
+	if strings.TrimSpace(cfg.ExecutionDriver) == "" {
+		cfg.ExecutionDriver = "local-node"
 	}
 	if cfg.LoadEnv {
 		if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {
@@ -236,7 +324,11 @@ func runNetworked(ctx context.Context, cfg Config) error {
 	for _, region := range localRegions {
 		region := region
 		run("node-agent-"+region.name, func() error {
-			return nodeagent.New(region.host, region.name, region.addr, localnode.New(), objectStore, metaStore, secretsClient, grpcDialOptions...).Run(ctx)
+			driver, err := buildExecutionDriver(cfg)
+			if err != nil {
+				return err
+			}
+			return nodeagent.New(region.host, region.name, region.addr, driver, objectStore, metaStore, secretsClient, grpcDialOptions...).Run(ctx)
 		})
 	}
 	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
@@ -369,4 +461,31 @@ func controlPlaneBaseURL(apiAddr string) string {
 		return "http://" + net.JoinHostPort(host, port)
 	}
 	return "http://" + strings.TrimRight(apiAddr, "/")
+}
+
+func buildExecutionDriver(cfg Config) (firecracker.Driver, error) {
+	switch strings.TrimSpace(strings.ToLower(cfg.ExecutionDriver)) {
+	case "", "local-node":
+		return localnode.New(), nil
+	case "firecracker":
+		return microvm.New(microvm.Config{
+			FirecrackerBinary: cfg.FirecrackerBinary,
+			JailerBinary:      cfg.JailerBinary,
+			KernelImagePath:   cfg.FirecrackerKernelPath,
+			RootFSPath:        cfg.FirecrackerRootFSPath,
+			WorkspaceDir:      cfg.FirecrackerWorkspace,
+			ChrootBaseDir:     cfg.FirecrackerChrootBase,
+			UseJailer:         cfg.FirecrackerUseJailer,
+			GuestInitPath:     cfg.FirecrackerGuestInit,
+			TapDevice:         cfg.FirecrackerTapDevice,
+			GuestMAC:          cfg.FirecrackerGuestMAC,
+			GuestIP:           cfg.FirecrackerGuestIP,
+			GatewayIP:         cfg.FirecrackerGatewayIP,
+			Netmask:           cfg.FirecrackerNetmask,
+			VCPUCount:         int64(cfg.FirecrackerVCPUCount),
+			DefaultMemoryMB:   int64(cfg.FirecrackerMemoryMB),
+		})
+	default:
+		return nil, fmt.Errorf("unsupported execution driver %q", cfg.ExecutionDriver)
+	}
 }

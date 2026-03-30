@@ -7,6 +7,8 @@
 - a node-agent that executes assignments through a pluggable driver
 - lease expiry recovery and retry orchestration in the control plane
 - a PostgreSQL-backed metadata store with embedded migrations
+- a Linux Firecracker execution driver that boots microVMs and talks to a guest runner over vsock
+- a Linux guest-runner binary for Firecracker rootfs images
 - a local Node.js execution driver that simulates the Firecracker guest path on macOS
 - an in-memory metadata backend for fast local iteration
 
@@ -122,6 +124,38 @@ export LECREV_SECRETS_BACKEND='memory'
 export LECREV_SECRETS_PROXY_TOKEN='dev-secrets-token'
 export LECREV_ENABLE_MTLS='true'
 go run ./cmd/lecrev devstack
+```
+
+Run the real Firecracker driver on a Linux execution host:
+
+```bash
+go build -o ./dist/lecrev-guest-runner ./cmd/lecrev-guest-runner
+
+export LECREV_EXECUTION_DRIVER='firecracker'
+export LECREV_FIRECRACKER_BINARY='/usr/local/bin/firecracker'
+export LECREV_JAILER_BINARY='/usr/local/bin/jailer'
+export LECREV_FIRECRACKER_USE_JAILER='false'
+export LECREV_FIRECRACKER_KERNEL_IMAGE='/var/lib/lecrev/vmlinux'
+export LECREV_FIRECRACKER_ROOTFS='/var/lib/lecrev/rootfs.ext4'
+export LECREV_FIRECRACKER_WORKSPACE_DIR='/var/lib/lecrev/runtime'
+export LECREV_FIRECRACKER_GUEST_INIT='/usr/local/bin/lecrev-guest-runner'
+go run ./cmd/lecrev devstack
+```
+
+The Firecracker rootfs image is expected to contain:
+
+- `node` on the guest `PATH`
+- `lecrev-guest-runner` at the configured guest init path
+- a writable root filesystem, because the current Firecracker driver copies the base rootfs per invocation and runs the guest runner as PID 1
+
+For `networkPolicy=full`, configure a host tap device and guest network tuple as well:
+
+```bash
+export LECREV_FIRECRACKER_TAP_DEVICE='tap0'
+export LECREV_FIRECRACKER_GUEST_MAC='06:00:ac:10:00:02'
+export LECREV_FIRECRACKER_GUEST_IP='172.16.0.2'
+export LECREV_FIRECRACKER_GATEWAY_IP='172.16.0.1'
+export LECREV_FIRECRACKER_NETMASK='255.255.255.252'
 ```
 
 If you already have `devstack` running and want to smoke the live HTTP API instead of the embedded stack:
@@ -350,8 +384,8 @@ PATH="$PWD/.tools/bin:$PATH" \
 
 ## Scope
 
-This repo intentionally keeps the Firecracker boundary thin. The local `node` driver is only for developer machines; Linux execution hosts should swap in a real Firecracker-backed driver behind the same interface.
+This repo intentionally keeps the driver boundary thin. The local `node` driver is still the default for developer machines, but Linux execution hosts can now swap in the Firecracker-backed driver behind the same interface.
 
 The default execution topology is APAC-only. Unsupported regions such as `us-east-1` are rejected at deploy time to keep the platform aligned with an `ap-south-1` primary and nearby failover regions.
 
-The current production-oriented pieces in the repo are the metadata model, async build-job flow, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, a scoped secrets proxy in front of the backend secrets provider, Postgres migrations, optional NATS and S3 or MinIO adapters, and mTLS for the coordinator-to-node-agent stream in local mode. The remaining major gap to full production is replacing the local Node execution driver with a Linux Firecracker host driver and adding the real AWS integrations around artifact replication, autoscaling, and host automation.
+The current production-oriented pieces in the repo are the metadata model, async build-job flow, retry and lease-recovery flow, idempotent deploy and invoke APIs, webhook triggers, per-job attempt inspection, cost-record generation, warm-pool inventory, host drain control, a scoped secrets proxy in front of the backend secrets provider, Postgres migrations, optional NATS and S3 or MinIO adapters, mTLS for the coordinator-to-node-agent stream in local mode, a Linux Firecracker host driver, and a guest-runner binary for Firecracker rootfs images. The remaining major gaps to full production are snapshot restore and warm-pool reuse in the Firecracker driver, artifact replication automation, autoscaling, and AWS host automation.

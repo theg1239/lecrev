@@ -51,10 +51,14 @@ func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, obje
 	if len(dialOptions) == 0 {
 		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	}
+	driverName := "unknown"
+	if driver != nil && strings.TrimSpace(driver.Name()) != "" {
+		driverName = strings.TrimSpace(driver.Name())
+	}
 	return &Service{
 		hostID:          hostID,
 		region:          region,
-		driverName:      "local-node",
+		driverName:      driverName,
 		coordinatorAddr: coordinatorAddr,
 		driver:          driver,
 		objects:         objects,
@@ -212,6 +216,11 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
 		return
 	}
+	version, err := s.store.GetFunctionVersion(ctx, msg.FunctionVersionId)
+	if err != nil {
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+		return
+	}
 	bundle, err := s.objects.Get(ctx, artifactMeta.BundleKey)
 	if err != nil {
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
@@ -244,6 +253,8 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		Payload:        msg.PayloadJson,
 		Env:            env,
 		Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
+		MemoryMB:       version.MemoryMB,
+		NetworkPolicy:  msg.NetworkPolicy,
 		Region:         s.region,
 		HostID:         s.hostID,
 	})
