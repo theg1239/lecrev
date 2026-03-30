@@ -31,7 +31,7 @@ func (b *MemoryBus) PublishBuild(ctx context.Context, region string, assignment 
 	}
 }
 
-func (b *MemoryBus) ConsumeBuild(ctx context.Context, region, _ string, handler BuildHandler) error {
+func (b *MemoryBus) ConsumeBuild(ctx context.Context, region, _ string, _ int, handler BuildHandler) error {
 	ch := b.channel(region)
 	for {
 		select {

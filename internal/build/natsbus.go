@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -60,7 +61,10 @@ func (b *NATSBus) PublishBuild(ctx context.Context, region string, assignment Bu
 	return err
 }
 
-func (b *NATSBus) ConsumeBuild(ctx context.Context, region, consumer string, handler BuildHandler) error {
+func (b *NATSBus) ConsumeBuild(ctx context.Context, region, consumer string, concurrency int, handler BuildHandler) error {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
 	subject := fmt.Sprintf("build.%s", region)
 	sub, err := b.js.PullSubscribe(subject, consumer, nats.BindStream(buildStreamName))
 	if err != nil {
@@ -69,6 +73,9 @@ func (b *NATSBus) ConsumeBuild(ctx context.Context, region, consumer string, han
 	defer func() {
 		_ = sub.Unsubscribe()
 	}()
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	defer wg.Wait()
 
 	for {
 		select {
@@ -76,7 +83,18 @@ func (b *NATSBus) ConsumeBuild(ctx context.Context, region, consumer string, han
 			return ctx.Err()
 		default:
 		}
-		msgs, err := sub.Fetch(1, nats.MaxWait(2*time.Second))
+		available := concurrency - len(sem)
+		if available <= 0 {
+			timer := time.NewTimer(50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				continue
+			}
+		}
+		msgs, err := sub.Fetch(available, nats.MaxWait(2*time.Second))
 		if err != nil {
 			if err == nats.ErrTimeout || err == context.DeadlineExceeded {
 				continue
@@ -84,16 +102,27 @@ func (b *NATSBus) ConsumeBuild(ctx context.Context, region, consumer string, han
 			return err
 		}
 		for _, msg := range msgs {
-			var assignment BuildAssignment
-			if err := json.Unmarshal(msg.Data, &assignment); err != nil {
-				_ = msg.Term()
-				continue
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case sem <- struct{}{}:
 			}
-			if err := handler(ctx, assignment); err != nil {
-				_ = msg.Nak()
-				continue
-			}
-			_ = msg.Ack()
+			wg.Add(1)
+			go func(msg *nats.Msg) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				var assignment BuildAssignment
+				if err := json.Unmarshal(msg.Data, &assignment); err != nil {
+					_ = msg.Term()
+					return
+				}
+				if err := handler(ctx, assignment); err != nil {
+					_ = msg.Nak()
+					return
+				}
+				_ = msg.Ack()
+			}(msg)
 		}
 	}
 }

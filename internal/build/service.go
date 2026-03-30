@@ -110,10 +110,14 @@ func (s *Service) SetCommandTimeouts(gitClone, npmInstall, npmBuild, npmPrune ti
 }
 
 func (s *Service) RunBuildConsumer(ctx context.Context, region, consumer string) error {
+	return s.RunBuildConsumerWithConcurrency(ctx, region, consumer, 1)
+}
+
+func (s *Service) RunBuildConsumerWithConcurrency(ctx context.Context, region, consumer string, concurrency int) error {
 	if s.bus == nil {
 		return nil
 	}
-	return s.bus.ConsumeBuild(ctx, region, consumer, func(ctx context.Context, assignment BuildAssignment) error {
+	return s.bus.ConsumeBuild(ctx, region, consumer, concurrency, func(ctx context.Context, assignment BuildAssignment) error {
 		return s.ProcessBuildJob(ctx, assignment.BuildJobID)
 	})
 }

@@ -254,7 +254,7 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 		Name: "build-worker",
 		DSN:  cfg.PostgresDSN,
 	}, func(runCtx context.Context) error {
-		errCh := make(chan error, len(cfg.ExecutionRegions)*cfg.BuildWorkersPerRegion)
+		errCh := make(chan error, len(cfg.ExecutionRegions))
 		run := func(name string, fn func() error) {
 			go func() {
 				if err := fn(); err != nil && !errors.Is(err, context.Canceled) {
@@ -265,16 +265,14 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 
 		for _, regionName := range cfg.ExecutionRegions {
 			regionName := regionName
-			for workerIndex := 1; workerIndex <= cfg.BuildWorkersPerRegion; workerIndex++ {
-				consumer := fmt.Sprintf("builder-%s-%d", sanitizeRegionToken(regionName), workerIndex)
-				name := fmt.Sprintf("build-consumer-%s-%d", regionName, workerIndex)
-				slog.Info("build-worker consumer configured", "region", regionName, "consumer", consumer)
-				run(name, func() error {
-					return runRestartingLoop(runCtx, name, 2*time.Second, func(loopCtx context.Context) error {
-						return builder.RunBuildConsumer(loopCtx, regionName, consumer)
-					})
+			consumer := "builder-" + sanitizeRegionToken(regionName)
+			name := "build-consumer-" + regionName
+			slog.Info("build-worker consumer configured", "region", regionName, "consumer", consumer, "concurrency", cfg.BuildWorkersPerRegion)
+			run(name, func() error {
+				return runRestartingLoop(runCtx, name, 2*time.Second, func(loopCtx context.Context) error {
+					return builder.RunBuildConsumerWithConcurrency(loopCtx, regionName, consumer, cfg.BuildWorkersPerRegion)
 				})
-			}
+			})
 		}
 
 		select {
