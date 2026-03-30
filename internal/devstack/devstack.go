@@ -1,0 +1,285 @@
+package devstack
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ishaan/eeeverc/internal/artifact"
+	"github.com/ishaan/eeeverc/internal/build"
+	"github.com/ishaan/eeeverc/internal/coordinator"
+	"github.com/ishaan/eeeverc/internal/dispatch"
+	"github.com/ishaan/eeeverc/internal/firecracker/localnode"
+	"github.com/ishaan/eeeverc/internal/httpapi"
+	"github.com/ishaan/eeeverc/internal/nodeagent"
+	"github.com/ishaan/eeeverc/internal/recovery"
+	"github.com/ishaan/eeeverc/internal/regions"
+	"github.com/ishaan/eeeverc/internal/scheduler"
+	"github.com/ishaan/eeeverc/internal/secrets"
+	"github.com/ishaan/eeeverc/internal/store"
+	memstore "github.com/ishaan/eeeverc/internal/store/memory"
+	pgstore "github.com/ishaan/eeeverc/internal/store/postgres"
+	"github.com/ishaan/eeeverc/internal/transport"
+
+	"google.golang.org/grpc"
+)
+
+type Config struct {
+	APIAddr             string
+	ExecutionRegions    []string
+	CoordinatorBasePort int
+	PostgresDSN         string
+	NATSURL             string
+	S3Region            string
+	S3Endpoint          string
+	S3AccessKey         string
+	S3SecretKey         string
+	S3Bucket            string
+	SecretsBackend      string
+	AWSRegion           string
+	AWSAccessKey        string
+	AWSSecretKey        string
+	EnableMTLS          bool
+}
+
+func Run(ctx context.Context, cfg Config) error {
+	if cfg.APIAddr == "" {
+		cfg.APIAddr = ":8080"
+	}
+	if cfg.CoordinatorBasePort == 0 {
+		cfg.CoordinatorBasePort = 9091
+	}
+	if cfg.PostgresDSN == "" {
+		cfg.PostgresDSN = strings.TrimSpace(os.Getenv("EEEVERC_POSTGRES_DSN"))
+	}
+	if cfg.NATSURL == "" {
+		cfg.NATSURL = strings.TrimSpace(os.Getenv("EEEVERC_NATS_URL"))
+	}
+	if cfg.S3Region == "" {
+		cfg.S3Region = strings.TrimSpace(os.Getenv("EEEVERC_S3_REGION"))
+	}
+	if cfg.S3Endpoint == "" {
+		cfg.S3Endpoint = strings.TrimSpace(os.Getenv("EEEVERC_S3_ENDPOINT"))
+	}
+	if cfg.S3AccessKey == "" {
+		cfg.S3AccessKey = strings.TrimSpace(os.Getenv("EEEVERC_S3_ACCESS_KEY"))
+	}
+	if cfg.S3SecretKey == "" {
+		cfg.S3SecretKey = strings.TrimSpace(os.Getenv("EEEVERC_S3_SECRET_KEY"))
+	}
+	if cfg.S3Bucket == "" {
+		cfg.S3Bucket = strings.TrimSpace(os.Getenv("EEEVERC_S3_BUCKET"))
+	}
+	if cfg.SecretsBackend == "" {
+		cfg.SecretsBackend = strings.TrimSpace(os.Getenv("EEEVERC_SECRETS_BACKEND"))
+	}
+	if cfg.AWSRegion == "" {
+		cfg.AWSRegion = strings.TrimSpace(os.Getenv("EEEVERC_AWS_REGION"))
+	}
+	if cfg.AWSAccessKey == "" {
+		cfg.AWSAccessKey = strings.TrimSpace(os.Getenv("EEEVERC_AWS_ACCESS_KEY_ID"))
+	}
+	if cfg.AWSSecretKey == "" {
+		cfg.AWSSecretKey = strings.TrimSpace(os.Getenv("EEEVERC_AWS_SECRET_ACCESS_KEY"))
+	}
+	if raw := strings.TrimSpace(os.Getenv("EEEVERC_ENABLE_MTLS")); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return fmt.Errorf("parse EEEVERC_ENABLE_MTLS: %w", err)
+		}
+		cfg.EnableMTLS = enabled
+	} else if !cfg.EnableMTLS {
+		cfg.EnableMTLS = true
+	}
+	normalizedRegions, err := regions.NormalizeExecutionRegions(cfg.ExecutionRegions)
+	if err != nil {
+		return err
+	}
+	cfg.ExecutionRegions = normalizedRegions
+
+	metaStore, cleanup, err := buildMetadataStore(ctx, cfg.PostgresDSN)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	objectStore, closeObjectStore, err := buildArtifactStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer closeObjectStore()
+	secretProvider, err := buildSecretsProvider(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	builder := build.New(metaStore, objectStore)
+	executionBus, closeBus, err := buildExecutionBus(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeBus()
+	var grpcServerOptions []grpc.ServerOption
+	var grpcDialOptions []grpc.DialOption
+	if cfg.EnableMTLS {
+		bundle, err := transport.GenerateDevMTLS([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
+		if err != nil {
+			return err
+		}
+		grpcServerOptions = append(grpcServerOptions, grpc.Creds(bundle.Server))
+		grpcDialOptions = append(grpcDialOptions, grpc.WithTransportCredentials(bundle.Client))
+	}
+
+	dispatchers := make([]scheduler.RegionDispatcher, 0, len(cfg.ExecutionRegions))
+	type localRegion struct {
+		name string
+		addr string
+		host string
+		svc  *coordinator.Service
+	}
+	localRegions := make([]localRegion, 0, len(cfg.ExecutionRegions))
+	for i, regionName := range cfg.ExecutionRegions {
+		addr := fmt.Sprintf("127.0.0.1:%d", cfg.CoordinatorBasePort+i)
+		hostID := fmt.Sprintf("host-%s-a", sanitizeRegionToken(regionName))
+		svc := coordinator.New(regionName, metaStore, nil)
+		svc.SetExecutionBus(executionBus)
+		localRegions = append(localRegions, localRegion{
+			name: regionName,
+			addr: addr,
+			host: hostID,
+			svc:  svc,
+		})
+		dispatchers = append(dispatchers, svc)
+	}
+	schedulerService := scheduler.New(metaStore, dispatchers)
+	for _, region := range localRegions {
+		region.svc.SetRetryer(schedulerService)
+	}
+	leaseRecovery := recovery.New(metaStore, schedulerService, 3*time.Second)
+	admins := make([]httpapi.RegionAdmin, 0, len(localRegions))
+	for _, region := range localRegions {
+		admins = append(admins, region.svc)
+	}
+
+	apiHandler := httpapi.New(metaStore, builder, schedulerService, map[string]string{"dev-root-key": "demo"}, "tenant-dev", "demo", admins...)
+	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: apiHandler}
+
+	errCh := make(chan error, len(localRegions)*2+2)
+	run := func(name string, fn func() error) {
+		go func() {
+			if err := fn(); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s: %w", name, err)
+			}
+		}()
+	}
+
+	for _, region := range localRegions {
+		region := region
+		run("coordinator-"+region.name, func() error { return region.svc.Listen(ctx, region.addr, grpcServerOptions...) })
+		run("queue-consumer-"+region.name, func() error {
+			return region.svc.RunExecutionConsumer(ctx, "coordinator-"+sanitizeRegionToken(region.name))
+		})
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	for _, region := range localRegions {
+		region := region
+		run("node-agent-"+region.name, func() error {
+			return nodeagent.New(region.host, region.name, region.addr, localnode.New(), objectStore, metaStore, secretProvider, grpcDialOptions...).Run(ctx)
+		})
+	}
+	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
+	run("http-api", func() error { return httpServer.ListenAndServe() })
+
+	slog.Info("devstack started", "api", cfg.APIAddr, "regions", cfg.ExecutionRegions)
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		return err
+	}
+}
+
+func sanitizeRegionToken(input string) string {
+	replacer := strings.NewReplacer("/", "-", ".", "-", ":", "-", "_", "-")
+	return replacer.Replace(input)
+}
+
+func buildMetadataStore(ctx context.Context, dsn string) (store.Store, func(), error) {
+	if strings.TrimSpace(dsn) == "" {
+		return memstore.New(), func() {}, nil
+	}
+	pg, err := pgstore.New(ctx, dsn)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := pg.RunMigrations(ctx); err != nil {
+		pg.Close()
+		return nil, nil, err
+	}
+	return pg, func() { pg.Close() }, nil
+}
+
+func buildExecutionBus(cfg Config) (dispatch.ExecutionBus, func(), error) {
+	if strings.TrimSpace(cfg.NATSURL) == "" {
+		bus := dispatch.NewMemoryBus(256)
+		return bus, func() { _ = bus.Close() }, nil
+	}
+	bus, err := dispatch.NewNATS(cfg.NATSURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := bus.EnsureStream(); err != nil {
+		_ = bus.Close()
+		return nil, nil, err
+	}
+	return bus, func() { _ = bus.Close() }, nil
+}
+
+func buildArtifactStore(ctx context.Context, cfg Config) (artifact.Store, func(), error) {
+	if strings.TrimSpace(cfg.S3Bucket) == "" {
+		return artifact.NewMemoryStore(), func() {}, nil
+	}
+	store, err := artifact.NewS3Store(ctx, artifact.S3Config{
+		Region:    cfg.S3Region,
+		Endpoint:  cfg.S3Endpoint,
+		AccessKey: cfg.S3AccessKey,
+		SecretKey: cfg.S3SecretKey,
+		Bucket:    cfg.S3Bucket,
+		PathStyle: strings.TrimSpace(cfg.S3Endpoint) != "",
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := store.EnsureBucket(ctx); err != nil {
+		return nil, nil, err
+	}
+	return store, func() {}, nil
+}
+
+func buildSecretsProvider(ctx context.Context, cfg Config) (secrets.Provider, error) {
+	switch cfg.SecretsBackend {
+	case "", "memory":
+		return secrets.NewMemoryProvider(map[string]string{
+			"DEMO_SECRET": "shh-local-dev",
+		}), nil
+	case "aws-secrets-manager":
+		return secrets.NewAWSSecretsManagerProvider(ctx, secrets.AWSSecretsManagerConfig{
+			Region:    cfg.AWSRegion,
+			AccessKey: cfg.AWSAccessKey,
+			SecretKey: cfg.AWSSecretKey,
+			TTL:       time.Minute,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported secrets backend %q", cfg.SecretsBackend)
+	}
+}
