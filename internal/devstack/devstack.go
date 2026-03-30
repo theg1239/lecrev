@@ -50,6 +50,7 @@ type Config struct {
 	PostgresDSN          string
 	NATSURL              string
 	S3Region             string
+	S3RegionBuckets      map[string]string
 	S3Endpoint           string
 	S3AccessKey          string
 	S3SecretKey          string
@@ -141,6 +142,13 @@ func prepareConfig(cfg *Config) error {
 	}
 	if cfg.LoadEnv && cfg.S3Region == "" {
 		cfg.S3Region = strings.TrimSpace(os.Getenv("LECREV_S3_REGION"))
+	}
+	if cfg.LoadEnv && len(cfg.S3RegionBuckets) == 0 {
+		parsed, err := parseRegionBucketMap(os.Getenv("LECREV_S3_REGION_BUCKETS"))
+		if err != nil {
+			return err
+		}
+		cfg.S3RegionBuckets = parsed
 	}
 	if cfg.LoadEnv && cfg.S3Endpoint == "" {
 		cfg.S3Endpoint = strings.TrimSpace(os.Getenv("LECREV_S3_ENDPOINT"))
@@ -334,6 +342,11 @@ func runNetworked(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer closeObjectStore()
+	artifactReplicator, closeReplicator, err := buildArtifactReplicator(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer closeReplicator()
 	secretProvider, err := buildSecretsProvider(ctx, cfg)
 	if err != nil {
 		return err
@@ -341,6 +354,7 @@ func runNetworked(ctx context.Context, cfg Config) error {
 	secretResolver := secrets.NewScopedResolver(metaStore, secretProvider)
 	secretsProxy := secrets.NewProxyHandler(secretResolver, cfg.SecretsProxyToken)
 	builder := build.New(metaStore, objectStore)
+	builder.SetArtifactReplicator(artifactReplicator)
 	buildBus, closeBuildBus, err := buildBuildBus(cfg)
 	if err != nil {
 		return err
@@ -532,6 +546,32 @@ func buildArtifactStore(ctx context.Context, cfg Config) (artifact.Store, func()
 	return store, func() {}, nil
 }
 
+func buildArtifactReplicator(ctx context.Context, cfg Config) (build.ArtifactReplicator, func(), error) {
+	if len(cfg.S3RegionBuckets) == 0 {
+		return nil, func() {}, nil
+	}
+	stores := make(map[string]artifact.Store, len(cfg.S3RegionBuckets))
+	closeFn := func() {}
+	for region, bucket := range cfg.S3RegionBuckets {
+		store, err := artifact.NewS3Store(ctx, artifact.S3Config{
+			Region:    region,
+			Endpoint:  cfg.S3Endpoint,
+			AccessKey: cfg.S3AccessKey,
+			SecretKey: cfg.S3SecretKey,
+			Bucket:    bucket,
+			PathStyle: strings.TrimSpace(cfg.S3Endpoint) != "",
+		})
+		if err != nil {
+			return nil, closeFn, err
+		}
+		if err := store.EnsureBucket(ctx); err != nil {
+			return nil, closeFn, err
+		}
+		stores[region] = store
+	}
+	return build.NewRegionReplicator(stores), closeFn, nil
+}
+
 func buildSecretsProvider(ctx context.Context, cfg Config) (secrets.Provider, error) {
 	switch cfg.SecretsBackend {
 	case "", "memory":
@@ -555,6 +595,32 @@ func composeControlPlaneHandler(apiHandler http.Handler, secretsProxy http.Handl
 	mux.Handle(secrets.ProxyPath, secretsProxy)
 	mux.Handle("/", apiHandler)
 	return mux
+}
+
+func parseRegionBucketMap(raw string) (map[string]string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	mapping := make(map[string]string)
+	entries := strings.Split(value, ",")
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid LECREV_S3_REGION_BUCKETS entry %q", entry)
+		}
+		region := strings.TrimSpace(parts[0])
+		bucket := strings.TrimSpace(parts[1])
+		if region == "" || bucket == "" {
+			return nil, fmt.Errorf("invalid LECREV_S3_REGION_BUCKETS entry %q", entry)
+		}
+		mapping[region] = bucket
+	}
+	return mapping, nil
 }
 
 func controlPlaneBaseURL(apiAddr string) string {

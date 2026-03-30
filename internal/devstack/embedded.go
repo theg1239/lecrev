@@ -68,9 +68,17 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 		cleanupStore()
 		return nil, err
 	}
+	artifactReplicator, cleanupReplicator, err := buildArtifactReplicator(ctx, cfg)
+	if err != nil {
+		cancel()
+		cleanupObjects()
+		cleanupStore()
+		return nil, err
+	}
 	secretProvider, err := buildSecretsProvider(ctx, cfg)
 	if err != nil {
 		cancel()
+		cleanupReplicator()
 		cleanupObjects()
 		cleanupStore()
 		return nil, err
@@ -78,9 +86,11 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 	secretResolver := secrets.NewScopedResolver(metaStore, secretProvider)
 	secretsProxy := secrets.NewProxyHandler(secretResolver, cfg.SecretsProxyToken)
 	builder := build.New(metaStore, objectStore)
+	builder.SetArtifactReplicator(artifactReplicator)
 	buildBus, closeBuildBus, err := buildBuildBus(cfg)
 	if err != nil {
 		cancel()
+		cleanupReplicator()
 		cleanupObjects()
 		cleanupStore()
 		return nil, err
@@ -90,6 +100,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 	if err != nil {
 		cancel()
 		_ = buildBus.Close()
+		cleanupReplicator()
 		cleanupObjects()
 		cleanupStore()
 		return nil, err
@@ -97,6 +108,7 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 	cleanup := func() {
 		closeBuildBus()
 		cleanupBus()
+		cleanupReplicator()
 		cleanupObjects()
 		cleanupStore()
 	}

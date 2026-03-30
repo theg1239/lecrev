@@ -94,6 +94,8 @@ That deploys:
 
 - `lecrev build-worker`
 
+For real cross-region artifact replication, set `LECREV_S3_REGION_BUCKETS` in the build-worker env so each target region points at its own bucket. If that mapping is omitted, artifact availability still falls back to single-bucket metadata marking.
+
 ### 3. Execution-host EC2
 
 Install the base runtime plus Firecracker host assets:
@@ -176,6 +178,7 @@ Important current constraint:
 - `configure-firecracker-network.sh` still provisions a single static `tap0`, so keep `LECREV_EXECUTION_HOST_SLOTS=1` if you need `networkPolicy=full`.
 - the execution-host deployment now installs `lecrev-firecracker-network.service` so `tap0` is recreated after reboots before the node-agent starts.
 - Set `LECREV_PUBLIC_BASE_URL` on the control plane so created HTTP trigger URLs use the real external origin instead of the incoming request host header.
+- Set `LECREV_S3_BUCKET` on each execution host to the bucket mapped for that host's region in `LECREV_S3_REGION_BUCKETS`.
 
 For an operational runbook with start, stop, restart, verification, and function URL commands, see [RUNBOOK.md](RUNBOOK.md).
 

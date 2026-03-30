@@ -58,6 +58,8 @@ Important files:
 - env: `/etc/lecrev/build-worker.env`
 - binary: `/opt/lecrev/bin/lecrev`
 
+The build worker is also where real cross-region artifact replication is configured. `LECREV_S3_REGION_BUCKETS` should map each execution region to the bucket that will hold that region's bundle and startup objects.
+
 ## 4. Execution host layout
 
 Main services:
@@ -77,6 +79,8 @@ Important files:
   - `/var/lib/lecrev/rootfs.ext4`
   - `/var/lib/lecrev/runtime`
   - `/var/lib/lecrev/jailer`
+
+`/etc/lecrev/node-agent.env` should set `LECREV_S3_BUCKET` to the bucket assigned to `LECREV_NODE_AGENT_REGION` by the build worker's `LECREV_S3_REGION_BUCKETS` mapping.
 
 ## 5. Redeploy commands
 

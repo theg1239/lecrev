@@ -28,6 +28,7 @@ type Service struct {
 	objects artifact.Store
 	bus     BuildBus
 	warmer  WarmPreparer
+	replica ArtifactReplicator
 	now     func() time.Time
 
 	maxActiveBuildJobsPerProject int
@@ -35,6 +36,18 @@ type Service struct {
 
 type WarmPreparer interface {
 	PrepareFunctionVersion(ctx context.Context, version *domain.FunctionVersion) error
+}
+
+type ArtifactReplicator interface {
+	Replicate(ctx context.Context, req ArtifactReplicationRequest) (map[string]time.Time, error)
+}
+
+type ArtifactReplicationRequest struct {
+	BundleKey  string
+	Bundle     []byte
+	StartupKey string
+	Startup    []byte
+	Regions    []string
 }
 
 const (
@@ -66,6 +79,10 @@ func (s *Service) SetBuildBus(bus BuildBus) {
 
 func (s *Service) SetWarmPreparer(warmer WarmPreparer) {
 	s.warmer = warmer
+}
+
+func (s *Service) SetArtifactReplicator(replica ArtifactReplicator) {
+	s.replica = replica
 }
 
 func (s *Service) RunBuildConsumer(ctx context.Context, region, consumer string) error {
@@ -354,9 +371,26 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 		CreatedAt:  now,
 		Regions:    make(map[string]time.Time, len(req.Regions)),
 	}
-	for _, region := range req.Regions {
-		artifactMeta.Regions[region] = now
-		recorder.Printf("marked artifact available in region %s", region)
+	if s.replica != nil {
+		regions, err := s.replica.Replicate(ctx, ArtifactReplicationRequest{
+			BundleKey:  bundleKey,
+			Bundle:     bundle,
+			StartupKey: startupKey,
+			Startup:    startup,
+			Regions:    req.Regions,
+		})
+		if err != nil {
+			return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
+		}
+		artifactMeta.Regions = regions
+		for _, region := range req.Regions {
+			recorder.Printf("replicated artifact into region %s", region)
+		}
+	} else {
+		for _, region := range req.Regions {
+			artifactMeta.Regions[region] = now
+			recorder.Printf("marked artifact available in region %s", region)
+		}
 	}
 	if err := s.store.PutArtifact(ctx, artifactMeta); err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
