@@ -76,6 +76,8 @@ Platform semantics:
 
 If your markdown renderer supports Mermaid, the source diagram is in [PLANNING.md](PLANNING.md).
 
+For a clear step-by-step lifecycle walkthrough (deploy -> build -> invoke -> execution -> retries), see [FUNCTION_LIFECYCLE.md](FUNCTION_LIFECYCLE.md).
+
 ## Local Development
 
 Optional local dependencies:
