@@ -24,13 +24,14 @@ type RegionDispatcher interface {
 }
 
 type Service struct {
-	store        store.Store
-	dispatchers  map[string]RegionDispatcher
-	now          func() time.Time
-	pollInterval time.Duration
-	schedulingTimeout time.Duration
-	healthyWithin time.Duration
-	wakeCh       chan struct{}
+	store                            store.Store
+	dispatchers                      map[string]RegionDispatcher
+	now                              func() time.Time
+	pollInterval                     time.Duration
+	schedulingTimeout                time.Duration
+	healthyWithin                    time.Duration
+	wakeCh                           chan struct{}
+	maxActiveExecutionJobsPerProject int
 }
 
 type candidate struct {
@@ -49,13 +50,14 @@ func New(store store.Store, dispatchers []RegionDispatcher) *Service {
 		index[dispatcher.Region()] = dispatcher
 	}
 	return &Service{
-		store:         store,
-		dispatchers:   index,
-		now:           func() time.Time { return time.Now().UTC() },
-		pollInterval:  500 * time.Millisecond,
-		schedulingTimeout: 10 * time.Second,
-		healthyWithin: 15 * time.Second,
-		wakeCh:        make(chan struct{}, 1),
+		store:                            store,
+		dispatchers:                      index,
+		now:                              func() time.Time { return time.Now().UTC() },
+		pollInterval:                     500 * time.Millisecond,
+		schedulingTimeout:                10 * time.Second,
+		healthyWithin:                    15 * time.Second,
+		wakeCh:                           make(chan struct{}, 1),
+		maxActiveExecutionJobsPerProject: 50,
 	}
 }
 
@@ -107,6 +109,9 @@ func (s *Service) DispatchExecutionIdempotent(ctx context.Context, versionID str
 }
 
 func (s *Service) enqueueExecution(ctx context.Context, version *domain.FunctionVersion, payload []byte) (*domain.ExecutionJob, error) {
+	if err := s.enforceExecutionQuota(ctx, version.ProjectID); err != nil {
+		return nil, err
+	}
 	now := s.now()
 	job := &domain.ExecutionJob{
 		ID:                uuid.NewString(),
@@ -123,6 +128,26 @@ func (s *Service) enqueueExecution(ctx context.Context, version *domain.Function
 	}
 	s.wake()
 	return job, nil
+}
+
+func (s *Service) enforceExecutionQuota(ctx context.Context, projectID string) error {
+	if s.maxActiveExecutionJobsPerProject <= 0 {
+		return nil
+	}
+	count, err := s.store.CountExecutionJobsByProjectStates(ctx, projectID, []domain.JobState{
+		domain.JobStateQueued,
+		domain.JobStateScheduling,
+		domain.JobStateAssigned,
+		domain.JobStateRunning,
+		domain.JobStateRetrying,
+	})
+	if err != nil {
+		return err
+	}
+	if count >= s.maxActiveExecutionJobsPerProject {
+		return fmt.Errorf("%w: project %s already has %d active execution jobs (limit %d)", domain.ErrProjectExecutionQuota, projectID, count, s.maxActiveExecutionJobsPerProject)
+	}
+	return nil
 }
 
 func (s *Service) replayExecution(ctx context.Context, projectID, key, requestHash string) (*domain.ExecutionJob, error) {

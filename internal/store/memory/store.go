@@ -197,6 +197,29 @@ func (s *Store) GetBuildJob(_ context.Context, jobID string) (*domain.BuildJob, 
 	return &cp, nil
 }
 
+func (s *Store) CountBuildJobsByProjectStates(_ context.Context, projectID string, states []string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	allowed := make(map[string]struct{}, len(states))
+	for _, state := range states {
+		allowed[state] = struct{}{}
+	}
+
+	var count int
+	for _, job := range s.buildJobs {
+		if _, ok := allowed[job.State]; !ok {
+			continue
+		}
+		version, ok := s.functions[job.FunctionVersionID]
+		if !ok || version.ProjectID != projectID {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 func (s *Store) PutExecutionJob(_ context.Context, job *domain.ExecutionJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,6 +243,27 @@ func (s *Store) GetExecutionJob(_ context.Context, jobID string) (*domain.Execut
 	}
 	cp := cloneExecutionJob(job)
 	return &cp, nil
+}
+
+func (s *Store) CountExecutionJobsByProjectStates(_ context.Context, projectID string, states []domain.JobState) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	allowed := make(map[domain.JobState]struct{}, len(states))
+	for _, state := range states {
+		allowed[state] = struct{}{}
+	}
+
+	var count int
+	for _, job := range s.executionJobs {
+		if job.ProjectID != projectID {
+			continue
+		}
+		if _, ok := allowed[job.State]; ok {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *Store) ClaimNextExecutionJob(_ context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error) {

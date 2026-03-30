@@ -28,6 +28,8 @@ type Service struct {
 	objects artifact.Store
 	bus     BuildBus
 	now     func() time.Time
+
+	maxActiveBuildJobsPerProject int
 }
 
 const (
@@ -41,13 +43,15 @@ const (
 	maxRetries           = 5
 	maxEnvRefs           = 64
 	maxArtifactSizeBytes = 10 << 20
+	maxActiveBuildJobs   = 5
 )
 
 func New(store store.Store, objects artifact.Store) *Service {
 	return &Service{
-		store:   store,
-		objects: objects,
-		now:     func() time.Time { return time.Now().UTC() },
+		store:                        store,
+		objects:                      objects,
+		now:                          func() time.Time { return time.Now().UTC() },
+		maxActiveBuildJobsPerProject: maxActiveBuildJobs,
 	}
 }
 
@@ -126,6 +130,9 @@ func (s *Service) replayFunctionVersion(ctx context.Context, projectID, key, req
 func (s *Service) createFunctionVersion(ctx context.Context, req domain.DeployRequest) (*domain.FunctionVersion, error) {
 	req, err := normalizeDeployRequest(req)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceBuildQuota(ctx, req.ProjectID); err != nil {
 		return nil, err
 	}
 	version, buildJob, err := s.initializeBuild(ctx, req)
@@ -651,6 +658,20 @@ func (s *Service) archiveBuildLogs(ctx context.Context, buildJob *domain.BuildJo
 		return err
 	}
 	buildJob.LogsKey = key
+	return nil
+}
+
+func (s *Service) enforceBuildQuota(ctx context.Context, projectID string) error {
+	if s.maxActiveBuildJobsPerProject <= 0 {
+		return nil
+	}
+	count, err := s.store.CountBuildJobsByProjectStates(ctx, projectID, []string{"queued", "running"})
+	if err != nil {
+		return err
+	}
+	if count >= s.maxActiveBuildJobsPerProject {
+		return fmt.Errorf("%w: project %s already has %d active build jobs (limit %d)", domain.ErrProjectBuildQuota, projectID, count, s.maxActiveBuildJobsPerProject)
+	}
 	return nil
 }
 

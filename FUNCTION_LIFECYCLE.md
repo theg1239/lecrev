@@ -188,6 +188,8 @@ Current v1 implementation caps:
 - artifact size: `10 MiB`
 - execution logs: `1 MiB`
 - execution output payload: `1 MiB`
+- active build jobs per project: `5`
+- active execution jobs per project: `50`
 
 ## 13) Observability flow
 

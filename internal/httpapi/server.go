@@ -470,6 +470,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrAccessDenied):
 		status = http.StatusForbidden
+	case errors.Is(err, domain.ErrProjectBuildQuota), errors.Is(err, domain.ErrProjectExecutionQuota):
+		status = http.StatusTooManyRequests
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, domain.ErrFunctionVersionNotReady), errors.Is(err, domain.ErrBuildLogsNotReady), errors.Is(err, domain.ErrExecutionResultNotReady):

@@ -204,6 +204,8 @@ Current deploy admission caps in the implementation:
 - archived execution artifact size: up to `10 MiB`
 - execution logs: up to `1 MiB`
 - execution output payload: up to `1 MiB`
+- active build jobs per project: up to `5`
+- active execution jobs per project: up to `50`
 
 Poll the build job or function version until it becomes ready:
 

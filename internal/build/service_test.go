@@ -228,6 +228,59 @@ func TestCreateFunctionVersionRejectsIdempotencyKeyReuseWithDifferentPayload(t *
 	}
 }
 
+func TestCreateFunctionVersionEnforcesActiveBuildQuota(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	svc := New(meta, artifact.NewMemoryStore())
+	svc.maxActiveBuildJobsPerProject = 1
+
+	now := time.Now().UTC()
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-existing-build",
+		ProjectID:      "demo",
+		Name:           "existing",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		SourceType:     domain.SourceTypeBundle,
+		ArtifactDigest: "",
+		State:          domain.FunctionStateBuilding,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutBuildJob(context.Background(), &domain.BuildJob{
+		ID:                "build-existing",
+		FunctionVersionID: "fn-existing-build",
+		TargetRegion:      "ap-south-1",
+		State:             "queued",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatalf("put build job: %v", err)
+	}
+
+	_, err := svc.CreateFunctionVersion(context.Background(), domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "echo",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	})
+	if !errors.Is(err, domain.ErrProjectBuildQuota) {
+		t.Fatalf("expected build quota error, got %v", err)
+	}
+}
+
 func TestCreateFunctionVersionQueuesAsyncBuildAndMarksReady(t *testing.T) {
 	t.Parallel()
 

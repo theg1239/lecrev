@@ -330,6 +330,20 @@ func (s *Store) GetBuildJob(ctx context.Context, jobID string) (*domain.BuildJob
 	return &job, nil
 }
 
+func (s *Store) CountBuildJobsByProjectStates(ctx context.Context, projectID string, states []string) (int, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from build_jobs bj
+		join function_versions fv on fv.id = bj.function_version_id
+		where fv.project_id = $1
+		  and bj.state = any($2)
+	`, projectID, states).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error {
 	return s.upsertExecutionJob(ctx, job)
 }
@@ -396,6 +410,23 @@ func (s *Store) GetExecutionJob(ctx context.Context, jobID string) (*domain.Exec
 		job.Result = &result
 	}
 	return &job, nil
+}
+
+func (s *Store) CountExecutionJobsByProjectStates(ctx context.Context, projectID string, states []domain.JobState) (int, error) {
+	stateStrings := make([]string, 0, len(states))
+	for _, state := range states {
+		stateStrings = append(stateStrings, string(state))
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from execution_jobs
+		where project_id = $1
+		  and state = any($2)
+	`, projectID, stateStrings).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) ClaimNextExecutionJob(ctx context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error) {

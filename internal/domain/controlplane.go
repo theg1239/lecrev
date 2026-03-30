@@ -9,6 +9,8 @@ var (
 	ErrIdempotencyConflict     = errors.New("idempotency key reused with different request")
 	ErrIdempotencyInProgress   = errors.New("idempotent request already in progress")
 	ErrFunctionVersionNotReady = errors.New("function version not ready")
+	ErrProjectBuildQuota       = errors.New("project build quota exceeded")
+	ErrProjectExecutionQuota   = errors.New("project execution quota exceeded")
 	ErrBuildLogsNotReady       = errors.New("build logs not ready")
 	ErrExecutionResultNotReady = errors.New("execution result not ready")
 )

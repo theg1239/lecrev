@@ -53,6 +53,37 @@ func TestDispatchExecutionQueuesJob(t *testing.T) {
 	}
 }
 
+func TestDispatchExecutionEnforcesActiveExecutionQuota(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-quota", []string{"ap-south-1"})
+
+	svc := New(store, []RegionDispatcher{
+		&fakeDispatcher{region: "ap-south-1", stats: domain.RegionStats{AvailableHosts: 1, BlankWarm: 1}},
+	})
+	svc.maxActiveExecutionJobsPerProject = 1
+
+	now := time.Now().UTC()
+	if err := store.PutExecutionJob(context.Background(), &domain.ExecutionJob{
+		ID:                "job-existing",
+		FunctionVersionID: "fn-quota",
+		ProjectID:         "demo",
+		State:             domain.JobStateQueued,
+		Payload:           json.RawMessage(`{"existing":true}`),
+		MaxRetries:        1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatalf("put existing execution job: %v", err)
+	}
+
+	_, err := svc.DispatchExecution(context.Background(), "fn-quota", json.RawMessage(`{"msg":"hi"}`))
+	if !errors.Is(err, domain.ErrProjectExecutionQuota) {
+		t.Fatalf("expected execution quota error, got %v", err)
+	}
+}
+
 func TestScheduleNextPrefersWarmRegion(t *testing.T) {
 	t.Parallel()
 

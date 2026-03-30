@@ -514,6 +514,21 @@ func TestInfraEndpointsRequireAdminAPIKey(t *testing.T) {
 	}
 }
 
+func TestWriteServiceErrorMapsQuotaErrorsToTooManyRequests(t *testing.T) {
+	t.Parallel()
+
+	for _, err := range []error{
+		domain.ErrProjectBuildQuota,
+		domain.ErrProjectExecutionQuota,
+	} {
+		resp := httptest.NewRecorder()
+		writeServiceError(resp, err)
+		if resp.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected quota error %v to map to %d, got %d", err, http.StatusTooManyRequests, resp.Code)
+		}
+	}
+}
+
 func mustSeedAPIKey(t *testing.T, meta *memstore.Store, rawKey, tenantID string, disabled, isAdmin bool) {
 	t.Helper()
 	if err := meta.PutAPIKey(context.Background(), &domain.APIKey{
