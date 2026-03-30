@@ -271,3 +271,83 @@ func TestPrepareFunctionWarmSendsSnapshotPrepCommand(t *testing.T) {
 		t.Fatalf("expected one slot reserved for prep, got %d", host.AvailableSlots)
 	}
 }
+
+func TestReapStaleHostsMarksPersistedHostsDown(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	now := time.Now().UTC()
+	host := &domain.Host{
+		ID:             "host-ap-south-2-a",
+		Region:         "ap-south-2",
+		Driver:         "firecracker",
+		State:          domain.HostStateActive,
+		AvailableSlots: 1,
+		BlankWarm:      1,
+		FunctionWarm: map[string]int{
+			"fn-stale": 1,
+		},
+		LastHeartbeat: now.Add(-time.Minute),
+	}
+	if err := meta.PutHost(context.Background(), host); err != nil {
+		t.Fatalf("put host: %v", err)
+	}
+	if err := meta.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, []domain.WarmPool{
+		{
+			Region:    host.Region,
+			HostID:    host.ID,
+			BlankWarm: 1,
+			UpdatedAt: now.Add(-time.Minute),
+		},
+		{
+			Region:            host.Region,
+			HostID:            host.ID,
+			FunctionVersionID: "fn-stale",
+			FunctionWarm:      1,
+			UpdatedAt:         now.Add(-time.Minute),
+		},
+	}); err != nil {
+		t.Fatalf("replace warm pools: %v", err)
+	}
+
+	svc := New("ap-south-2", meta, nil)
+	svc.now = func() time.Time { return now }
+	svc.staleHostAfter = 15 * time.Second
+
+	if err := svc.reapStaleHosts(context.Background()); err != nil {
+		t.Fatalf("reap stale hosts: %v", err)
+	}
+
+	storedHost, err := meta.GetHost(context.Background(), host.ID)
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	if storedHost.State != domain.HostStateDown {
+		t.Fatalf("expected host state down, got %s", storedHost.State)
+	}
+	if storedHost.AvailableSlots != 0 {
+		t.Fatalf("expected zero available slots, got %d", storedHost.AvailableSlots)
+	}
+	if storedHost.BlankWarm != 0 || len(storedHost.FunctionWarm) != 0 {
+		t.Fatalf("expected warm inventory cleared, got blank=%d function=%v", storedHost.BlankWarm, storedHost.FunctionWarm)
+	}
+
+	pools, err := meta.ListWarmPoolsByRegion(context.Background(), host.Region)
+	if err != nil {
+		t.Fatalf("list warm pools: %v", err)
+	}
+	if len(pools) != 0 {
+		t.Fatalf("expected stale warm pools to be removed, got %d", len(pools))
+	}
+
+	region, err := meta.GetRegion(context.Background(), host.Region)
+	if err != nil {
+		t.Fatalf("get region: %v", err)
+	}
+	if region.State != "degraded" {
+		t.Fatalf("expected degraded region, got %s", region.State)
+	}
+	if region.AvailableHosts != 0 || region.BlankWarm != 0 || region.FunctionWarm != 0 {
+		t.Fatalf("expected empty degraded region stats, got %+v", region)
+	}
+}

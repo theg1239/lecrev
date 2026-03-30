@@ -28,6 +28,9 @@ type Service struct {
 	bus    dispatch.ExecutionBus
 	now    func() time.Time
 
+	staleHostAfter time.Duration
+	reapInterval   time.Duration
+
 	mu    sync.Mutex
 	hosts map[string]*hostSession
 }
@@ -48,11 +51,13 @@ type Retryer interface {
 
 func New(region string, store store.Store, retry Retryer) *Service {
 	return &Service{
-		region: region,
-		store:  store,
-		retry:  retry,
-		now:    func() time.Time { return time.Now().UTC() },
-		hosts:  make(map[string]*hostSession),
+		region:         region,
+		store:          store,
+		retry:          retry,
+		now:            func() time.Time { return time.Now().UTC() },
+		staleHostAfter: 20 * time.Second,
+		reapInterval:   5 * time.Second,
+		hosts:          make(map[string]*hostSession),
 	}
 }
 
@@ -99,6 +104,7 @@ func (s *Service) Listen(ctx context.Context, addr string, opts ...grpc.ServerOp
 		<-ctx.Done()
 		server.GracefulStop()
 	}()
+	go s.reapHostLoop(ctx)
 
 	return server.Serve(lis)
 }
@@ -609,11 +615,82 @@ func (s *Service) markHostDown(hostID string) {
 		return
 	}
 	session.host.State = domain.HostStateDown
+	session.host.AvailableSlots = 0
+	session.host.BlankWarm = 0
+	session.host.FunctionWarm = map[string]int{}
 	host := session.host
 	_ = s.store.UpdateHost(context.Background(), &host)
 	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, nil)
 	delete(s.hosts, hostID)
 	_ = s.persistRegionLocked()
+}
+
+func (s *Service) reapHostLoop(ctx context.Context) {
+	if s.staleHostAfter <= 0 || s.reapInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(s.reapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = s.reapStaleHosts(ctx)
+		}
+	}
+}
+
+func (s *Service) reapStaleHosts(ctx context.Context) error {
+	if s.staleHostAfter <= 0 {
+		return nil
+	}
+	cutoff := s.now().Add(-s.staleHostAfter)
+	hosts, err := s.store.ListHostsByRegion(ctx, s.region)
+	if err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if host.State == domain.HostStateDown {
+			continue
+		}
+		if host.LastHeartbeat.After(cutoff) {
+			continue
+		}
+		if err := s.markStoredHostDown(ctx, host, cutoff); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) markStoredHostDown(ctx context.Context, host domain.Host, cutoff time.Time) error {
+	s.mu.Lock()
+	if session, ok := s.hosts[host.ID]; ok {
+		if session.host.LastHeartbeat.After(cutoff) {
+			s.mu.Unlock()
+			return nil
+		}
+		session.host.State = domain.HostStateDown
+		session.host.AvailableSlots = 0
+		session.host.BlankWarm = 0
+		session.host.FunctionWarm = map[string]int{}
+		host = session.host
+		delete(s.hosts, host.ID)
+	} else {
+		host.State = domain.HostStateDown
+		host.AvailableSlots = 0
+		host.BlankWarm = 0
+		host.FunctionWarm = map[string]int{}
+	}
+	s.mu.Unlock()
+	if err := s.store.UpdateHost(ctx, &host); err != nil {
+		return err
+	}
+	if err := s.store.ReplaceWarmPoolsForHost(ctx, host.Region, host.ID, nil); err != nil {
+		return err
+	}
+	return s.persistRegion()
 }
 
 func warmMap(metrics []*regionv1.WarmPoolMetric) map[string]int {
@@ -725,9 +802,13 @@ func (s *Service) persistRegion() error {
 func (s *Service) persistRegionLocked() error {
 	stats := domain.RegionStats{}
 	lastHeartbeat := time.Time{}
+	connectedActiveHosts := 0
 	for _, session := range s.hosts {
 		if session.host.Region != s.region {
 			continue
+		}
+		if session.host.State == domain.HostStateActive {
+			connectedActiveHosts++
 		}
 		if session.host.State == domain.HostStateActive && session.host.AvailableSlots > 0 {
 			stats.AvailableHosts++
@@ -745,12 +826,19 @@ func (s *Service) persistRegionLocked() error {
 	if lastHeartbeat.IsZero() {
 		lastHeartbeat = s.now()
 	}
+	state := "active"
+	lastError := ""
+	if connectedActiveHosts == 0 {
+		state = "degraded"
+		lastError = "no active hosts connected"
+	}
 	return s.store.PutRegion(context.Background(), &domain.Region{
 		Name:            s.region,
-		State:           "active",
+		State:           state,
 		AvailableHosts:  stats.AvailableHosts,
 		BlankWarm:       stats.BlankWarm,
 		FunctionWarm:    stats.FunctionWarm,
 		LastHeartbeatAt: lastHeartbeat,
+		LastError:       lastError,
 	})
 }
