@@ -111,6 +111,24 @@ export LECREV_POSTGRES_DSN='postgres://lecrev:lecrev@localhost:5432/lecrev?sslmo
 go run ./cmd/lecrev devstack
 ```
 
+To run the split production-shaped topology instead of the one-box `devstack`:
+
+```bash
+# control-plane host
+export LECREV_API_ADDR=':8080'
+export LECREV_COORDINATOR_BIND_HOST='0.0.0.0'
+go run ./cmd/lecrev control-plane
+
+# execution host
+export LECREV_NODE_AGENT_REGION='ap-south-1'
+export LECREV_NODE_AGENT_HOST_ID='host-ap-south-1-a'
+export LECREV_COORDINATOR_ADDR='10.0.0.10:9091'
+export LECREV_CONTROL_PLANE_BASE_URL='http://10.0.0.10:8080'
+go run ./cmd/lecrev node-agent
+```
+
+In the split deployment, the execution host no longer needs direct Postgres access. The coordinator now sends a self-contained execution assignment that includes the artifact bundle key and runtime sizing data, and the node-agent pulls bundles from object storage plus scoped secrets from the control-plane secrets proxy.
+
 Optional local infrastructure adapters:
 
 ```bash
@@ -135,13 +153,14 @@ export LECREV_EXECUTION_DRIVER='firecracker'
 export LECREV_EXECUTION_HOST_SLOTS='1'
 export LECREV_FIRECRACKER_BINARY='/usr/local/bin/firecracker'
 export LECREV_JAILER_BINARY='/usr/local/bin/jailer'
-export LECREV_FIRECRACKER_USE_JAILER='false'
+export LECREV_FIRECRACKER_USE_JAILER='true'
+export LECREV_FIRECRACKER_JAILER_USER='lecrev'
 export LECREV_FIRECRACKER_KERNEL_IMAGE='/var/lib/lecrev/vmlinux'
 export LECREV_FIRECRACKER_ROOTFS='/var/lib/lecrev/rootfs.ext4'
 export LECREV_FIRECRACKER_WORKSPACE_DIR='/var/lib/lecrev/runtime'
 export LECREV_FIRECRACKER_SNAPSHOT_DIR='/var/lib/lecrev/runtime/snapshots'
 export LECREV_FIRECRACKER_GUEST_INIT='/usr/local/bin/lecrev-guest-runner'
-go run ./cmd/lecrev devstack
+go run ./cmd/lecrev node-agent
 ```
 
 On EC2, use the deployment helpers instead of hand-building the guest image:

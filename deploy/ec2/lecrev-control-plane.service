@@ -1,0 +1,19 @@
+[Unit]
+Description=Lecrev Control Plane
+After=network-online.target postgresql.service nats-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lecrev
+Group=lecrev
+WorkingDirectory=/opt/lecrev
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/lecrev/control-plane.env
+ExecStart=/opt/lecrev/bin/lecrev control-plane
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

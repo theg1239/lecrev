@@ -1,0 +1,19 @@
+[Unit]
+Description=Lecrev Execution Host Node Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/lecrev
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/lecrev/node-agent.env
+ExecStart=/opt/lecrev/bin/lecrev node-agent
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
