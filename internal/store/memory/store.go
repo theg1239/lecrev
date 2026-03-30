@@ -222,6 +222,38 @@ func (s *Store) GetExecutionJob(_ context.Context, jobID string) (*domain.Execut
 	return &cp, nil
 }
 
+func (s *Store) ClaimNextExecutionJob(_ context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	allowed := make(map[domain.JobState]struct{}, len(fromStates))
+	for _, state := range fromStates {
+		allowed[state] = struct{}{}
+	}
+
+	var chosen *domain.ExecutionJob
+	for _, job := range s.executionJobs {
+		if _, ok := allowed[job.State]; !ok {
+			continue
+		}
+		candidate := cloneExecutionJob(job)
+		if chosen == nil ||
+			candidate.UpdatedAt.Before(chosen.UpdatedAt) ||
+			(candidate.UpdatedAt.Equal(chosen.UpdatedAt) && candidate.CreatedAt.Before(chosen.CreatedAt)) ||
+			(candidate.UpdatedAt.Equal(chosen.UpdatedAt) && candidate.CreatedAt.Equal(chosen.CreatedAt) && candidate.ID < chosen.ID) {
+			chosen = &candidate
+		}
+	}
+	if chosen == nil {
+		return nil, store.ErrNotFound
+	}
+
+	chosen.State = toState
+	chosen.UpdatedAt = now
+	s.executionJobs[chosen.ID] = cloneExecutionJob(*chosen)
+	return chosen, nil
+}
+
 func (s *Store) PutAttempt(_ context.Context, attempt *domain.Attempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

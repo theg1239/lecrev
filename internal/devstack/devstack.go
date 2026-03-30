@@ -240,6 +240,7 @@ func runNetworked(ctx context.Context, cfg Config) error {
 		})
 	}
 	run("lease-recovery", func() error { return leaseRecovery.Run(ctx) })
+	run("global-scheduler", func() error { return schedulerService.Run(ctx) })
 	run("http-api", func() error { return httpServer.ListenAndServe() })
 
 	slog.Info("devstack started", "api", cfg.APIAddr, "regions", cfg.ExecutionRegions)

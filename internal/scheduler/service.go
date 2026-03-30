@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,8 @@ type Service struct {
 	store       store.Store
 	dispatchers map[string]RegionDispatcher
 	now         func() time.Time
+	pollInterval time.Duration
+	wakeCh      chan struct{}
 }
 
 type candidate struct {
@@ -43,6 +46,8 @@ func New(store store.Store, dispatchers []RegionDispatcher) *Service {
 		store:       store,
 		dispatchers: index,
 		now:         func() time.Time { return time.Now().UTC() },
+		pollInterval: 500 * time.Millisecond,
+		wakeCh:      make(chan struct{}, 1),
 	}
 }
 
@@ -77,7 +82,7 @@ func (s *Service) DispatchExecutionIdempotent(ctx context.Context, versionID str
 			}
 			return nil, err
 		}
-		job, err := s.dispatchExecution(ctx, version, payload)
+		job, err := s.enqueueExecution(ctx, version, payload)
 		if err != nil {
 			_ = s.store.DeleteIdempotencyRecord(ctx, record.Scope, record.ProjectID, record.Key)
 			return nil, err
@@ -90,10 +95,10 @@ func (s *Service) DispatchExecutionIdempotent(ctx context.Context, versionID str
 		}
 		return job, nil
 	}
-	return s.dispatchExecution(ctx, version, payload)
+	return s.enqueueExecution(ctx, version, payload)
 }
 
-func (s *Service) dispatchExecution(ctx context.Context, version *domain.FunctionVersion, payload []byte) (*domain.ExecutionJob, error) {
+func (s *Service) enqueueExecution(ctx context.Context, version *domain.FunctionVersion, payload []byte) (*domain.ExecutionJob, error) {
 	now := s.now()
 	job := &domain.ExecutionJob{
 		ID:                uuid.NewString(),
@@ -108,9 +113,7 @@ func (s *Service) dispatchExecution(ctx context.Context, version *domain.Functio
 	if err := s.store.PutExecutionJob(ctx, job); err != nil {
 		return nil, err
 	}
-	if err := s.dispatchJobAttempt(ctx, version, job); err != nil {
-		return nil, err
-	}
+	s.wake()
 	return job, nil
 }
 
@@ -133,23 +136,99 @@ func (s *Service) RetryExecution(ctx context.Context, jobID string) (*domain.Exe
 	if err != nil {
 		return nil, err
 	}
-	version, err := s.store.GetFunctionVersion(ctx, job.FunctionVersionID)
-	if err != nil {
-		return nil, err
-	}
 	if job.AttemptCount > job.MaxRetries {
 		return nil, fmt.Errorf("job %s exceeded retry budget", job.ID)
 	}
-	if err := s.dispatchJobAttempt(ctx, version, job); err != nil {
+	job.State = domain.JobStateRetrying
+	job.Error = ""
+	job.TargetRegion = ""
+	job.UpdatedAt = s.now()
+	if err := s.store.UpdateExecutionJob(ctx, job); err != nil {
 		return nil, err
 	}
+	s.wake()
 	return job, nil
+}
+
+func (s *Service) Run(ctx context.Context) error {
+	ticker := time.NewTicker(s.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		if err := s.schedulePending(ctx); err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, context.Canceled) {
+			slog.Error("scheduler loop failed", "err", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		case <-s.wakeCh:
+		}
+	}
+}
+
+func (s *Service) schedulePending(ctx context.Context) error {
+	for {
+		dispatched, err := s.scheduleNext(ctx)
+		if err != nil {
+			return err
+		}
+		if !dispatched {
+			return nil
+		}
+	}
+}
+
+func (s *Service) scheduleNext(ctx context.Context) (bool, error) {
+	job, err := s.store.ClaimNextExecutionJob(ctx,
+		[]domain.JobState{domain.JobStateQueued, domain.JobStateRetrying},
+		domain.JobStateScheduling,
+		s.now(),
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if job.AttemptCount > job.MaxRetries {
+		job.State = domain.JobStateFailed
+		job.Error = fmt.Sprintf("job %s exceeded retry budget", job.ID)
+		job.UpdatedAt = s.now()
+		if err := s.store.UpdateExecutionJob(ctx, job); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	version, err := s.store.GetFunctionVersion(ctx, job.FunctionVersionID)
+	if err != nil {
+		job.State = domain.JobStateFailed
+		job.Error = err.Error()
+		job.UpdatedAt = s.now()
+		if updateErr := s.store.UpdateExecutionJob(ctx, job); updateErr != nil {
+			return false, updateErr
+		}
+		return true, nil
+	}
+
+	if err := s.dispatchJobAttempt(ctx, version, job); err != nil {
+		return true, nil
+	}
+	return true, nil
 }
 
 func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.FunctionVersion, job *domain.ExecutionJob) error {
 	now := s.now()
 	candidates, err := s.rankDispatchers(version)
 	if err != nil {
+		job.State = domain.JobStateQueued
+		job.TargetRegion = ""
+		job.Error = err.Error()
+		job.UpdatedAt = now
+		_ = s.store.UpdateExecutionJob(ctx, job)
 		return err
 	}
 
@@ -204,6 +283,7 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 	}
 
 	job.State = domain.JobStateQueued
+	job.TargetRegion = ""
 	job.Error = strings.Join(dispatchErrors, "; ")
 	job.UpdatedAt = s.now()
 	_ = s.store.UpdateExecutionJob(ctx, job)
@@ -255,4 +335,11 @@ func invokeRequestHash(versionID string, payload []byte) (string, error) {
 		VersionID: versionID,
 		Payload:   idempotency.NormalizeJSON(payload),
 	})
+}
+
+func (s *Service) wake() {
+	select {
+	case s.wakeCh <- struct{}{}:
+	default:
+	}
 }

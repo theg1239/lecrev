@@ -26,6 +26,7 @@ type Store interface {
 	PutExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	UpdateExecutionJob(ctx context.Context, job *domain.ExecutionJob) error
 	GetExecutionJob(ctx context.Context, jobID string) (*domain.ExecutionJob, error)
+	ClaimNextExecutionJob(ctx context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error)
 	PutAttempt(ctx context.Context, attempt *domain.Attempt) error
 	UpdateAttempt(ctx context.Context, attempt *domain.Attempt) error
 	GetAttempt(ctx context.Context, attemptID string) (*domain.Attempt, error)

@@ -100,6 +100,12 @@ func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 	if err := json.Unmarshal(invokeResp1.Body.Bytes(), &firstJob); err != nil {
 		t.Fatalf("decode first job: %v", err)
 	}
+	if firstJob.State != domain.JobStateQueued {
+		t.Fatalf("expected queued webhook job, got %s", firstJob.State)
+	}
+	if firstJob.TargetRegion != "" {
+		t.Fatalf("expected no target region before scheduling, got %s", firstJob.TargetRegion)
+	}
 
 	invokeReq2 := httptest.NewRequest(http.MethodPost, "/v1/triggers/webhook/"+trigger.Token, bytes.NewReader(invokeBody))
 	invokeReq2.Header.Set("Content-Type", "application/json")

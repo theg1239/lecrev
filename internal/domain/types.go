@@ -31,12 +31,13 @@ const (
 type JobState string
 
 const (
-	JobStateQueued    JobState = "queued"
-	JobStateAssigned  JobState = "assigned"
-	JobStateRunning   JobState = "running"
-	JobStateRetrying  JobState = "retrying"
-	JobStateSucceeded JobState = "succeeded"
-	JobStateFailed    JobState = "failed"
+	JobStateQueued     JobState = "queued"
+	JobStateScheduling JobState = "scheduling"
+	JobStateAssigned   JobState = "assigned"
+	JobStateRunning    JobState = "running"
+	JobStateRetrying   JobState = "retrying"
+	JobStateSucceeded  JobState = "succeeded"
+	JobStateFailed     JobState = "failed"
 )
 
 type AttemptState string

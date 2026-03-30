@@ -396,6 +396,54 @@ func (s *Store) GetExecutionJob(ctx context.Context, jobID string) (*domain.Exec
 	return &job, nil
 }
 
+func (s *Store) ClaimNextExecutionJob(ctx context.Context, fromStates []domain.JobState, toState domain.JobState, now time.Time) (*domain.ExecutionJob, error) {
+	states := make([]string, 0, len(fromStates))
+	for _, state := range fromStates {
+		states = append(states, string(state))
+	}
+
+	var job domain.ExecutionJob
+	var rawPayload []byte
+	var rawResult []byte
+	var state string
+	err := s.pool.QueryRow(ctx, `
+		with next_job as (
+			select id
+			from execution_jobs
+			where state = any($1)
+			order by updated_at asc, created_at asc, id asc
+			for update skip locked
+			limit 1
+		)
+		update execution_jobs j
+		set state = $2,
+		    updated_at = $3
+		from next_job
+		where j.id = next_job.id
+		returning id, function_version_id, project_id, coalesce(target_region, ''), state, payload,
+		          max_retries, attempt_count, coalesce(last_attempt_id, ''), coalesce(error, ''), result,
+		          created_at, updated_at
+	`, states, string(toState), now).Scan(
+		&job.ID, &job.FunctionVersionID, &job.ProjectID, &job.TargetRegion, &state, &rawPayload,
+		&job.MaxRetries, &job.AttemptCount, &job.LastAttemptID, &job.Error, &rawResult,
+		&job.CreatedAt, &job.UpdatedAt,
+	)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+
+	job.State = domain.JobState(state)
+	job.Payload = append([]byte(nil), rawPayload...)
+	if len(rawResult) > 0 && string(rawResult) != "null" {
+		var result domain.JobResult
+		if err := json.Unmarshal(rawResult, &result); err != nil {
+			return nil, err
+		}
+		job.Result = &result
+	}
+	return &job, nil
+}
+
 func (s *Store) PutAttempt(ctx context.Context, attempt *domain.Attempt) error {
 	return s.upsertAttempt(ctx, attempt)
 }
