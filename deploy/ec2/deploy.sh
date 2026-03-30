@@ -31,7 +31,7 @@ mkdir -p "${TMP_DIR}/frontend-dist"
 cp -R "${FRONTEND_DIR}/dist/." "${TMP_DIR}/frontend-dist/"
 
 ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no ec2-user@"${HOST}" "rm -rf '${REMOTE_TMP}' && mkdir -p '${REMOTE_TMP}'"
-scp -i "${KEY_PATH}" -o StrictHostKeyChecking=no -r "${TMP_DIR}/." ec2-user@"${HOST}":"${REMOTE_TMP}/"
+tar -C "${TMP_DIR}" -cf - . | ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no ec2-user@"${HOST}" "tar -C '${REMOTE_TMP}' -xf -"
 
 ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no ec2-user@"${HOST}" "\
   test -f /etc/lecrev/lecrev.env && \
