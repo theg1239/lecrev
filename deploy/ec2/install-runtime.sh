@@ -20,8 +20,19 @@ fi
 install -d -o "${APP_USER}" -g "${APP_USER}" -m 0755 /opt/lecrev/bin /opt/lecrev/releases /var/lib/lecrev /var/lib/nats
 chown -R "${APP_USER}:${APP_USER}" /opt/lecrev /var/lib/lecrev /var/lib/nats
 
+install_node_from_dnf() {
+  dnf install -y nodejs22 nodejs22-npm
+  ln -sfn /usr/bin/node /usr/local/bin/node
+  if [[ -x /usr/bin/npm ]]; then
+    ln -sfn /usr/bin/npm /usr/local/bin/npm
+  fi
+  if [[ -x /usr/bin/npx ]]; then
+    ln -sfn /usr/bin/npx /usr/local/bin/npx
+  fi
+}
+
 if [[ ! -x /usr/local/bin/node ]]; then
-  node_shasums="$(curl -fsSL "${NODE_BASE_URL}/SHASUMS256.txt")"
+  node_shasums="$(curl -fsSL "${NODE_BASE_URL}/SHASUMS256.txt" || true)"
   node_tarball="$(python3 -c 'import re,sys
 for line in sys.stdin.read().splitlines():
     if re.search(r"linux-x64\\.tar\\.xz$", line):
@@ -31,20 +42,27 @@ for line in sys.stdin.read().splitlines():
             break
 ' <<<"${node_shasums}")"
   if [[ -z "${node_tarball}" ]]; then
-    echo "failed to discover a Node.js v22 Linux tarball from ${NODE_BASE_URL}" >&2
-    exit 1
+    echo "falling back to distro Node.js 22 packages" >&2
+    install_node_from_dnf
+  else
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "${tmpdir}"' EXIT
+    if curl -fsSL "${NODE_BASE_URL}/${node_tarball}" -o "${tmpdir}/node.tar.xz"; then
+      tar -xJf "${tmpdir}/node.tar.xz" -C /opt
+      node_dir="/opt/${node_tarball%.tar.xz}"
+      ln -sfn "${node_dir}" /opt/node22
+      ln -sfn /opt/node22/bin/node /usr/local/bin/node
+      ln -sfn /opt/node22/bin/npm /usr/local/bin/npm
+      ln -sfn /opt/node22/bin/npx /usr/local/bin/npx
+      trap - EXIT
+      rm -rf "${tmpdir}"
+    else
+      echo "failed to download ${NODE_BASE_URL}/${node_tarball}; falling back to distro Node.js 22 packages" >&2
+      trap - EXIT
+      rm -rf "${tmpdir}"
+      install_node_from_dnf
+    fi
   fi
-  tmpdir="$(mktemp -d)"
-  trap 'rm -rf "${tmpdir}"' EXIT
-  curl -fsSL "${NODE_BASE_URL}/${node_tarball}" -o "${tmpdir}/node.tar.xz"
-  tar -xJf "${tmpdir}/node.tar.xz" -C /opt
-  node_dir="/opt/${node_tarball%.tar.xz}"
-  ln -sfn "${node_dir}" /opt/node22
-  ln -sfn /opt/node22/bin/node /usr/local/bin/node
-  ln -sfn /opt/node22/bin/npm /usr/local/bin/npm
-  ln -sfn /opt/node22/bin/npx /usr/local/bin/npx
-  trap - EXIT
-  rm -rf "${tmpdir}"
 fi
 
 if [[ ! -x /usr/local/bin/nats-server ]]; then

@@ -37,6 +37,9 @@ tar -C "${TMP_DIR}" -cf - . | ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no e
 
 ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no ec2-user@"${HOST}" "\
   test -f /etc/lecrev/control-plane.env && \
+  sudo chown root:lecrev /etc/lecrev/control-plane.env && \
+  sudo chmod 0640 /etc/lecrev/control-plane.env && \
+  sudo bash -lc 'shopt -s nullglob; for cert in /etc/lecrev/grpc/*.pem; do chown root:lecrev \"\$cert\"; chmod 0640 \"\$cert\"; done' && \
   sudo install -o lecrev -g lecrev -m 0755 '${REMOTE_TMP}/lecrev' /opt/lecrev/bin/lecrev && \
   sudo install -m 0644 '${REMOTE_TMP}/lecrev-control-plane.service' /etc/systemd/system/lecrev-control-plane.service && \
   sudo install -m 0644 '${REMOTE_TMP}/nats-server.service' /etc/systemd/system/nats-server.service && \

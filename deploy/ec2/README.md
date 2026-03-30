@@ -37,14 +37,15 @@ Install the control-plane env file and gRPC certs:
 ```bash
 scp -i /path/to/key.pem deploy/ec2/control-plane.env.example ec2-user@<control-plane-host>:/tmp/control-plane.env
 ssh -i /path/to/key.pem ec2-user@<control-plane-host> \
-  'sudo mkdir -p /etc/lecrev/grpc && sudo mv /tmp/control-plane.env /etc/lecrev/control-plane.env'
+  'sudo install -o root -g lecrev -m 0640 /tmp/control-plane.env /etc/lecrev/control-plane.env && \
+   sudo mkdir -p /etc/lecrev/grpc'
 scp -i /path/to/key.pem /tmp/lecrev-grpc-certs/ca.pem ec2-user@<control-plane-host>:/tmp/
 scp -i /path/to/key.pem /tmp/lecrev-grpc-certs/server.pem ec2-user@<control-plane-host>:/tmp/
 scp -i /path/to/key.pem /tmp/lecrev-grpc-certs/server-key.pem ec2-user@<control-plane-host>:/tmp/
 ssh -i /path/to/key.pem ec2-user@<control-plane-host> \
-  'sudo install -m 0600 /tmp/ca.pem /etc/lecrev/grpc/ca.pem && \
-   sudo install -m 0600 /tmp/server.pem /etc/lecrev/grpc/server.pem && \
-   sudo install -m 0600 /tmp/server-key.pem /etc/lecrev/grpc/server-key.pem'
+  'sudo install -o root -g lecrev -m 0640 /tmp/ca.pem /etc/lecrev/grpc/ca.pem && \
+   sudo install -o root -g lecrev -m 0640 /tmp/server.pem /etc/lecrev/grpc/server.pem && \
+   sudo install -o root -g lecrev -m 0640 /tmp/server-key.pem /etc/lecrev/grpc/server-key.pem'
 ```
 
 Deploy the control plane and frontend:
@@ -80,7 +81,7 @@ Install the node-agent env file and gRPC client certs:
 ```bash
 scp -i /path/to/key.pem deploy/ec2/node-agent.env.example ec2-user@<execution-host>:/tmp/node-agent.env
 ssh -i /path/to/key.pem ec2-user@<execution-host> \
-  'sudo mkdir -p /etc/lecrev/grpc && sudo mv /tmp/node-agent.env /etc/lecrev/node-agent.env'
+  'sudo mkdir -p /etc/lecrev/grpc && sudo install -o root -g root -m 0640 /tmp/node-agent.env /etc/lecrev/node-agent.env'
 scp -i /path/to/key.pem /tmp/lecrev-grpc-certs/ca.pem ec2-user@<execution-host>:/tmp/
 scp -i /path/to/key.pem /tmp/lecrev-grpc-certs/client.pem ec2-user@<execution-host>:/tmp/
 scp -i /path/to/key.pem /tmp/lecrev-grpc-certs/client-key.pem ec2-user@<execution-host>:/tmp/
@@ -89,6 +90,8 @@ ssh -i /path/to/key.pem ec2-user@<execution-host> \
    sudo install -m 0600 /tmp/client.pem /etc/lecrev/grpc/client.pem && \
    sudo install -m 0600 /tmp/client-key.pem /etc/lecrev/grpc/client-key.pem'
 ```
+
+`install-runtime.sh` prefers the official Node.js v22 tarball, but it now falls back to `dnf install nodejs22 nodejs22-npm` on Amazon Linux if the tarball metadata or download step fails.
 
 Deploy the execution host:
 
