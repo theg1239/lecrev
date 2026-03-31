@@ -1,0 +1,160 @@
+{
+  "timestamp": "2026-03-31T02:02:57.599Z",
+  "iterations": 20,
+  "concurrency": 1,
+  "publishedReferencePath": "/tmp/cf-vs-vercel-bench/results/results-2025-10-12T23-31-26-819Z.json",
+  "publishedReference": {
+    "timestamp": "2025-10-12T23:31:26.819Z",
+    "iterations": 100,
+    "concurrency": 10,
+    "tests": [
+      {
+        "name": "next-js",
+        "results": {
+          "cloudflare": {
+            "min": 616.469,
+            "max": 1909.527,
+            "mean": 1014.875
+          },
+          "vercel": {
+            "min": 400.952,
+            "max": 735.73,
+            "mean": 493.051
+          }
+        }
+      },
+      {
+        "name": "react-ssr-bench",
+        "results": {
+          "cloudflare": {
+            "min": 84.812,
+            "max": 360.397,
+            "mean": 157.739
+          },
+          "vercel": {
+            "min": 65.157,
+            "max": 316.628,
+            "mean": 107.318
+          }
+        }
+      },
+      {
+        "name": "sveltekit",
+        "results": {
+          "cloudflare": {
+            "min": 55.766,
+            "max": 271.226,
+            "mean": 101.271
+          },
+          "vercel": {
+            "min": 117.554,
+            "max": 227.542,
+            "mean": 145.988
+          }
+        }
+      },
+      {
+        "name": "realistic-math-bench",
+        "results": {
+          "cloudflare": {
+            "min": 398.8,
+            "max": 1164.381,
+            "mean": 672.981
+          },
+          "vercel": {
+            "min": 639.249,
+            "max": 779.24,
+            "mean": 666.752
+          }
+        }
+      },
+      {
+        "name": "vanilla-slower",
+        "results": {
+          "cloudflare": {
+            "min": 87.711,
+            "max": 396.803,
+            "mean": 155.746
+          },
+          "vercel": {
+            "min": 132.547,
+            "max": 305.645,
+            "mean": 163.522
+          }
+        }
+      }
+    ]
+  },
+  "tests": [
+    {
+      "name": "public-http-demo",
+      "url": "https://functions.lecrev.everything-assistant.com/f/8217a33d532adfa60408decf68e15b14",
+      "redactedURL": "https://functions.lecrev.everything-assistant.com/f/<token>",
+      "results": {
+        "successful": 20,
+        "failed": 0,
+        "failureRate": 0,
+        "statusCodes": {
+          "201": 20
+        },
+        "errors": {},
+        "wallClock": {
+          "min": 531.98,
+          "max": 1307.854,
+          "mean": 661.283,
+          "variability": 775.874,
+          "p50": 608.057,
+          "p95": 708.427
+        },
+        "platformLatency": {
+          "min": 481,
+          "max": 539,
+          "mean": 512.45,
+          "variability": 58,
+          "p50": 514,
+          "p95": 539
+        },
+        "contentLength": {
+          "min": 78,
+          "max": 78,
+          "mean": 78
+        }
+      }
+    },
+    {
+      "name": "lecrev-demo-function",
+      "url": "https://functions.lecrev.everything-assistant.com/f/5bbd1f1f5a3c02023ebe1707e78dfc92",
+      "redactedURL": "https://functions.lecrev.everything-assistant.com/f/<token>",
+      "results": {
+        "successful": 20,
+        "failed": 0,
+        "failureRate": 0,
+        "statusCodes": {
+          "200": 20
+        },
+        "errors": {},
+        "wallClock": {
+          "min": 607.004,
+          "max": 709.575,
+          "mean": 634.072,
+          "variability": 102.571,
+          "p50": 632.517,
+          "p95": 707.924
+        },
+        "platformLatency": {
+          "min": 535,
+          "max": 604,
+          "mean": 559.1,
+          "variability": 69,
+          "p50": 559,
+          "p95": 580
+        },
+        "contentLength": {
+          "min": 1082,
+          "max": 1082,
+          "mean": 1082
+        }
+      }
+    }
+  ]
+}
