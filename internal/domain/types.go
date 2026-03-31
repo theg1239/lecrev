@@ -85,18 +85,19 @@ type DeploySource struct {
 }
 
 type DeployRequest struct {
-	ProjectID      string        `json:"projectId"`
-	Name           string        `json:"name"`
-	Runtime        string        `json:"runtime"`
-	Entrypoint     string        `json:"entrypoint"`
-	MemoryMB       int           `json:"memoryMb"`
-	TimeoutSec     int           `json:"timeoutSec"`
-	NetworkPolicy  NetworkPolicy `json:"networkPolicy"`
-	Regions        []string      `json:"regions"`
-	EnvRefs        []string      `json:"envRefs"`
-	MaxRetries     int           `json:"maxRetries"`
-	IdempotencyKey string        `json:"idempotencyKey"`
-	Source         DeploySource  `json:"source"`
+	ProjectID      string            `json:"projectId"`
+	Name           string            `json:"name"`
+	Runtime        string            `json:"runtime"`
+	Entrypoint     string            `json:"entrypoint"`
+	MemoryMB       int               `json:"memoryMb"`
+	TimeoutSec     int               `json:"timeoutSec"`
+	NetworkPolicy  NetworkPolicy     `json:"networkPolicy"`
+	Regions        []string          `json:"regions"`
+	EnvVars        map[string]string `json:"envVars,omitempty"`
+	EnvRefs        []string          `json:"envRefs"`
+	MaxRetries     int               `json:"maxRetries"`
+	IdempotencyKey string            `json:"idempotencyKey"`
+	Source         DeploySource      `json:"source"`
 }
 
 type Artifact struct {
@@ -109,22 +110,23 @@ type Artifact struct {
 }
 
 type FunctionVersion struct {
-	ID             string        `json:"id"`
-	ProjectID      string        `json:"projectId"`
-	Name           string        `json:"name"`
-	Runtime        string        `json:"runtime"`
-	Entrypoint     string        `json:"entrypoint"`
-	MemoryMB       int           `json:"memoryMb"`
-	TimeoutSec     int           `json:"timeoutSec"`
-	NetworkPolicy  NetworkPolicy `json:"networkPolicy"`
-	Regions        []string      `json:"regions"`
-	EnvRefs        []string      `json:"envRefs"`
-	MaxRetries     int           `json:"maxRetries"`
-	BuildJobID     string        `json:"buildJobId,omitempty"`
-	SourceType     SourceType    `json:"sourceType"`
-	ArtifactDigest string        `json:"artifactDigest"`
-	State          FunctionState `json:"state"`
-	CreatedAt      time.Time     `json:"createdAt"`
+	ID             string            `json:"id"`
+	ProjectID      string            `json:"projectId"`
+	Name           string            `json:"name"`
+	Runtime        string            `json:"runtime"`
+	Entrypoint     string            `json:"entrypoint"`
+	MemoryMB       int               `json:"memoryMb"`
+	TimeoutSec     int               `json:"timeoutSec"`
+	NetworkPolicy  NetworkPolicy     `json:"networkPolicy"`
+	Regions        []string          `json:"regions"`
+	EnvVars        map[string]string `json:"envVars,omitempty"`
+	EnvRefs        []string          `json:"envRefs"`
+	MaxRetries     int               `json:"maxRetries"`
+	BuildJobID     string            `json:"buildJobId,omitempty"`
+	SourceType     SourceType        `json:"sourceType"`
+	ArtifactDigest string            `json:"artifactDigest"`
+	State          FunctionState     `json:"state"`
+	CreatedAt      time.Time         `json:"createdAt"`
 }
 
 type BuildJob struct {
@@ -162,6 +164,14 @@ type DirectExecutionResult struct {
 	Result     *JobResult `json:"result,omitempty"`
 	FinishedAt time.Time  `json:"finishedAt,omitempty"`
 	StartedAt  time.Time  `json:"startedAt,omitempty"`
+}
+
+type WebsiteManifest struct {
+	Framework         string    `json:"framework"`
+	FunctionVersionID string    `json:"functionVersionId"`
+	StaticPrefix      string    `json:"staticPrefix"`
+	DynamicEntrypoint string    `json:"dynamicEntrypoint"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 type ExecutionJob struct {
@@ -258,6 +268,7 @@ type Assignment struct {
 	ArtifactDigest    string
 	ArtifactBundleKey string
 	Entrypoint        string
+	EnvVars           map[string]string
 	EnvRefs           []string
 	Payload           json.RawMessage
 	NetworkPolicy     NetworkPolicy

@@ -82,6 +82,7 @@ message ExecutionAssignment {
   int32 timeout_sec = 9;
   string artifact_bundle_key = 10;
   int32 memory_mb = 11;
+  map<string, string> env_vars = 12;
 }
 
 message PrepareSnapshot {
@@ -93,6 +94,7 @@ message PrepareSnapshot {
   string network_policy = 6;
   int32 timeout_sec = 7;
   int32 memory_mb = 8;
+  map<string, string> env_vars = 9;
 }
 
 message DrainHost {

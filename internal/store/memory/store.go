@@ -728,6 +728,12 @@ func cloneIdempotencyRecord(record domain.IdempotencyRecord) domain.IdempotencyR
 func cloneFunctionVersion(v domain.FunctionVersion) domain.FunctionVersion {
 	cp := v
 	cp.Regions = append([]string(nil), v.Regions...)
+	if len(v.EnvVars) > 0 {
+		cp.EnvVars = make(map[string]string, len(v.EnvVars))
+		for key, value := range v.EnvVars {
+			cp.EnvVars[key] = value
+		}
+	}
 	cp.EnvRefs = append([]string(nil), v.EnvRefs...)
 	return cp
 }

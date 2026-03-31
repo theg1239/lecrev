@@ -21,6 +21,7 @@ create table if not exists function_versions (
   timeout_sec integer not null,
   network_policy text not null,
   regions jsonb not null,
+  env_vars jsonb not null default '{}'::jsonb,
   env_refs jsonb not null,
   max_retries integer not null,
   artifact_digest text not null,

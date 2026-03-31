@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +64,8 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	r.Handle("/metrics", metrics.NewHandler(store))
 	r.HandleFunc("/f/{token}", srv.invokeHTTPTrigger)
 	r.HandleFunc("/f/{token}/*", srv.invokeHTTPTrigger)
+	r.HandleFunc("/w/{versionID}", srv.serveWebsite)
+	r.HandleFunc("/w/{versionID}/*", srv.serveWebsite)
 	r.Post("/v1/triggers/webhook/{token}", srv.invokeWebhook)
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
@@ -86,6 +90,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Get("/jobs/{jobID}/logs", srv.getJobLogs)
 		r.Get("/jobs/{jobID}/output", srv.getJobOutput)
 		r.Get("/functions/{versionID}", srv.getFunction)
+		r.Get("/functions/{versionID}/site", srv.getFunctionSite)
 		r.Get("/functions/{versionID}/warm-status", srv.getFunctionWarmStatus)
 		r.Post("/functions/{versionID}/prepare", srv.prepareFunction)
 		r.Post("/functions/{versionID}/triggers/http", srv.createHTTPTrigger)
@@ -260,6 +265,7 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 		TimeoutSec:     body.TimeoutSec,
 		NetworkPolicy:  domain.NetworkPolicy(body.NetworkPolicy),
 		Regions:        body.Regions,
+		EnvVars:        cloneStringMap(body.EnvVars),
 		EnvRefs:        body.EnvRefs,
 		MaxRetries:     body.MaxRetries,
 		IdempotencyKey: body.IdempotencyKey,
@@ -718,6 +724,148 @@ func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, version)
 }
 
+func (s *Server) getFunctionSite(w http.ResponseWriter, r *http.Request) {
+	versionID := chi.URLParam(r, "versionID")
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	manifest, err := s.websiteManifest(r.Context(), version)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	var functionURL string
+	if triggers, err := s.store.ListHTTPTriggersByFunctionVersion(r.Context(), version.ID); err == nil {
+		for _, trigger := range triggers {
+			if trigger.Enabled {
+				functionURL = publicFunctionURL(r, trigger.Token)
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, functionSiteResponse{
+		FunctionVersionID: version.ID,
+		Framework:         manifest.Framework,
+		DynamicEntrypoint: manifest.DynamicEntrypoint,
+		StaticPrefix:      manifest.StaticPrefix,
+		PreviewURL:        publicWebsiteURL(r, version.ID),
+		FunctionURL:       functionURL,
+		CreatedAt:         manifest.CreatedAt,
+	})
+}
+
+func (s *Server) serveWebsite(w http.ResponseWriter, r *http.Request) {
+	versionID := chi.URLParam(r, "versionID")
+	if versionID == "" {
+		http.Error(w, "missing versionID", http.StatusBadRequest)
+		return
+	}
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if version.State != domain.FunctionStateReady {
+		http.Error(w, "website preview not ready", http.StatusServiceUnavailable)
+		return
+	}
+	manifest, err := s.websiteManifest(r.Context(), version)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	sitePath := websiteRequestPath(r)
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.serveWebsiteStaticAsset(w, r, version.ArtifactDigest, sitePath) {
+		return
+	}
+
+	payload, err := buildHTTPPayloadForPath(r, "", sitePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	streamWriter := newHTTPDirectStreamWriter(w, r.Method, "", version.ID)
+	directCtx, cancelDirect := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
+	directResult, directErr := s.scheduler.ExecuteDirectStream(
+		directCtx,
+		version.ID,
+		payload,
+		func(jobID, _ string, startMode domain.StartMode) {
+			streamWriter.SetMeta(jobID, startMode)
+		},
+		streamWriter.HandleEvent,
+	)
+	cancelDirect()
+	if directErr == nil {
+		returnDirectHTTPResult(streamWriter, directResult)
+		return
+	}
+	if !errors.Is(directErr, domain.ErrDirectInvokeUnavailable) && !errors.Is(directErr, domain.ErrNoExecutionCapacity) {
+		if errors.Is(directErr, context.DeadlineExceeded) || errors.Is(directErr, context.Canceled) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"functionVersionId": version.ID,
+				"state":             "timeout",
+				"message":           "website preview did not complete before the response deadline",
+				"framework":         manifest.Framework,
+			})
+			return
+		}
+		writeServiceError(w, directErr)
+		return
+	}
+
+	dispatchCtx, cancelDispatch := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancelDispatch()
+	job, err := s.scheduler.DispatchExecutionIdempotent(dispatchCtx, version.ID, payload, idempotencyKey(r.Header.Get("Idempotency-Key"), ""))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
+	defer cancelWait()
+	job, err = s.waitForExecutionJob(waitCtx, job.ID, httpTriggerJobPollInterval)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"jobId":             job.ID,
+				"functionVersionId": version.ID,
+				"state":             "timeout",
+				"message":           "website preview did not complete before the response deadline",
+			})
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+
+	job = withJobLatency(job)
+	if job.State != domain.JobStateSucceeded || job.Result == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             job.ID,
+			"functionVersionId": version.ID,
+			"state":             job.State,
+			"error":             job.Error,
+		})
+		return
+	}
+	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output, jobLatencyMs(job)); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             job.ID,
+			"functionVersionId": version.ID,
+			"state":             domain.JobStateFailed,
+			"error":             err.Error(),
+		})
+	}
+}
+
 func (s *Server) listRegions(w http.ResponseWriter, r *http.Request) {
 	regions, err := s.store.ListRegions(r.Context())
 	if err != nil {
@@ -1094,7 +1242,20 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case errors.Is(directErr, domain.ErrDirectInvokeUnavailable), errors.Is(directErr, domain.ErrNoExecutionCapacity):
+	case errors.Is(directErr, domain.ErrNoExecutionCapacity):
+		latencyMs := computeLatencyMs(requestStartedAt, time.Now().UTC())
+		state = "overloaded"
+		errMsg = directErr.Error()
+		w.Header().Set("Retry-After", "1")
+		w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"functionVersionId": version.ID,
+			"state":             "overloaded",
+			"message":           "function url execution capacity is unavailable; retry later",
+			"latencyMs":         latencyMs,
+		})
+		return
+	case errors.Is(directErr, domain.ErrDirectInvokeUnavailable):
 		state = "direct_fallback"
 	case errors.Is(directErr, context.DeadlineExceeded), errors.Is(directErr, context.Canceled):
 		latencyMs := computeLatencyMs(requestStartedAt, time.Now().UTC())
@@ -1301,7 +1462,9 @@ func (w *httpDirectStreamWriter) SetMeta(jobID string, startMode domain.StartMod
 		w.writer.Header().Set("X-Lecrev-Job-Id", jobID)
 	}
 	w.writer.Header().Set("X-Lecrev-Function-Version-Id", w.versionID)
-	w.writer.Header().Set("X-Lecrev-Function-Url-Token", w.token)
+	if strings.TrimSpace(w.token) != "" {
+		w.writer.Header().Set("X-Lecrev-Function-Url-Token", w.token)
+	}
 	if startMode != "" {
 		w.startMode = startMode
 		w.writer.Header().Set("X-Lecrev-Start-Mode", string(startMode))
@@ -1435,6 +1598,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	case errors.Is(err, domain.ErrProjectBuildQuota), errors.Is(err, domain.ErrProjectExecutionQuota):
 		status = http.StatusTooManyRequests
+	case errors.Is(err, domain.ErrNoExecutionCapacity), errors.Is(err, domain.ErrDirectInvokeUnavailable):
+		status = http.StatusServiceUnavailable
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, domain.ErrFunctionVersionNotReady), errors.Is(err, domain.ErrBuildLogsNotReady), errors.Is(err, domain.ErrExecutionResultNotReady):
@@ -1517,6 +1682,10 @@ func buildWebhookPayload(r *http.Request, token string) ([]byte, error) {
 }
 
 func buildHTTPPayload(r *http.Request, token string) ([]byte, error) {
+	return buildHTTPPayloadForPath(r, token, triggerRequestPath(r))
+}
+
+func buildHTTPPayloadForPath(r *http.Request, token, functionPath string) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		return nil, err
@@ -1545,11 +1714,6 @@ func buildHTTPPayload(r *http.Request, token string) ([]byte, error) {
 		multiValueQuery[key] = append([]string(nil), values...)
 	}
 
-	functionPath := "/"
-	if remainder := strings.TrimSpace(chi.URLParam(r, "*")); remainder != "" {
-		functionPath = "/" + remainder
-	}
-
 	return json.Marshal(map[string]any{
 		"trigger": "http",
 		"token":   token,
@@ -1572,6 +1736,63 @@ func buildHTTPPayload(r *http.Request, token string) ([]byte, error) {
 			"remoteAddr":        r.RemoteAddr,
 		},
 	})
+}
+
+func triggerRequestPath(r *http.Request) string {
+	pathValue := strings.TrimSpace(chi.URLParam(r, "*"))
+	if pathValue == "" {
+		return "/"
+	}
+	return "/" + strings.TrimPrefix(pathValue, "/")
+}
+
+func websiteRequestPath(r *http.Request) string {
+	pathValue := strings.TrimSpace(chi.URLParam(r, "*"))
+	if pathValue == "" {
+		return "/"
+	}
+	return "/" + strings.TrimPrefix(pathValue, "/")
+}
+
+func (s *Server) websiteManifest(ctx context.Context, version *domain.FunctionVersion) (*domain.WebsiteManifest, error) {
+	if version == nil {
+		return nil, fmt.Errorf("function version is required")
+	}
+	data, err := s.objects.Get(ctx, artifact.SiteManifestKey(version.ArtifactDigest))
+	if err != nil {
+		return nil, err
+	}
+	var manifest domain.WebsiteManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("decode site manifest: %w", err)
+	}
+	return &manifest, nil
+}
+
+func (s *Server) serveWebsiteStaticAsset(w http.ResponseWriter, r *http.Request, digest, requestPath string) bool {
+	if strings.TrimSpace(digest) == "" || strings.TrimSpace(requestPath) == "" || requestPath == "/" {
+		return false
+	}
+	key := artifact.SiteAssetObjectKey(digest, requestPath)
+	data, err := s.objects.Get(r.Context(), key)
+	if err != nil {
+		return false
+	}
+	contentType := mime.TypeByExtension(path.Ext(requestPath))
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	if strings.HasPrefix(requestPath, "/_next/static/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
+	return true
 }
 
 func decodeHTTPPayloadBody(body []byte) (any, string, string, bool, error) {
@@ -1607,6 +1828,13 @@ func publicFunctionURL(r *http.Request, token string) string {
 		return strings.TrimRight(configured, "/") + "/f/" + token
 	}
 	return strings.TrimRight(publicBaseURL(r), "/") + "/f/" + token
+}
+
+func publicWebsiteURL(r *http.Request, versionID string) string {
+	if configured := strings.TrimSpace(os.Getenv("LECREV_PUBLIC_WEBSITE_BASE_URL")); configured != "" {
+		return strings.TrimRight(configured, "/") + "/w/" + versionID
+	}
+	return strings.TrimRight(publicBaseURL(r), "/") + "/w/" + versionID
 }
 
 func publicBaseURL(r *http.Request) string {
@@ -1709,7 +1937,7 @@ func writeHTTPResponseBody(w http.ResponseWriter, body []byte) error {
 	}
 
 	const streamThreshold = 64 << 10
-	const streamChunkSize = 32 << 10
+	const streamChunkSize = 256 << 10
 
 	flusher, ok := w.(http.Flusher)
 	if !ok || len(body) < streamThreshold {
@@ -1725,7 +1953,9 @@ func writeHTTPResponseBody(w http.ResponseWriter, body []byte) error {
 		if _, err := w.Write(body[offset:end]); err != nil {
 			return err
 		}
-		flusher.Flush()
+		if offset == 0 {
+			flusher.Flush()
+		}
 	}
 	return nil
 }

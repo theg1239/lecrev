@@ -692,6 +692,39 @@ function handleRequest(socket, protocolWrite, request) {
       },
     };
   };
+  const maybeAutoStreamStructuredHttpResult = async (stream, result) => {
+    if (!stream || stream.active || stream.closed) {
+      return result;
+    }
+    if (!result || typeof result !== 'object' || !Number.isInteger(result.statusCode)) {
+      return result;
+    }
+    if (typeof result.body !== 'string') {
+      return result;
+    }
+    const bodyBuffer = result.isBase64Encoded === true
+      ? Buffer.from(result.body, 'base64')
+      : Buffer.from(result.body);
+    const autoStreamThreshold = 64 * 1024;
+    if (bodyBuffer.length < autoStreamThreshold) {
+      return result;
+    }
+    await stream.start({
+      statusCode: result.statusCode,
+      headers: result.headers ?? {},
+    });
+    const chunkSize = 32 * 1024;
+    for (let offset = 0; offset < bodyBuffer.length; offset += chunkSize) {
+      await stream.write(bodyBuffer.subarray(offset, offset + chunkSize));
+    }
+    await stream.end();
+    return {
+      ...result,
+      headers: result.headers ?? {},
+      body: '',
+      isBase64Encoded: false,
+    };
+  };
 
   if (request.type === 'ping') {
     emit({ type: 'ready', ready: true });
@@ -717,6 +750,9 @@ function handleRequest(socket, protocolWrite, request) {
 
   return Promise.resolve()
     .then(() => mod.handler(request.payload ?? null, context))
+    .then((output) => {
+      return maybeAutoStreamStructuredHttpResult(stream, output);
+    })
     .then((output) => {
       if (stream?.active && !stream.closed) {
         return stream.end().then(() => output);

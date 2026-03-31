@@ -240,6 +240,105 @@ func TestPrepareFunctionRequiresAdminAndQueuesWarmPrep(t *testing.T) {
 	}
 }
 
+func TestFunctionSiteMetadataAndStaticPreview(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	version := &domain.FunctionVersion{
+		ID:             "fn-site",
+		ProjectID:      "demo",
+		Name:           "site",
+		Runtime:        "node22",
+		Entrypoint:     "__lecrev_next_site_handler.mjs",
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest-site",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := meta.PutFunctionVersion(context.Background(), version); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:     "digest-site",
+		BundleKey:  "artifacts/digest-site/bundle.tgz",
+		StartupKey: "artifacts/digest-site/startup.json",
+		Regions:    map[string]time.Time{"ap-south-1": time.Now().UTC()},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteManifestKey("digest-site"), []byte(`{
+  "framework":"nextjs",
+  "functionVersionId":"fn-site",
+  "staticPrefix":"sites/digest-site/assets",
+  "dynamicEntrypoint":"__lecrev_next_site_handler.mjs",
+  "createdAt":"2026-03-31T00:00:00Z"
+}`)); err != nil {
+		t.Fatalf("put site manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteAssetObjectKey("digest-site", "/robots.txt"), []byte("User-agent: *\nAllow: /\n")); err != nil {
+		t.Fatalf("put site asset: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "site-token",
+		ProjectID:         "demo",
+		FunctionVersionID: "fn-site",
+		Description:       "default",
+		AuthMode:          domain.HTTPTriggerAuthModeNone,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	siteReq := httptest.NewRequest(http.MethodGet, "/v1/functions/fn-site/site", nil)
+	siteReq.Header.Set("X-API-Key", "tenant-key")
+	siteResp := httptest.NewRecorder()
+	handler.ServeHTTP(siteResp, siteReq)
+	if siteResp.Code != http.StatusOK {
+		t.Fatalf("expected site metadata status 200, got %d: %s", siteResp.Code, siteResp.Body.String())
+	}
+	var sitePayload functionSiteResponse
+	if err := json.Unmarshal(siteResp.Body.Bytes(), &sitePayload); err != nil {
+		t.Fatalf("decode site metadata: %v", err)
+	}
+	if sitePayload.Framework != "nextjs" {
+		t.Fatalf("expected nextjs framework, got %q", sitePayload.Framework)
+	}
+	if sitePayload.FunctionURL == "" || !strings.Contains(sitePayload.FunctionURL, "/f/site-token") {
+		t.Fatalf("expected function URL in site payload, got %+v", sitePayload)
+	}
+	if sitePayload.PreviewURL == "" || !strings.Contains(sitePayload.PreviewURL, "/w/fn-site") {
+		t.Fatalf("expected preview URL in site payload, got %+v", sitePayload)
+	}
+
+	staticReq := httptest.NewRequest(http.MethodGet, "/w/fn-site/robots.txt", nil)
+	staticResp := httptest.NewRecorder()
+	handler.ServeHTTP(staticResp, staticReq)
+	if staticResp.Code != http.StatusOK {
+		t.Fatalf("expected static preview status 200, got %d: %s", staticResp.Code, staticResp.Body.String())
+	}
+	if got := staticResp.Body.String(); !strings.Contains(got, "User-agent: *") {
+		t.Fatalf("unexpected static body %q", got)
+	}
+	if got := staticResp.Header().Get("Cache-Control"); got == "" {
+		t.Fatal("expected cache-control header for static asset")
+	}
+}
+
 func TestWebhookTriggerLifecycleAndIdempotentInvoke(t *testing.T) {
 	t.Parallel()
 
@@ -791,6 +890,86 @@ func TestHTTPTriggerInvokeStreamsDirectExecutionEvents(t *testing.T) {
 	}
 	if recorder.flushCount == 0 {
 		t.Fatal("expected streamed direct invoke to flush chunks")
+	}
+}
+
+func TestHTTPTriggerInvokeReturnsServiceUnavailableWhenDirectCapacityIsExhausted(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	dispatcher := &directTestDispatcher{
+		region: "ap-south-1",
+		err:    domain.ErrNoExecutionCapacity,
+	}
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{dispatcher})
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:    "digest-overload",
+		BundleKey: "artifacts/digest-overload/bundle.tgz",
+		Regions: map[string]time.Time{
+			"ap-south-1": time.Now().UTC(),
+		},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-overload",
+		ProjectID:      "demo",
+		Name:           "overload",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest-overload",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "overload-http-trigger",
+		ProjectID:         "demo",
+		FunctionVersionID: "fn-http-overload",
+		AuthMode:          domain.HTTPTriggerAuthModeNone,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/f/overload-http-trigger/demo", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("expected Retry-After header 1, got %q", got)
+	}
+	if len(dispatcher.assignments) != 0 {
+		t.Fatalf("expected no persisted direct assignments on overload, got %d", len(dispatcher.assignments))
+	}
+	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("list execution jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected overload path to skip queued jobs, got %d", len(jobs))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode overload response: %v", err)
+	}
+	if payload["state"] != "overloaded" {
+		t.Fatalf("expected overloaded state, got %+v", payload)
 	}
 }
 
@@ -1986,6 +2165,21 @@ func TestWriteServiceErrorMapsQuotaErrorsToTooManyRequests(t *testing.T) {
 		writeServiceError(resp, err)
 		if resp.Code != http.StatusTooManyRequests {
 			t.Fatalf("expected quota error %v to map to %d, got %d", err, http.StatusTooManyRequests, resp.Code)
+		}
+	}
+}
+
+func TestWriteServiceErrorMapsCapacityErrorsToServiceUnavailable(t *testing.T) {
+	t.Parallel()
+
+	for _, err := range []error{
+		domain.ErrNoExecutionCapacity,
+		domain.ErrDirectInvokeUnavailable,
+	} {
+		resp := httptest.NewRecorder()
+		writeServiceError(resp, err)
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected capacity error %v to map to %d, got %d", err, http.StatusServiceUnavailable, resp.Code)
 		}
 	}
 }

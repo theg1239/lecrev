@@ -320,7 +320,8 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		return
 	}
 	resolveSecretsStarted := time.Now()
-	env, err := s.secrets.ResolveExecution(ctx, secrets.ExecutionRequest{
+	env := cloneStringMap(msg.EnvVars)
+	resolvedSecrets, err := s.secrets.ResolveExecution(ctx, secrets.ExecutionRequest{
 		HostID:            s.hostID,
 		Region:            s.region,
 		FunctionVersionID: msg.FunctionVersionId,
@@ -333,6 +334,9 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		terminalErr = err.Error()
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, trace.String(), nil, err.Error(), 1)
 		return
+	}
+	for key, value := range resolvedSecrets {
+		env[key] = value
 	}
 
 	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", nil, "", 0)
@@ -522,6 +526,7 @@ func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnap
 			FunctionID:     msg.FunctionVersionId,
 			Entrypoint:     msg.Entrypoint,
 			ArtifactBundle: bundle,
+			Env:            cloneStringMap(msg.EnvVars),
 			Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
 			MemoryMB:       int(msg.MemoryMb),
 			NetworkPolicy:  msg.NetworkPolicy,

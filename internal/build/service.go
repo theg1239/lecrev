@@ -65,6 +65,7 @@ const (
 	maxMemoryMB          = 4096
 	maxTimeoutSec        = 900
 	maxRetries           = 10
+	maxEnvVars           = 128
 	maxEnvRefs           = 128
 	maxArtifactSizeBytes = 64 << 20
 	maxActiveBuildJobs   = 20
@@ -214,9 +215,6 @@ func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, err
 	if strings.TrimSpace(req.Name) == "" {
 		return domain.DeployRequest{}, fmt.Errorf("name is required")
 	}
-	if strings.TrimSpace(req.Entrypoint) == "" {
-		return domain.DeployRequest{}, fmt.Errorf("entrypoint is required")
-	}
 	if req.Runtime == "" {
 		req.Runtime = defaultRuntime
 	}
@@ -248,6 +246,9 @@ func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, err
 }
 
 func validateDeployRequest(req domain.DeployRequest) error {
+	if strings.TrimSpace(req.Entrypoint) == "" && req.Source.Type != domain.SourceTypeGit {
+		return fmt.Errorf("entrypoint is required")
+	}
 	if req.Runtime != defaultRuntime {
 		return fmt.Errorf("unsupported runtime %q: only %s is supported", req.Runtime, defaultRuntime)
 	}
@@ -263,9 +264,20 @@ func validateDeployRequest(req domain.DeployRequest) error {
 	if len(req.EnvRefs) > maxEnvRefs {
 		return fmt.Errorf("envRefs cannot exceed %d entries", maxEnvRefs)
 	}
+	if len(req.EnvVars) > maxEnvVars {
+		return fmt.Errorf("envVars cannot exceed %d entries", maxEnvVars)
+	}
+	for key, value := range req.EnvVars {
+		if err := validateEnvVar(key, value); err != nil {
+			return err
+		}
+	}
 	for _, ref := range req.EnvRefs {
 		if strings.TrimSpace(ref) == "" {
 			return fmt.Errorf("envRefs cannot contain empty values")
+		}
+		if _, exists := req.EnvVars[ref]; exists {
+			return fmt.Errorf("envRefs cannot overlap envVars key %q", ref)
 		}
 	}
 	switch req.NetworkPolicy {
@@ -309,6 +321,7 @@ func (s *Service) initializeBuild(ctx context.Context, req domain.DeployRequest)
 		TimeoutSec:     req.TimeoutSec,
 		NetworkPolicy:  req.NetworkPolicy,
 		Regions:        append([]string(nil), req.Regions...),
+		EnvVars:        cloneEnvVars(req.EnvVars),
 		EnvRefs:        append([]string(nil), req.EnvRefs...),
 		MaxRetries:     req.MaxRetries,
 		BuildJobID:     buildJobID,
@@ -389,11 +402,18 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	recorder.Printf("build job %s started for function version %s in region %s", buildJob.ID, version.ID, buildJob.TargetRegion)
 	recorder.Printf("source type=%s runtime=%s entrypoint=%s", req.Source.Type, req.Runtime, req.Entrypoint)
 
-	bundle, startup, metadata, err := s.prepareBundle(ctx, req, recorder)
+	prepared, err := s.prepareBuildOutput(ctx, req, recorder)
 	if err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
-	buildJob.Metadata = mergeBuildMetadata(buildJob.Metadata, metadata)
+	defer func() {
+		if prepared != nil && prepared.Cleanup != nil {
+			prepared.Cleanup()
+		}
+	}()
+	bundle := prepared.Bundle
+	startup := prepared.Startup
+	buildJob.Metadata = mergeBuildMetadata(buildJob.Metadata, prepared.Metadata)
 	if len(bundle) > maxArtifactSizeBytes {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, fmt.Errorf("artifact size %d exceeds limit of %d bytes", len(bundle), maxArtifactSizeBytes))
 	}
@@ -442,11 +462,29 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 			recorder.Printf("marked artifact available in region %s", region)
 		}
 	}
+	if prepared.Site != nil {
+		staticPrefix := artifact.SiteAssetsPrefix(digest)
+		for _, assetFile := range prepared.Site.StaticAssets {
+			if err := s.objects.Put(ctx, artifact.SiteAssetObjectKey(digest, assetFile.Path), assetFile.Data); err != nil {
+				return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
+			}
+		}
+		siteManifest, err := encodeWebsiteManifest(version.ID, staticPrefix, prepared.Entrypoint, now)
+		if err != nil {
+			return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
+		}
+		if err := s.objects.Put(ctx, artifact.SiteManifestKey(digest), siteManifest); err != nil {
+			return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
+		}
+		recorder.Printf("uploaded next.js site manifest to %s", artifact.SiteManifestKey(digest))
+		recorder.Printf("uploaded %d next.js static assets to %s", len(prepared.Site.StaticAssets), staticPrefix)
+	}
 	if err := s.store.PutArtifact(ctx, artifactMeta); err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
 	}
 
 	version.ArtifactDigest = digest
+	version.Entrypoint = prepared.Entrypoint
 	version.State = domain.FunctionStateReady
 	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
 		return s.markBuildFailedWithLogs(ctx, version, buildJob, recorder, err)
@@ -600,6 +638,7 @@ func mergeBuildMetadata(base map[string]string, extra map[string]string) map[str
 }
 
 func deployRequestHash(req domain.DeployRequest) (string, error) {
+	sanitized := sanitizeDeployRequestForStorage(req)
 	return idempotency.Hash(struct {
 		ProjectID     string               `json:"projectId"`
 		Name          string               `json:"name"`
@@ -609,6 +648,7 @@ func deployRequestHash(req domain.DeployRequest) (string, error) {
 		TimeoutSec    int                  `json:"timeoutSec"`
 		NetworkPolicy domain.NetworkPolicy `json:"networkPolicy"`
 		Regions       []string             `json:"regions"`
+		EnvVars       map[string]string    `json:"envVars,omitempty"`
 		EnvRefs       []string             `json:"envRefs"`
 		MaxRetries    int                  `json:"maxRetries"`
 		Source        domain.DeploySource  `json:"source"`
@@ -621,38 +661,40 @@ func deployRequestHash(req domain.DeployRequest) (string, error) {
 		TimeoutSec:    req.TimeoutSec,
 		NetworkPolicy: req.NetworkPolicy,
 		Regions:       append([]string(nil), req.Regions...),
+		EnvVars:       cloneEnvVars(req.EnvVars),
 		EnvRefs:       append([]string(nil), req.EnvRefs...),
 		MaxRetries:    req.MaxRetries,
-		Source:        req.Source,
+		Source:        sanitized.Source,
 	})
 }
 
-func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) ([]byte, []byte, map[string]string, error) {
-	functionManifest, err := json.MarshalIndent(map[string]any{
-		"name":          req.Name,
-		"runtime":       req.Runtime,
-		"entrypoint":    req.Entrypoint,
-		"memoryMb":      req.MemoryMB,
-		"timeoutSec":    req.TimeoutSec,
-		"networkPolicy": req.NetworkPolicy,
-		"regions":       req.Regions,
-		"envRefs":       req.EnvRefs,
-		"maxRetries":    req.MaxRetries,
-	}, "", "  ")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	startup, err := json.MarshalIndent(map[string]any{
-		"entrypoint": req.Entrypoint,
-		"runtime":    req.Runtime,
-		"preparedAt": s.now(),
-	}, "", "  ")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
+func (s *Service) prepareBuildOutput(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (*preparedBuildOutput, error) {
 	switch req.Source.Type {
 	case domain.SourceTypeBundle:
+		entrypoint := req.Entrypoint
+		functionManifest, err := json.MarshalIndent(map[string]any{
+			"name":          req.Name,
+			"runtime":       req.Runtime,
+			"entrypoint":    entrypoint,
+			"memoryMb":      req.MemoryMB,
+			"timeoutSec":    req.TimeoutSec,
+			"networkPolicy": req.NetworkPolicy,
+			"regions":       req.Regions,
+			"envVars":       req.EnvVars,
+			"envRefs":       req.EnvRefs,
+			"maxRetries":    req.MaxRetries,
+		}, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		startup, err := json.MarshalIndent(map[string]any{
+			"entrypoint": entrypoint,
+			"runtime":    req.Runtime,
+			"preparedAt": s.now(),
+		}, "", "  ")
+		if err != nil {
+			return nil, err
+		}
 		recorder.Printf("validating bundle source")
 		files := make(map[string][]byte)
 		for name, content := range req.Source.InlineFiles {
@@ -662,58 +704,128 @@ func (s *Service) prepareBundle(ctx context.Context, req domain.DeployRequest, r
 			recorder.Printf("decoding bundleBase64 payload")
 			decoded, err := base64.StdEncoding.DecodeString(req.Source.BundleBase64)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, err
 			}
 			tmpDir, err := os.MkdirTemp("", "lecrev-bundle-*")
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, err
 			}
 			defer os.RemoveAll(tmpDir)
 			if err := artifact.ExtractTarGz(decoded, tmpDir); err != nil {
-				return nil, nil, nil, err
+				return nil, err
 			}
 			recorder.Printf("extracted uploaded bundle archive for smoke validation")
 			bundle, err := artifact.BundleFromDirectory(tmpDir, map[string][]byte{
 				"function.json": functionManifest,
 				"startup.json":  startup,
 			})
-			return bundle, startup, nil, err
+			if err != nil {
+				return nil, err
+			}
+			return &preparedBuildOutput{
+				Bundle:     bundle,
+				Startup:    startup,
+				Entrypoint: entrypoint,
+			}, nil
 		}
 		files["function.json"] = functionManifest
 		files["startup.json"] = startup
 		recorder.Printf("packaging inline source files into immutable bundle")
 		bundle, err := artifact.BundleFromFiles(files)
-		return bundle, startup, nil, err
-	case domain.SourceTypeGit:
-		root, metadata, cleanup, err := s.prepareGitWorkspace(ctx, req, recorder)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
-		defer cleanup()
-		recorder.Printf("packaging prepared git workspace from %s", root)
-		bundle, err := artifact.BundleFromDirectory(root, map[string][]byte{
+		return &preparedBuildOutput{
+			Bundle:     bundle,
+			Startup:    startup,
+			Entrypoint: entrypoint,
+		}, nil
+	case domain.SourceTypeGit:
+		root, metadata, cleanup, site, err := s.prepareGitWorkspace(ctx, req, recorder)
+		if err != nil {
+			return nil, err
+		}
+		entrypoint := req.Entrypoint
+		bundleRoot := root
+		if site != nil {
+			entrypoint = site.Entrypoint
+			bundleRoot = site.BundleRoot
+			if metadata == nil {
+				metadata = make(map[string]string)
+			}
+			metadata["framework"] = "nextjs"
+			metadata["deliveryKind"] = "website"
+		}
+		functionManifest, err := json.MarshalIndent(map[string]any{
+			"name":          req.Name,
+			"runtime":       req.Runtime,
+			"entrypoint":    entrypoint,
+			"memoryMb":      req.MemoryMB,
+			"timeoutSec":    req.TimeoutSec,
+			"networkPolicy": req.NetworkPolicy,
+			"regions":       req.Regions,
+			"envVars":       req.EnvVars,
+			"envRefs":       req.EnvRefs,
+			"maxRetries":    req.MaxRetries,
+		}, "", "  ")
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		startup, err := json.MarshalIndent(map[string]any{
+			"entrypoint": entrypoint,
+			"runtime":    req.Runtime,
+			"preparedAt": s.now(),
+		}, "", "  ")
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		recorder.Printf("packaging prepared git workspace from %s", bundleRoot)
+		bundle, err := artifact.BundleFromDirectory(bundleRoot, map[string][]byte{
 			"function.json": functionManifest,
 			"startup.json":  startup,
 		})
-		return bundle, startup, metadata, err
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		return &preparedBuildOutput{
+			Bundle:     bundle,
+			Startup:    startup,
+			Metadata:   metadata,
+			Entrypoint: entrypoint,
+			Cleanup:    cleanup,
+			Site:       site,
+		}, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("unsupported source type %q", req.Source.Type)
+		return nil, fmt.Errorf("unsupported source type %q", req.Source.Type)
 	}
 }
 
 type packageManifest struct {
-	PackageManager string            `json:"packageManager"`
-	Scripts        map[string]string `json:"scripts"`
+	PackageManager  string            `json:"packageManager"`
+	Scripts         map[string]string `json:"scripts"`
+	Dependencies    map[string]string `json:"dependencies"`
+	DevDependencies map[string]string `json:"devDependencies"`
 }
 
-func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (string, map[string]string, func(), error) {
+type nodePackageManager string
+
+const (
+	nodePackageManagerNPM  nodePackageManager = "npm"
+	nodePackageManagerYarn nodePackageManager = "yarn"
+	nodePackageManagerPNPM nodePackageManager = "pnpm"
+)
+
+func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (string, map[string]string, func(), *preparedNextSite, error) {
 	if strings.TrimSpace(req.Source.GitURL) == "" {
-		return "", nil, nil, fmt.Errorf("gitUrl is required for git source")
+		return "", nil, nil, nil, fmt.Errorf("gitUrl is required for git source")
 	}
 
 	tmpDir, err := os.MkdirTemp("", "lecrev-git-*")
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(tmpDir) }
 
@@ -724,7 +836,7 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 	cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
 	if err := runGitCloneWithTimeout(ctx, s.gitCloneTimeout, recorder, cloneArgs...); err != nil {
 		cleanup()
-		return "", nil, nil, fmt.Errorf("git clone failed: %w", err)
+		return "", nil, nil, nil, fmt.Errorf("git clone failed: %w", err)
 	}
 	metadata := buildMetadataForRequest(req)
 	metadata = mergeBuildMetadata(metadata, captureGitMetadata(ctx, recorder, tmpDir))
@@ -732,18 +844,25 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 	root, err := resolveBuildRoot(tmpDir, req.Source.SubPath)
 	if err != nil {
 		cleanup()
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	recorder.Printf("resolved build root to %s", root)
-	if err := prepareNodeWorkspace(ctx, recorder, root, s.npmInstallTimeout, s.npmBuildTimeout, s.npmPruneTimeout); err != nil {
+	if err := prepareNodeWorkspace(ctx, recorder, root, req.EnvVars, s.npmInstallTimeout, s.npmBuildTimeout, s.npmPruneTimeout); err != nil {
 		cleanup()
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
-	if err := verifyEntrypoint(root, req.Entrypoint); err != nil {
+	site, err := maybePrepareNextSite(root, recorder)
+	if err != nil {
 		cleanup()
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
-	return root, metadata, cleanup, nil
+	if site == nil {
+		if err := verifyEntrypoint(root, req.Entrypoint); err != nil {
+			cleanup()
+			return "", nil, nil, nil, err
+		}
+	}
+	return root, metadata, cleanup, site, nil
 }
 
 func resolveBuildRoot(repoRoot, subPath string) (string, error) {
@@ -772,11 +891,11 @@ func resolveBuildRoot(repoRoot, subPath string) (string, error) {
 	return root, nil
 }
 
-func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root string, installTimeout, buildTimeout, pruneTimeout time.Duration) error {
+func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root string, envVars map[string]string, installTimeout, buildTimeout, pruneTimeout time.Duration) error {
 	pkgPath := filepath.Join(root, "package.json")
 	rawPkg, err := os.ReadFile(pkgPath)
 	if errors.Is(err, os.ErrNotExist) {
-		recorder.Printf("package.json not present; skipping npm install/build")
+		recorder.Printf("package.json not present; skipping dependency install/build")
 		return nil
 	}
 	if err != nil {
@@ -788,53 +907,144 @@ func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root str
 		return fmt.Errorf("decode package.json: %w", err)
 	}
 
-	if err := validatePackageManager(root, pkg.PackageManager); err != nil {
+	manager, err := detectPackageManager(root, pkg.PackageManager)
+	if err != nil {
 		return err
 	}
-
 	hasBuildScript := strings.TrimSpace(pkg.Scripts["build"]) != ""
-	installArgs := []string{"install"}
-	if hasNpmLockfile(root) {
-		installArgs[0] = "ci"
+	buildEnv := envVarList(envVars)
+	if manager != nodePackageManagerNPM {
+		buildEnv = append(buildEnv, "COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
+	}
+	installName, installArgs := nodeInstallCommand(root, manager, pkg.PackageManager, hasBuildScript)
+	if err := runCommandWithTimeoutAndEnv(ctx, installTimeout, recorder, root, buildEnv, installName, installArgs...); err != nil {
+		return fmt.Errorf("install %s dependencies: %w", manager, err)
 	}
 	if !hasBuildScript {
-		installArgs = append(installArgs, "--omit=dev")
-	}
-	if err := runCommandWithTimeout(ctx, installTimeout, recorder, root, "npm", installArgs...); err != nil {
-		return fmt.Errorf("install npm dependencies: %w", err)
-	}
-	if !hasBuildScript {
-		recorder.Printf("no build script detected; skipping npm build")
+		recorder.Printf("no build script detected; skipping package build")
 		return nil
 	}
-	if err := runCommandWithTimeout(ctx, buildTimeout, recorder, root, "npm", "run", "build", "--if-present"); err != nil {
-		return fmt.Errorf("run npm build: %w", err)
+	if isNextWorkspace(pkg) {
+		buildEnv = append(buildEnv, "NEXT_PRIVATE_STANDALONE=true")
+		recorder.Printf("detected next.js workspace; enabling standalone build output")
 	}
-	if err := runCommandWithTimeout(ctx, pruneTimeout, recorder, root, "npm", "prune", "--omit=dev"); err != nil {
-		return fmt.Errorf("prune npm devDependencies: %w", err)
+	buildName, buildArgs := nodeBuildCommand(manager)
+	if err := runCommandWithTimeoutAndEnv(ctx, buildTimeout, recorder, root, buildEnv, buildName, buildArgs...); err != nil {
+		return fmt.Errorf("run %s build: %w", manager, err)
+	}
+	pruneName, pruneArgs, shouldPrune := nodePruneCommand(root, manager, pkg.PackageManager)
+	if shouldPrune {
+		if err := runCommandWithTimeoutAndEnv(ctx, pruneTimeout, recorder, root, buildEnv, pruneName, pruneArgs...); err != nil {
+			return fmt.Errorf("prune %s devDependencies: %w", manager, err)
+		}
 	}
 	return nil
 }
 
-func validatePackageManager(root, packageManager string) error {
-	if strings.TrimSpace(packageManager) != "" && !strings.HasPrefix(packageManager, "npm@") && packageManager != "npm" {
-		return fmt.Errorf("unsupported package manager %q: only npm-based git builds are currently supported", packageManager)
+func detectPackageManager(root, packageManager string) (nodePackageManager, error) {
+	trimmed := strings.TrimSpace(packageManager)
+	switch {
+	case strings.HasPrefix(trimmed, "npm@"), trimmed == "npm":
+		return nodePackageManagerNPM, nil
+	case strings.HasPrefix(trimmed, "yarn@"), trimmed == "yarn":
+		return nodePackageManagerYarn, nil
+	case strings.HasPrefix(trimmed, "pnpm@"), trimmed == "pnpm":
+		return nodePackageManagerPNPM, nil
+	case strings.HasPrefix(trimmed, "bun@"), trimmed == "bun":
+		return "", fmt.Errorf("unsupported package manager %q", packageManager)
 	}
-	for _, unsupported := range []string{"pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"} {
-		if _, err := os.Stat(filepath.Join(root, unsupported)); err == nil {
-			return fmt.Errorf("unsupported lockfile %q: only npm-based git builds are currently supported", unsupported)
-		}
+	if hasNpmLockfile(root) {
+		return nodePackageManagerNPM, nil
 	}
-	return nil
+	if hasLockfile(root, "yarn.lock") {
+		return nodePackageManagerYarn, nil
+	}
+	if hasLockfile(root, "pnpm-lock.yaml") {
+		return nodePackageManagerPNPM, nil
+	}
+	if hasLockfile(root, "bun.lock") || hasLockfile(root, "bun.lockb") {
+		return "", fmt.Errorf("unsupported lockfile detected: bun is not currently supported")
+	}
+	return nodePackageManagerNPM, nil
 }
 
 func hasNpmLockfile(root string) bool {
 	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
-		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+		if hasLockfile(root, name) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasLockfile(root, name string) bool {
+	_, err := os.Stat(filepath.Join(root, name))
+	return err == nil
+}
+
+func nodeInstallCommand(root string, manager nodePackageManager, packageManager string, hasBuildScript bool) (string, []string) {
+	switch manager {
+	case nodePackageManagerYarn:
+		args := []string{"yarn", "install"}
+		if usesModernYarn(root, packageManager) {
+			args = append(args, "--immutable")
+		} else {
+			args = append(args, "--frozen-lockfile")
+		}
+		return "corepack", args
+	case nodePackageManagerPNPM:
+		return "corepack", []string{"pnpm", "install", "--frozen-lockfile"}
+	default:
+		args := []string{"install"}
+		if hasNpmLockfile(root) {
+			args[0] = "ci"
+		}
+		if !hasBuildScript {
+			args = append(args, "--omit=dev")
+		}
+		return "npm", args
+	}
+}
+
+func nodeBuildCommand(manager nodePackageManager) (string, []string) {
+	switch manager {
+	case nodePackageManagerYarn:
+		return "corepack", []string{"yarn", "build"}
+	case nodePackageManagerPNPM:
+		return "corepack", []string{"pnpm", "build"}
+	default:
+		return "npm", []string{"run", "build", "--if-present"}
+	}
+}
+
+func nodePruneCommand(root string, manager nodePackageManager, packageManager string) (string, []string, bool) {
+	switch manager {
+	case nodePackageManagerPNPM:
+		return "corepack", []string{"pnpm", "prune", "--prod"}, true
+	case nodePackageManagerYarn:
+		if usesModernYarn(root, packageManager) {
+			return "", nil, false
+		}
+		return "corepack", []string{"yarn", "install", "--frozen-lockfile", "--production=true", "--ignore-scripts"}, true
+	default:
+		return "npm", []string{"prune", "--omit=dev"}, true
+	}
+}
+
+func usesModernYarn(root, packageManager string) bool {
+	if hasLockfile(root, ".yarnrc.yml") {
+		return true
+	}
+	trimmed := strings.TrimSpace(packageManager)
+	if !strings.HasPrefix(trimmed, "yarn@") {
+		return false
+	}
+	version := strings.TrimPrefix(trimmed, "yarn@")
+	major := version
+	if idx := strings.IndexAny(major, ".+-"); idx >= 0 {
+		major = major[:idx]
+	}
+	return major != "" && major != "0" && major != "1"
 }
 
 func verifyEntrypoint(root, entrypoint string) error {
@@ -948,13 +1158,17 @@ func runCommand(ctx context.Context, recorder *buildRecorder, dir, name string, 
 }
 
 func runCommandWithTimeout(ctx context.Context, timeout time.Duration, recorder *buildRecorder, dir, name string, args ...string) error {
+	return runCommandWithTimeoutAndEnv(ctx, timeout, recorder, dir, nil, name, args...)
+}
+
+func runCommandWithTimeoutAndEnv(ctx context.Context, timeout time.Duration, recorder *buildRecorder, dir string, env []string, name string, args ...string) error {
 	commandCtx := ctx
 	cancel := func() {}
 	if timeout > 0 {
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
-	_, err := runCommandOutput(commandCtx, recorder, dir, name, args...)
+	_, err := runCommandOutputWithEnv(commandCtx, recorder, dir, env, name, args...)
 	return err
 }
 
@@ -982,9 +1196,16 @@ func runGitCloneWithTimeout(ctx context.Context, timeout time.Duration, recorder
 }
 
 func runCommandOutput(ctx context.Context, recorder *buildRecorder, dir, name string, args ...string) (string, error) {
+	return runCommandOutputWithEnv(ctx, recorder, dir, nil, name, args...)
+}
+
+func runCommandOutputWithEnv(ctx context.Context, recorder *buildRecorder, dir string, env []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
 	}
 	if recorder != nil {
 		if dir != "" {
@@ -1024,14 +1245,7 @@ func sanitizeGitURL(raw string) string {
 	if err != nil {
 		return trimmed
 	}
-	if parsed.User != nil {
-		username := parsed.User.Username()
-		if username != "" {
-			parsed.User = url.User(username)
-		} else {
-			parsed.User = nil
-		}
-	}
+	parsed.User = nil
 	return parsed.String()
 }
 
@@ -1040,4 +1254,50 @@ func sanitizeDeployRequestForStorage(req domain.DeployRequest) domain.DeployRequ
 	sanitized.Source = req.Source
 	sanitized.Source.GitURL = sanitizeGitURL(req.Source.GitURL)
 	return sanitized
+}
+
+func validateEnvVar(key, value string) error {
+	name := strings.TrimSpace(key)
+	if name == "" {
+		return fmt.Errorf("envVars cannot contain empty keys")
+	}
+	for i, r := range name {
+		isLetter := r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if i == 0 {
+			if !isLetter && r != '_' {
+				return fmt.Errorf("envVars key %q must start with a letter or underscore", key)
+			}
+			continue
+		}
+		if !isLetter && !isDigit && r != '_' {
+			return fmt.Errorf("envVars key %q contains unsupported character %q", key, string(r))
+		}
+	}
+	if len(value) > 16<<10 {
+		return fmt.Errorf("envVars value for %q exceeds 16384 bytes", key)
+	}
+	return nil
+}
+
+func cloneEnvVars(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func envVarList(envVars map[string]string) []string {
+	if len(envVars) == 0 {
+		return nil
+	}
+	env := make([]string, 0, len(envVars))
+	for key, value := range envVars {
+		env = append(env, key+"="+value)
+	}
+	return env
 }

@@ -8,18 +8,19 @@ import (
 )
 
 type createFunctionRequest struct {
-	Name           string          `json:"name"`
-	Environment    string          `json:"environment,omitempty"`
-	Runtime        string          `json:"runtime"`
-	Entrypoint     string          `json:"entrypoint"`
-	MemoryMB       int             `json:"memoryMb"`
-	TimeoutSec     int             `json:"timeoutSec"`
-	NetworkPolicy  string          `json:"networkPolicy"`
-	Regions        []string        `json:"regions"`
-	EnvRefs        []string        `json:"envRefs"`
-	MaxRetries     int             `json:"maxRetries"`
-	IdempotencyKey string          `json:"idempotencyKey"`
-	Source         json.RawMessage `json:"source"`
+	Name           string            `json:"name"`
+	Environment    string            `json:"environment,omitempty"`
+	Runtime        string            `json:"runtime"`
+	Entrypoint     string            `json:"entrypoint"`
+	MemoryMB       int               `json:"memoryMb"`
+	TimeoutSec     int               `json:"timeoutSec"`
+	NetworkPolicy  string            `json:"networkPolicy"`
+	Regions        []string          `json:"regions"`
+	EnvVars        map[string]string `json:"envVars,omitempty"`
+	EnvRefs        []string          `json:"envRefs"`
+	MaxRetries     int               `json:"maxRetries"`
+	IdempotencyKey string            `json:"idempotencyKey"`
+	Source         json.RawMessage   `json:"source"`
 }
 
 type createProjectRequest struct {
@@ -52,6 +53,16 @@ type httpTriggerResponse struct {
 	Enabled           bool                       `json:"enabled"`
 	URL               string                     `json:"url"`
 	CreatedAt         time.Time                  `json:"createdAt"`
+}
+
+type functionSiteResponse struct {
+	FunctionVersionID string    `json:"functionVersionId"`
+	Framework         string    `json:"framework"`
+	DynamicEntrypoint string    `json:"dynamicEntrypoint"`
+	StaticPrefix      string    `json:"staticPrefix"`
+	PreviewURL        string    `json:"previewUrl"`
+	FunctionURL       string    `json:"functionUrl,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 type functionWarmRegionStatus struct {

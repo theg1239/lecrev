@@ -29,6 +29,9 @@ install_node_from_dnf() {
   if [[ -x /usr/bin/npx ]]; then
     ln -sfn /usr/bin/npx /usr/local/bin/npx
   fi
+  if [[ -x /usr/bin/corepack ]]; then
+    ln -sfn /usr/bin/corepack /usr/local/bin/corepack
+  fi
 }
 
 if [[ ! -x /usr/local/bin/node ]]; then
@@ -54,6 +57,9 @@ for line in sys.stdin.read().splitlines():
       ln -sfn /opt/node22/bin/node /usr/local/bin/node
       ln -sfn /opt/node22/bin/npm /usr/local/bin/npm
       ln -sfn /opt/node22/bin/npx /usr/local/bin/npx
+      if [[ -x /opt/node22/bin/corepack ]]; then
+        ln -sfn /opt/node22/bin/corepack /usr/local/bin/corepack
+      fi
       trap - EXIT
       rm -rf "${tmpdir}"
     else
@@ -63,6 +69,10 @@ for line in sys.stdin.read().splitlines():
       install_node_from_dnf
     fi
   fi
+fi
+
+if [[ -x /opt/node22/bin/corepack ]]; then
+  ln -sfn /opt/node22/bin/corepack /usr/local/bin/corepack
 fi
 
 if [[ ! -x /usr/local/bin/nats-server ]]; then

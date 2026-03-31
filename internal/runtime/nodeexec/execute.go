@@ -441,9 +441,43 @@ function createHttpStream() {
     },
   };
 }
+async function maybeAutoStreamStructuredHttpResult(stream, result) {
+  if (!stream || stream.active || stream.closed) {
+    return result;
+  }
+  if (!result || typeof result !== 'object' || !Number.isInteger(result.statusCode)) {
+    return result;
+  }
+  if (typeof result.body !== 'string') {
+    return result;
+  }
+  const bodyBuffer = result.isBase64Encoded === true
+    ? Buffer.from(result.body, 'base64')
+    : Buffer.from(result.body);
+  const autoStreamThreshold = 64 * 1024;
+  if (bodyBuffer.length < autoStreamThreshold) {
+    return result;
+  }
+  await stream.start({
+    statusCode: result.statusCode,
+    headers: result.headers ?? {},
+  });
+  const chunkSize = 32 * 1024;
+  for (let offset = 0; offset < bodyBuffer.length; offset += chunkSize) {
+    await stream.write(bodyBuffer.subarray(offset, offset + chunkSize));
+  }
+  await stream.end();
+  return {
+    ...result,
+    headers: result.headers ?? {},
+    body: '',
+    isBase64Encoded: false,
+  };
+}
 const stream = createHttpStream();
 const handlerContext = stream ? { ...context, stream } : context;
-const result = await mod.handler(payload, handlerContext);
+const rawResult = await mod.handler(payload, handlerContext);
+const result = await maybeAutoStreamStructuredHttpResult(stream, rawResult);
 if (stream?.active && !stream.closed) {
   await stream.end();
 }

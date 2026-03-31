@@ -247,6 +247,10 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 	if err != nil {
 		return err
 	}
+	envVars, err := json.Marshal(version.EnvVars)
+	if err != nil {
+		return err
+	}
 	envRefs, err := json.Marshal(version.EnvRefs)
 	if err != nil {
 		return err
@@ -254,9 +258,9 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 	_, err = s.pool.Exec(ctx, `
 		insert into function_versions (
 			id, project_id, name, runtime, entrypoint, memory_mb, timeout_sec, network_policy,
-			regions, env_refs, max_retries, build_job_id, artifact_digest, source_type, state, created_at
+			regions, env_vars, env_refs, max_retries, build_job_id, artifact_digest, source_type, state, created_at
 		)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16, $17)
 		on conflict (id) do update set
 			project_id = excluded.project_id,
 			name = excluded.name,
@@ -266,6 +270,7 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 			timeout_sec = excluded.timeout_sec,
 			network_policy = excluded.network_policy,
 			regions = excluded.regions,
+			env_vars = excluded.env_vars,
 			env_refs = excluded.env_refs,
 			max_retries = excluded.max_retries,
 			build_job_id = excluded.build_job_id,
@@ -273,7 +278,7 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 			source_type = excluded.source_type,
 			state = excluded.state
 	`, version.ID, version.ProjectID, version.Name, version.Runtime, version.Entrypoint, version.MemoryMB,
-		version.TimeoutSec, string(version.NetworkPolicy), regions, envRefs, version.MaxRetries,
+		version.TimeoutSec, string(version.NetworkPolicy), regions, envVars, envRefs, version.MaxRetries,
 		nullableText(version.BuildJobID), version.ArtifactDigest, string(version.SourceType), string(version.State), version.CreatedAt)
 	if err != nil {
 		return err
@@ -293,18 +298,19 @@ func (s *Store) PutFunctionVersion(ctx context.Context, version *domain.Function
 func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*domain.FunctionVersion, error) {
 	var version domain.FunctionVersion
 	var rawRegions []byte
+	var rawEnvVars []byte
 	var rawEnvRefs []byte
 	var networkPolicy string
 	var sourceType string
 	var state string
 	if err := s.pool.QueryRow(ctx, `
 		select id, project_id, name, runtime, entrypoint, memory_mb, timeout_sec, network_policy,
-		       regions, env_refs, max_retries, coalesce(build_job_id, ''), artifact_digest, source_type, state, created_at
+		       regions, env_vars, env_refs, max_retries, coalesce(build_job_id, ''), artifact_digest, source_type, state, created_at
 		from function_versions
 		where id = $1
 	`, versionID).Scan(
 		&version.ID, &version.ProjectID, &version.Name, &version.Runtime, &version.Entrypoint,
-		&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvRefs,
+		&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvVars, &rawEnvRefs,
 		&version.MaxRetries, &version.BuildJobID, &version.ArtifactDigest, &sourceType, &state, &version.CreatedAt,
 	); err != nil {
 		return nil, mapNotFound(err)
@@ -313,6 +319,9 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 	version.SourceType = domain.SourceType(sourceType)
 	version.State = domain.FunctionState(state)
 	if err := json.Unmarshal(rawRegions, &version.Regions); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(rawEnvVars, &version.EnvVars); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(rawEnvRefs, &version.EnvRefs); err != nil {
@@ -324,7 +333,7 @@ func (s *Store) GetFunctionVersion(ctx context.Context, versionID string) (*doma
 func (s *Store) ListFunctionVersionsByProject(ctx context.Context, projectID string) ([]domain.FunctionVersion, error) {
 	rows, err := s.pool.Query(ctx, `
 		select id, project_id, name, runtime, entrypoint, memory_mb, timeout_sec, network_policy,
-		       regions, env_refs, max_retries, coalesce(build_job_id, ''), artifact_digest, source_type, state, created_at
+		       regions, env_vars, env_refs, max_retries, coalesce(build_job_id, ''), artifact_digest, source_type, state, created_at
 		from function_versions
 		where project_id = $1
 		order by created_at desc, id desc
@@ -338,13 +347,14 @@ func (s *Store) ListFunctionVersionsByProject(ctx context.Context, projectID str
 	for rows.Next() {
 		var version domain.FunctionVersion
 		var rawRegions []byte
+		var rawEnvVars []byte
 		var rawEnvRefs []byte
 		var networkPolicy string
 		var sourceType string
 		var state string
 		if err := rows.Scan(
 			&version.ID, &version.ProjectID, &version.Name, &version.Runtime, &version.Entrypoint,
-			&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvRefs,
+			&version.MemoryMB, &version.TimeoutSec, &networkPolicy, &rawRegions, &rawEnvVars, &rawEnvRefs,
 			&version.MaxRetries, &version.BuildJobID, &version.ArtifactDigest, &sourceType, &state, &version.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -353,6 +363,9 @@ func (s *Store) ListFunctionVersionsByProject(ctx context.Context, projectID str
 		version.SourceType = domain.SourceType(sourceType)
 		version.State = domain.FunctionState(state)
 		if err := json.Unmarshal(rawRegions, &version.Regions); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(rawEnvVars, &version.EnvVars); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(rawEnvRefs, &version.EnvRefs); err != nil {

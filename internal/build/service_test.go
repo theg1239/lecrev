@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	mrand "math/rand"
 	"net/url"
 	"os"
@@ -134,6 +135,29 @@ func TestCreateFunctionVersionRejectsInvalidAdmissionRequests(t *testing.T) {
 			want: "envRefs cannot exceed",
 		},
 		{
+			name: "invalid env var key",
+			edit: func(req *domain.DeployRequest) { req.EnvVars = map[string]string{"1INVALID": "value"} },
+			want: "must start with a letter or underscore",
+		},
+		{
+			name: "env var overlaps env ref",
+			edit: func(req *domain.DeployRequest) {
+				req.EnvVars = map[string]string{"PUBLIC_API_URL": "https://example.com"}
+				req.EnvRefs = []string{"PUBLIC_API_URL"}
+			},
+			want: "cannot overlap envVars key",
+		},
+		{
+			name: "too many env vars",
+			edit: func(req *domain.DeployRequest) {
+				req.EnvVars = make(map[string]string, maxEnvVars+1)
+				for i := 0; i < maxEnvVars+1; i++ {
+					req.EnvVars[fmt.Sprintf("KEY_%d", i)] = "value"
+				}
+			},
+			want: "envVars cannot exceed",
+		},
+		{
 			name: "bundle source without payload",
 			edit: func(req *domain.DeployRequest) {
 				req.Source = domain.DeploySource{Type: domain.SourceTypeBundle}
@@ -197,6 +221,173 @@ func TestCreateFunctionVersionReplaysIdempotentDeploy(t *testing.T) {
 	}
 	if first.ID != second.ID {
 		t.Fatalf("expected replayed version id %s, got %s", first.ID, second.ID)
+	}
+}
+
+func TestDeployRequestHashIgnoresGitCredentials(t *testing.T) {
+	t.Parallel()
+
+	req := domain.DeployRequest{
+		ProjectID:     "demo",
+		Name:          "git-echo",
+		Runtime:       "node22",
+		Entrypoint:    "dist/index.mjs",
+		MemoryMB:      256,
+		TimeoutSec:    30,
+		NetworkPolicy: domain.NetworkPolicyNone,
+		Regions:       []string{"ap-south-1"},
+		MaxRetries:    2,
+		Source: domain.DeploySource{
+			Type:   domain.SourceTypeGit,
+			GitURL: "https://x-access-token:first-token@github.com/acme/widgets.git",
+			GitRef: "main",
+		},
+	}
+
+	withRotatedToken := req
+	withRotatedToken.Source = req.Source
+	withRotatedToken.Source.GitURL = "https://x-access-token:second-token@github.com/acme/widgets.git"
+
+	firstHash, err := deployRequestHash(req)
+	if err != nil {
+		t.Fatalf("first deploy request hash: %v", err)
+	}
+	secondHash, err := deployRequestHash(withRotatedToken)
+	if err != nil {
+		t.Fatalf("second deploy request hash: %v", err)
+	}
+	if firstHash != secondHash {
+		t.Fatalf("expected matching hashes for token-only git url changes, got %q and %q", firstHash, secondHash)
+	}
+}
+
+func TestDeployRequestHashStillDiffersForDifferentGitRepos(t *testing.T) {
+	t.Parallel()
+
+	req := domain.DeployRequest{
+		ProjectID:     "demo",
+		Name:          "git-echo",
+		Runtime:       "node22",
+		Entrypoint:    "dist/index.mjs",
+		MemoryMB:      256,
+		TimeoutSec:    30,
+		NetworkPolicy: domain.NetworkPolicyNone,
+		Regions:       []string{"ap-south-1"},
+		MaxRetries:    2,
+		Source: domain.DeploySource{
+			Type:   domain.SourceTypeGit,
+			GitURL: "https://x-access-token:first-token@github.com/acme/widgets.git",
+			GitRef: "main",
+		},
+	}
+
+	differentRepo := req
+	differentRepo.Source = req.Source
+	differentRepo.Source.GitURL = "https://x-access-token:first-token@github.com/acme/other-widgets.git"
+
+	firstHash, err := deployRequestHash(req)
+	if err != nil {
+		t.Fatalf("first deploy request hash: %v", err)
+	}
+	secondHash, err := deployRequestHash(differentRepo)
+	if err != nil {
+		t.Fatalf("second deploy request hash: %v", err)
+	}
+	if firstHash == secondHash {
+		t.Fatalf("expected different hashes for different git repositories")
+	}
+}
+
+func TestCreateFunctionVersionPersistsEnvVars(t *testing.T) {
+	t.Parallel()
+
+	svc := New(memstore.New(), artifact.NewMemoryStore())
+	version, err := svc.CreateFunctionVersion(context.Background(), domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "env-demo",
+		Runtime:    "node22",
+		Entrypoint: "index.mjs",
+		EnvVars: map[string]string{
+			"NEXT_PUBLIC_SITE_URL": "https://demo.example.com",
+			"MEDIUM_FEED_URL":      "https://medium.com/gdg-vit?format=json",
+		},
+		Source: domain.DeploySource{
+			Type: domain.SourceTypeBundle,
+			InlineFiles: map[string]string{
+				"index.mjs": "export async function handler() { return { ok: true }; }",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create function version: %v", err)
+	}
+	if got := version.EnvVars["NEXT_PUBLIC_SITE_URL"]; got != "https://demo.example.com" {
+		t.Fatalf("expected env var to round-trip, got %q", got)
+	}
+	if got := version.EnvVars["MEDIUM_FEED_URL"]; got == "" {
+		t.Fatal("expected secondary env var to round-trip")
+	}
+}
+
+func TestDetectPackageManagerRecognizesCommonLockfiles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		packageManager string
+		lockfiles      []string
+		want           nodePackageManager
+		wantErr        string
+	}{
+		{
+			name:      "npm lockfile",
+			lockfiles: []string{"package-lock.json"},
+			want:      nodePackageManagerNPM,
+		},
+		{
+			name:      "yarn lockfile",
+			lockfiles: []string{"yarn.lock"},
+			want:      nodePackageManagerYarn,
+		},
+		{
+			name:      "pnpm lockfile",
+			lockfiles: []string{"pnpm-lock.yaml"},
+			want:      nodePackageManagerPNPM,
+		},
+		{
+			name:           "explicit yarn package manager",
+			packageManager: "yarn@4.2.0",
+			want:           nodePackageManagerYarn,
+		},
+		{
+			name:      "bun unsupported",
+			lockfiles: []string{"bun.lockb"},
+			wantErr:   "unsupported lockfile",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range tc.lockfiles {
+				if err := os.WriteFile(filepath.Join(root, name), []byte("lock"), 0o644); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
+			got, err := detectPackageManager(root, tc.packageManager)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("detect package manager: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected package manager %q, got %q", tc.want, got)
+			}
+		})
 	}
 }
 
