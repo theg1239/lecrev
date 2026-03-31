@@ -19,6 +19,7 @@ import (
 	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/secrets"
 	"github.com/theg1239/lecrev/internal/timetrace"
+	"github.com/theg1239/lecrev/internal/transport"
 )
 
 type Service struct {
@@ -81,8 +82,16 @@ func New(hostID, region, coordinatorAddr string, driver firecracker.Driver, obje
 
 func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver firecracker.Driver, objects artifact.Store, secrets secrets.ExecutionResolver, dialOptions ...grpc.DialOption) *Service {
 	cfg = cfg.withDefaults()
+	baseDialOptions := []grpc.DialOption{
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(transport.GRPCMaxMessageBytes),
+			grpc.MaxCallSendMsgSize(transport.GRPCMaxMessageBytes),
+		),
+	}
 	if len(dialOptions) == 0 {
-		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+		baseDialOptions = append(baseDialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		baseDialOptions = append(baseDialOptions, dialOptions...)
 	}
 	driverName := "unknown"
 	if driver != nil && strings.TrimSpace(driver.Name()) != "" {
@@ -96,7 +105,7 @@ func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver fi
 		driver:          driver,
 		objects:         objects,
 		secrets:         secrets,
-		dialOptions:     append([]grpc.DialOption(nil), dialOptions...),
+		dialOptions:     append([]grpc.DialOption(nil), baseDialOptions...),
 		maxSlots:        cfg.MaxConcurrentAssignments,
 		maxFullNetwork:  cfg.MaxConcurrentFullNetworkJobs,
 		availableSlots:  cfg.MaxConcurrentAssignments,

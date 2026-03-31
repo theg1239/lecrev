@@ -19,6 +19,7 @@ import (
 	"github.com/theg1239/lecrev/internal/dispatch"
 	"github.com/theg1239/lecrev/internal/domain"
 	"github.com/theg1239/lecrev/internal/store"
+	"github.com/theg1239/lecrev/internal/transport"
 )
 
 type Service struct {
@@ -100,6 +101,10 @@ func (s *Service) Listen(ctx context.Context, addr string, opts ...grpc.ServerOp
 	if err != nil {
 		return err
 	}
+	opts = append(opts,
+		grpc.MaxRecvMsgSize(transport.GRPCMaxMessageBytes),
+		grpc.MaxSendMsgSize(transport.GRPCMaxMessageBytes),
+	)
 	server := grpc.NewServer(opts...)
 	regionv1.RegisterCoordinatorServer(server, s)
 
