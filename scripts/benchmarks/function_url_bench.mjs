@@ -251,6 +251,7 @@ async function loadPublishedResults(filePath) {
 
 function renderMarkdownReport(run) {
   const lines = [];
+  const lecrevByName = new Map(run.tests.map((test) => [test.name, test]));
   lines.push("# Lecrev Function URL Benchmark");
   lines.push("");
   lines.push(`- Run timestamp: ${run.timestamp}`);
@@ -293,6 +294,7 @@ function renderMarkdownReport(run) {
     const wall = test.results.wallClock;
     const platform = test.results.platformLatency;
     if (!wall) {
+      lines.push(`| ${test.name} | failed (${test.results.failureRate.toFixed(2)}%) | n/a | n/a | n/a | n/a |`);
       continue;
     }
     lines.push(`| ${test.name} | ${formatSeconds(wall.mean)} | ${formatSeconds(wall.min)} | ${formatSeconds(wall.max)} | ${formatSeconds(wall.variability)} | ${platform ? `${Math.round(platform.mean)}ms` : "n/a"} |`);
@@ -304,13 +306,27 @@ function renderMarkdownReport(run) {
     lines.push("");
     lines.push(`These rows come from the checked-in upstream results file at \`${path.basename(run.publishedReferencePath)}\`. They use ${run.publishedReference.iterations} iterations and concurrency ${run.publishedReference.concurrency}. This is reference context only, not an apples-to-apples workload match.`);
     lines.push("");
-    lines.push("| Test | Cloudflare mean | Vercel mean | Winner |");
-    lines.push("|------|------------------|-------------|--------|");
+    lines.push("| Test | Cloudflare mean | Vercel mean | Lecrev mean | Winner |");
+    lines.push("|------|------------------|-------------|-------------|--------|");
     for (const test of run.publishedReference.tests) {
       const cf = test.results.cloudflare;
       const vercel = test.results.vercel;
-      const winner = cf.mean < vercel.mean ? "Cloudflare" : "Vercel";
-      lines.push(`| ${test.name} | ${formatSeconds(cf.mean)} | ${formatSeconds(vercel.mean)} | ${winner} |`);
+      const lecrevResult = lecrevByName.get(test.name)?.results ?? null;
+      const lecrev = lecrevResult?.wallClock?.mean ?? null;
+      const candidates = [
+        { name: "Cloudflare", mean: cf.mean },
+        { name: "Vercel", mean: vercel.mean },
+      ];
+      if (typeof lecrev === "number") {
+        candidates.push({ name: "Lecrev", mean: lecrev });
+      }
+      candidates.sort((left, right) => left.mean - right.mean);
+      const lecrevCell = typeof lecrev === "number"
+        ? formatSeconds(lecrev)
+        : lecrevResult
+          ? `failed (${lecrevResult.failureRate.toFixed(2)}%)`
+          : "n/a";
+      lines.push(`| ${test.name} | ${formatSeconds(cf.mean)} | ${formatSeconds(vercel.mean)} | ${lecrevCell} | ${candidates[0].name} |`);
     }
     lines.push("");
   }
