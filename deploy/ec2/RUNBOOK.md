@@ -412,6 +412,6 @@ aws ec2 describe-instances \
 
 ## 13. Current platform constraints
 
-- `networkPolicy=full` still uses a single static `tap0`, so keep `LECREV_EXECUTION_HOST_SLOTS=1`.
+- `networkPolicy=full` still uses a single static `tap0`, so keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS=1` even if `LECREV_EXECUTION_HOST_SLOTS` is higher for `networkPolicy=none`.
 - The control plane is the only public entrypoint.
 - Function URLs are synchronous on the control plane and should be kept within the configured function timeout envelope.

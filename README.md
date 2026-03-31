@@ -151,7 +151,8 @@ Run the real Firecracker driver on a Linux execution host:
 go build -o ./dist/lecrev-guest-runner ./cmd/lecrev-guest-runner
 
 export LECREV_EXECUTION_DRIVER='firecracker'
-export LECREV_EXECUTION_HOST_SLOTS='1'
+export LECREV_EXECUTION_HOST_SLOTS='4'
+export LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS='1'
 export LECREV_FIRECRACKER_BINARY='/usr/local/bin/firecracker'
 export LECREV_JAILER_BINARY='/usr/local/bin/jailer'
 export LECREV_FIRECRACKER_USE_JAILER='true'
@@ -186,7 +187,7 @@ export LECREV_FIRECRACKER_GATEWAY_IP='172.16.0.1'
 export LECREV_FIRECRACKER_NETMASK='255.255.255.252'
 ```
 
-The current EC2 helper uses a single static tap device, so keep `LECREV_EXECUTION_HOST_SLOTS=1` when you need outbound guest networking.
+The current EC2 helper uses a single static tap device, so keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS=1` when you need outbound guest networking, even if `LECREV_EXECUTION_HOST_SLOTS` is higher for `networkPolicy=none` functions.
 
 If you already have `devstack` running and want to smoke the live HTTP API instead of the embedded stack:
 
@@ -263,15 +264,15 @@ Current deploy admission caps in the implementation:
 
 - runtime: `node22` only
 - network policy: `none` and `full` only (`allowlist` is reserved but rejected in v1)
-- memory: `64` to `1024` MB
-- timeout: `1` to `300` seconds
-- retries: `0` to `5`
-- env refs: up to `64`
-- archived execution artifact size: up to `10 MiB`
-- execution logs: up to `1 MiB`
-- execution output payload: up to `1 MiB`
-- active build jobs per project: up to `5`
-- active execution jobs per project: up to `50`
+- memory: `64` to `4096` MB
+- timeout: `1` to `900` seconds
+- retries: `0` to `10`
+- env refs: up to `128`
+- archived execution artifact size: up to `64 MiB`
+- execution logs: up to `8 MiB`
+- execution output payload: up to `8 MiB`
+- active build jobs per project: up to `20`
+- active execution jobs per project: up to `200`
 
 Poll the build job or function version until it becomes ready:
 

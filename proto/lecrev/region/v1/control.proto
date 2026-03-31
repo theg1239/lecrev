@@ -20,6 +20,7 @@ message RegisterHost {
   int32 available_slots = 4;
   int32 blank_warm = 5;
   repeated WarmPoolMetric function_warm = 6;
+  int32 available_full_network_slots = 7;
 }
 
 message HostHeartbeat {
@@ -28,6 +29,7 @@ message HostHeartbeat {
   int32 available_slots = 3;
   int32 blank_warm = 4;
   repeated WarmPoolMetric function_warm = 5;
+  int32 available_full_network_slots = 6;
 }
 
 enum AssignmentState {

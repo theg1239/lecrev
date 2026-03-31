@@ -189,7 +189,8 @@ func StartEmbedded(parent context.Context, cfg Config) (*EmbeddedStack, error) {
 
 		agentSecretsClient := secrets.NewProxyClient("http://embedded.lecrev", cfg.SecretsProxyToken, transport.NewHandlerClient(controlHandler))
 		agent := nodeagent.NewWithConfig(nodeagent.Config{
-			MaxConcurrentAssignments: cfg.ExecutionHostSlots,
+			MaxConcurrentAssignments:     cfg.ExecutionHostSlots,
+			MaxConcurrentFullNetworkJobs: cfg.ExecutionHostFullNetworkSlots,
 		}, region.host, region.name, "", localnode.New(), objectStore, agentSecretsClient)
 		if err := region.svc.RegisterEmbeddedHost(ctx, agent.RegistrationMessage(), func(execCtx context.Context, assignment *regionv1.ExecutionAssignment) {
 			go agent.ExecuteEmbeddedAssignment(execCtx, region.svc, assignment)

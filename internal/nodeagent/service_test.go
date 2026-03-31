@@ -221,14 +221,17 @@ func TestExecuteAssignmentKeepsSlotReservedDuringFullNetworkWarmPrepare(t *testi
 	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots != 0 {
 		t.Fatalf("expected slot to remain reserved during full-network warm prepare, got %d", heartbeat.AvailableSlots)
 	}
+	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableFullNetworkSlots != 0 {
+		t.Fatalf("expected full-network slot to remain reserved during warm prepare, got %d", heartbeat.AvailableFullNetworkSlots)
+	}
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots == 1 {
+		if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots == 1 && heartbeat.AvailableFullNetworkSlots == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("expected slot to be released after warm prepare completed")
+			t.Fatal("expected slots to be released after warm prepare completed")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -258,6 +261,9 @@ func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
 	register := svc.RegistrationMessage()
 	if register.AvailableSlots != 3 {
 		t.Fatalf("expected configured host slots 3, got %d", register.AvailableSlots)
+	}
+	if register.AvailableFullNetworkSlots != 1 {
+		t.Fatalf("expected default full-network slots 1, got %d", register.AvailableFullNetworkSlots)
 	}
 	if register.BlankWarm != 3 {
 		t.Fatalf("expected blank warm inventory from driver, got %d", register.BlankWarm)

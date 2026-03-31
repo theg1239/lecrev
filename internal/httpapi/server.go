@@ -1235,14 +1235,14 @@ func fullRequestURL(r *http.Request) string {
 
 func httpTriggerTimeout(timeoutSec int) time.Duration {
 	if timeoutSec <= 0 {
-		return 20 * time.Second
+		return 30 * time.Second
 	}
-	timeout := time.Duration(timeoutSec+5) * time.Second
+	timeout := time.Duration(timeoutSec+10) * time.Second
 	if timeout < 10*time.Second {
 		timeout = 10 * time.Second
 	}
-	if timeout > 60*time.Second {
-		timeout = 60 * time.Second
+	if timeout > 180*time.Second {
+		timeout = 180 * time.Second
 	}
 	return timeout
 }

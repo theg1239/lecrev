@@ -894,17 +894,18 @@ func (s *Store) upsertHost(ctx context.Context, host *domain.Host) error {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `
-		insert into hosts (id, region, driver, state, available_slots, blank_warm, function_warm, last_heartbeat)
-		values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+		insert into hosts (id, region, driver, state, available_slots, available_full_network_slots, blank_warm, function_warm, last_heartbeat)
+		values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
 		on conflict (id) do update set
 			region = excluded.region,
 			driver = excluded.driver,
 			state = excluded.state,
 			available_slots = excluded.available_slots,
+			available_full_network_slots = excluded.available_full_network_slots,
 			blank_warm = excluded.blank_warm,
 			function_warm = excluded.function_warm,
 			last_heartbeat = excluded.last_heartbeat
-	`, host.ID, host.Region, host.Driver, string(host.State), host.AvailableSlots, host.BlankWarm, functionWarm, host.LastHeartbeat)
+	`, host.ID, host.Region, host.Driver, string(host.State), host.AvailableSlots, host.AvailableFullNetworkSlots, host.BlankWarm, functionWarm, host.LastHeartbeat)
 	return err
 }
 
@@ -913,11 +914,11 @@ func (s *Store) GetHost(ctx context.Context, hostID string) (*domain.Host, error
 	var rawFunctionWarm []byte
 	var state string
 	if err := s.pool.QueryRow(ctx, `
-		select id, region, driver, state, available_slots, blank_warm, function_warm, last_heartbeat
+		select id, region, driver, state, available_slots, available_full_network_slots, blank_warm, function_warm, last_heartbeat
 		from hosts
 		where id = $1
 	`, hostID).Scan(
-		&host.ID, &host.Region, &host.Driver, &state, &host.AvailableSlots,
+		&host.ID, &host.Region, &host.Driver, &state, &host.AvailableSlots, &host.AvailableFullNetworkSlots,
 		&host.BlankWarm, &rawFunctionWarm, &host.LastHeartbeat,
 	); err != nil {
 		return nil, mapNotFound(err)
@@ -931,7 +932,7 @@ func (s *Store) GetHost(ctx context.Context, hostID string) (*domain.Host, error
 
 func (s *Store) ListHostsByRegion(ctx context.Context, region string) ([]domain.Host, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id, region, driver, state, available_slots, blank_warm, function_warm, last_heartbeat
+		select id, region, driver, state, available_slots, available_full_network_slots, blank_warm, function_warm, last_heartbeat
 		from hosts
 		where region = $1
 		order by id asc
@@ -947,7 +948,7 @@ func (s *Store) ListHostsByRegion(ctx context.Context, region string) ([]domain.
 		var rawFunctionWarm []byte
 		var state string
 		if err := rows.Scan(
-			&host.ID, &host.Region, &host.Driver, &state, &host.AvailableSlots,
+			&host.ID, &host.Region, &host.Driver, &state, &host.AvailableSlots, &host.AvailableFullNetworkSlots,
 			&host.BlankWarm, &rawFunctionWarm, &host.LastHeartbeat,
 		); err != nil {
 			return nil, err

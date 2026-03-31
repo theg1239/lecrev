@@ -61,12 +61,12 @@ const (
 	defaultTimeoutSec    = 30
 	defaultNetworkPolicy = domain.NetworkPolicyFull
 	minMemoryMB          = 64
-	maxMemoryMB          = 1024
-	maxTimeoutSec        = 300
-	maxRetries           = 5
-	maxEnvRefs           = 64
-	maxArtifactSizeBytes = 10 << 20
-	maxActiveBuildJobs   = 5
+	maxMemoryMB          = 4096
+	maxTimeoutSec        = 900
+	maxRetries           = 10
+	maxEnvRefs           = 128
+	maxArtifactSizeBytes = 64 << 20
+	maxActiveBuildJobs   = 20
 )
 
 func New(store store.Store, objects artifact.Store) *Service {
@@ -75,10 +75,10 @@ func New(store store.Store, objects artifact.Store) *Service {
 		objects:                      objects,
 		now:                          func() time.Time { return time.Now().UTC() },
 		maxActiveBuildJobsPerProject: maxActiveBuildJobs,
-		gitCloneTimeout:              90 * time.Second,
-		npmInstallTimeout:            3 * time.Minute,
-		npmBuildTimeout:              3 * time.Minute,
-		npmPruneTimeout:              90 * time.Second,
+		gitCloneTimeout:              3 * time.Minute,
+		npmInstallTimeout:            8 * time.Minute,
+		npmBuildTimeout:              10 * time.Minute,
+		npmPruneTimeout:              3 * time.Minute,
 	}
 }
 

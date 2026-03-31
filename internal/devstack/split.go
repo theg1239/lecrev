@@ -208,7 +208,8 @@ func RunNodeAgent(ctx context.Context, cfg Config) error {
 
 	slog.Info("node-agent starting", "hostID", cfg.NodeAgentHostID, "region", cfg.NodeAgentRegion, "coordinator", cfg.NodeAgentCoordinator, "driver", driver.Name())
 	return nodeagent.NewWithConfig(nodeagent.Config{
-		MaxConcurrentAssignments: cfg.ExecutionHostSlots,
+		MaxConcurrentAssignments:     cfg.ExecutionHostSlots,
+		MaxConcurrentFullNetworkJobs: cfg.ExecutionHostFullNetworkSlots,
 	}, cfg.NodeAgentHostID, cfg.NodeAgentRegion, cfg.NodeAgentCoordinator, driver, objectStore, secretsClient, dialOptions...).Run(ctx)
 }
 

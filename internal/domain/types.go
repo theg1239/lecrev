@@ -186,30 +186,33 @@ type Attempt struct {
 }
 
 type Host struct {
-	ID             string         `json:"id"`
-	Region         string         `json:"region"`
-	Driver         string         `json:"driver"`
-	State          HostState      `json:"state"`
-	AvailableSlots int            `json:"availableSlots"`
-	BlankWarm      int            `json:"blankWarm"`
-	FunctionWarm   map[string]int `json:"functionWarm"`
-	LastHeartbeat  time.Time      `json:"lastHeartbeat"`
+	ID                        string         `json:"id"`
+	Region                    string         `json:"region"`
+	Driver                    string         `json:"driver"`
+	State                     HostState      `json:"state"`
+	AvailableSlots            int            `json:"availableSlots"`
+	AvailableFullNetworkSlots int            `json:"availableFullNetworkSlots"`
+	BlankWarm                 int            `json:"blankWarm"`
+	FunctionWarm              map[string]int `json:"functionWarm"`
+	LastHeartbeat             time.Time      `json:"lastHeartbeat"`
 }
 
 type RegionStats struct {
-	AvailableHosts int `json:"availableHosts"`
-	BlankWarm      int `json:"blankWarm"`
-	FunctionWarm   int `json:"functionWarm"`
+	AvailableHosts            int `json:"availableHosts"`
+	AvailableFullNetworkSlots int `json:"availableFullNetworkSlots"`
+	BlankWarm                 int `json:"blankWarm"`
+	FunctionWarm              int `json:"functionWarm"`
 }
 
 type Region struct {
-	Name            string    `json:"name"`
-	State           string    `json:"state"`
-	AvailableHosts  int       `json:"availableHosts"`
-	BlankWarm       int       `json:"blankWarm"`
-	FunctionWarm    int       `json:"functionWarm"`
-	LastHeartbeatAt time.Time `json:"lastHeartbeatAt"`
-	LastError       string    `json:"lastError,omitempty"`
+	Name                      string    `json:"name"`
+	State                     string    `json:"state"`
+	AvailableHosts            int       `json:"availableHosts"`
+	AvailableFullNetworkSlots int       `json:"availableFullNetworkSlots"`
+	BlankWarm                 int       `json:"blankWarm"`
+	FunctionWarm              int       `json:"functionWarm"`
+	LastHeartbeatAt           time.Time `json:"lastHeartbeatAt"`
+	LastError                 string    `json:"lastError,omitempty"`
 }
 
 type WarmPool struct {

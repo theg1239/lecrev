@@ -85,6 +85,7 @@ func (s *Service) Stats() domain.RegionStats {
 		if session.host.AvailableSlots > 0 {
 			stats.AvailableHosts++
 		}
+		stats.AvailableFullNetworkSlots += session.host.AvailableFullNetworkSlots
 		stats.BlankWarm += session.host.BlankWarm
 		for _, count := range session.host.FunctionWarm {
 			stats.FunctionWarm += count
@@ -133,6 +134,7 @@ func (s *Service) DrainHost(ctx context.Context, hostID, reason string) error {
 	}
 	session.host.State = domain.HostStateDraining
 	session.host.AvailableSlots = 0
+	session.host.AvailableFullNetworkSlots = 0
 	host := session.host
 	sendCh := session.sendCh
 	s.mu.Unlock()
@@ -176,7 +178,7 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 	if err != nil {
 		return err
 	}
-	hostID, session, alreadyWarm, err := s.pickWarmHost(version.ID)
+	hostID, session, alreadyWarm, err := s.pickWarmHost(version.ID, version.NetworkPolicy)
 	if err != nil {
 		return err
 	}
@@ -206,10 +208,10 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 	case session.sendCh <- control:
 		return nil
 	case <-ctx.Done():
-		s.restorePreparationReservation(hostID)
+		s.restorePreparationReservation(hostID, version.NetworkPolicy)
 		return ctx.Err()
 	default:
-		s.restorePreparationReservation(hostID)
+		s.restorePreparationReservation(hostID, version.NetworkPolicy)
 		return fmt.Errorf("host %s control channel full", hostID)
 	}
 }
@@ -304,13 +306,13 @@ func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignm
 		return nil
 	case <-ctx.Done():
 		sendMs = time.Since(sendStarted).Milliseconds()
-		s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode)
+		s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode, assignment.NetworkPolicy)
 		state = "send_canceled"
 		errMsg = ctx.Err().Error()
 		return ctx.Err()
 	default:
 		sendMs = time.Since(sendStarted).Milliseconds()
-		s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode)
+		s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode, assignment.NetworkPolicy)
 		state = "send_failed"
 		errMsg = fmt.Sprintf("host %s control channel full", hostID)
 		return fmt.Errorf("host %s control channel full", hostID)
@@ -390,14 +392,15 @@ func (s *Service) RegisterEmbeddedHost(ctx context.Context, msg *regionv1.Regist
 
 func (s *Service) registerHostSession(ctx context.Context, msg *regionv1.RegisterHost, sendCh chan *regionv1.CoordinatorMessage, executor EmbeddedExecutor, preparer EmbeddedPreparer) error {
 	host := domain.Host{
-		ID:             msg.HostId,
-		Region:         msg.Region,
-		Driver:         msg.Driver,
-		State:          domain.HostStateActive,
-		AvailableSlots: int(msg.AvailableSlots),
-		BlankWarm:      int(msg.BlankWarm),
-		FunctionWarm:   warmMap(msg.FunctionWarm),
-		LastHeartbeat:  time.Now().UTC(),
+		ID:                        msg.HostId,
+		Region:                    msg.Region,
+		Driver:                    msg.Driver,
+		State:                     domain.HostStateActive,
+		AvailableSlots:            int(msg.AvailableSlots),
+		AvailableFullNetworkSlots: int(msg.AvailableFullNetworkSlots),
+		BlankWarm:                 int(msg.BlankWarm),
+		FunctionWarm:              warmMap(msg.FunctionWarm),
+		LastHeartbeat:             time.Now().UTC(),
 	}
 	s.mu.Lock()
 	s.hosts[host.ID] = &hostSession{host: host, sendCh: sendCh, executor: executor, preparer: preparer}
@@ -427,6 +430,7 @@ func (s *Service) updateHeartbeatContext(ctx context.Context, msg *regionv1.Host
 		return fmt.Errorf("heartbeat for unknown host %s", msg.HostId)
 	}
 	session.host.AvailableSlots = int(msg.AvailableSlots)
+	session.host.AvailableFullNetworkSlots = int(msg.AvailableFullNetworkSlots)
 	session.host.BlankWarm = int(msg.BlankWarm)
 	session.host.FunctionWarm = warmMap(msg.FunctionWarm)
 	session.host.LastHeartbeat = s.now()
@@ -599,6 +603,9 @@ func (s *Service) pickHost(assignment domain.Assignment) (string, *hostSession, 
 		if session.host.State != domain.HostStateActive || session.host.AvailableSlots <= 0 {
 			continue
 		}
+		if assignment.NetworkPolicy == domain.NetworkPolicyFull && session.host.AvailableFullNetworkSlots <= 0 {
+			continue
+		}
 		score := session.host.FunctionWarm[assignment.FunctionVersionID]*1000 + session.host.BlankWarm*100 + session.host.AvailableSlots
 		candidates = append(candidates, candidate{id: id, session: session, scoreFn: score})
 	}
@@ -609,6 +616,9 @@ func (s *Service) pickHost(assignment domain.Assignment) (string, *hostSession, 
 	chosen := candidates[0]
 	startMode := classifyStartMode(chosen.session.host, assignment.FunctionVersionID)
 	chosen.session.host.AvailableSlots--
+	if assignment.NetworkPolicy == domain.NetworkPolicyFull {
+		chosen.session.host.AvailableFullNetworkSlots--
+	}
 	switch startMode {
 	case domain.StartModeFunctionWarm:
 		if chosen.session.host.FunctionWarm[assignment.FunctionVersionID] > 0 {
@@ -626,7 +636,7 @@ func (s *Service) pickHost(assignment domain.Assignment) (string, *hostSession, 
 	return chosen.id, chosen.session, startMode, nil
 }
 
-func (s *Service) pickWarmHost(functionVersionID string) (string, *hostSession, bool, error) {
+func (s *Service) pickWarmHost(functionVersionID string, networkPolicy domain.NetworkPolicy) (string, *hostSession, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	type candidate struct {
@@ -634,13 +644,21 @@ func (s *Service) pickWarmHost(functionVersionID string) (string, *hostSession, 
 		session *hostSession
 		score   int
 	}
+	for id, session := range s.hosts {
+		if session.host.State != domain.HostStateActive {
+			continue
+		}
+		if session.host.FunctionWarm[functionVersionID] > 0 {
+			return id, session, true, nil
+		}
+	}
 	candidates := make([]candidate, 0, len(s.hosts))
 	for id, session := range s.hosts {
 		if session.host.State != domain.HostStateActive || session.host.AvailableSlots <= 0 {
 			continue
 		}
-		if session.host.FunctionWarm[functionVersionID] > 0 {
-			return id, session, true, nil
+		if networkPolicy == domain.NetworkPolicyFull && session.host.AvailableFullNetworkSlots <= 0 {
+			continue
 		}
 		score := session.host.BlankWarm*100 + session.host.AvailableSlots
 		candidates = append(candidates, candidate{id: id, session: session, score: score})
@@ -651,6 +669,9 @@ func (s *Service) pickWarmHost(functionVersionID string) (string, *hostSession, 
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
 	chosen := candidates[0]
 	chosen.session.host.AvailableSlots--
+	if networkPolicy == domain.NetworkPolicyFull {
+		chosen.session.host.AvailableFullNetworkSlots--
+	}
 	host := chosen.session.host
 	_ = s.store.UpdateHost(context.Background(), &host)
 	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
@@ -658,12 +679,15 @@ func (s *Service) pickWarmHost(functionVersionID string) (string, *hostSession, 
 	return chosen.id, chosen.session, false, nil
 }
 
-func (s *Service) releaseHostSlot(hostID string) {
+func (s *Service) releaseHostSlot(hostID string, networkPolicy domain.NetworkPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if session, ok := s.hosts[hostID]; ok {
 		if session.host.State == domain.HostStateActive {
 			session.host.AvailableSlots++
+			if networkPolicy == domain.NetworkPolicyFull {
+				session.host.AvailableFullNetworkSlots++
+			}
 		}
 		host := session.host
 		_ = s.store.UpdateHost(context.Background(), &host)
@@ -671,11 +695,14 @@ func (s *Service) releaseHostSlot(hostID string) {
 	}
 }
 
-func (s *Service) restoreHostReservation(hostID, functionVersionID string, startMode domain.StartMode) {
+func (s *Service) restoreHostReservation(hostID, functionVersionID string, startMode domain.StartMode, networkPolicy domain.NetworkPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if session, ok := s.hosts[hostID]; ok {
 		session.host.AvailableSlots++
+		if networkPolicy == domain.NetworkPolicyFull {
+			session.host.AvailableFullNetworkSlots++
+		}
 		switch startMode {
 		case domain.StartModeFunctionWarm:
 			session.host.FunctionWarm[functionVersionID]++
@@ -689,11 +716,14 @@ func (s *Service) restoreHostReservation(hostID, functionVersionID string, start
 	}
 }
 
-func (s *Service) restorePreparationReservation(hostID string) {
+func (s *Service) restorePreparationReservation(hostID string, networkPolicy domain.NetworkPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if session, ok := s.hosts[hostID]; ok {
 		session.host.AvailableSlots++
+		if networkPolicy == domain.NetworkPolicyFull {
+			session.host.AvailableFullNetworkSlots++
+		}
 		host := session.host
 		_ = s.store.UpdateHost(context.Background(), &host)
 		_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
@@ -710,6 +740,7 @@ func (s *Service) markHostDown(hostID string) {
 	}
 	session.host.State = domain.HostStateDown
 	session.host.AvailableSlots = 0
+	session.host.AvailableFullNetworkSlots = 0
 	session.host.BlankWarm = 0
 	session.host.FunctionWarm = map[string]int{}
 	host := session.host
@@ -767,6 +798,7 @@ func (s *Service) markStoredHostDown(ctx context.Context, host domain.Host, cuto
 		}
 		session.host.State = domain.HostStateDown
 		session.host.AvailableSlots = 0
+		session.host.AvailableFullNetworkSlots = 0
 		session.host.BlankWarm = 0
 		session.host.FunctionWarm = map[string]int{}
 		host = session.host
@@ -774,6 +806,7 @@ func (s *Service) markStoredHostDown(ctx context.Context, host domain.Host, cuto
 	} else {
 		host.State = domain.HostStateDown
 		host.AvailableSlots = 0
+		host.AvailableFullNetworkSlots = 0
 		host.BlankWarm = 0
 		host.FunctionWarm = map[string]int{}
 	}
@@ -908,6 +941,7 @@ func (s *Service) persistRegionLocked() error {
 			stats.AvailableHosts++
 		}
 		if session.host.State == domain.HostStateActive {
+			stats.AvailableFullNetworkSlots += session.host.AvailableFullNetworkSlots
 			stats.BlankWarm += session.host.BlankWarm
 			for _, count := range session.host.FunctionWarm {
 				stats.FunctionWarm += count
@@ -927,12 +961,13 @@ func (s *Service) persistRegionLocked() error {
 		lastError = "no active hosts connected"
 	}
 	return s.store.PutRegion(context.Background(), &domain.Region{
-		Name:            s.region,
-		State:           state,
-		AvailableHosts:  stats.AvailableHosts,
-		BlankWarm:       stats.BlankWarm,
-		FunctionWarm:    stats.FunctionWarm,
-		LastHeartbeatAt: lastHeartbeat,
-		LastError:       lastError,
+		Name:                      s.region,
+		State:                     state,
+		AvailableHosts:            stats.AvailableHosts,
+		AvailableFullNetworkSlots: stats.AvailableFullNetworkSlots,
+		BlankWarm:                 stats.BlankWarm,
+		FunctionWarm:              stats.FunctionWarm,
+		LastHeartbeatAt:           lastHeartbeat,
+		LastError:                 lastError,
 	})
 }

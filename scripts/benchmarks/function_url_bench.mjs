@@ -257,7 +257,7 @@ function renderMarkdownReport(run) {
   lines.push(`- Methodology: wall-clock request timing around \`fetch(url)\` + full response body read, matching the upstream cf-vs-vercel benchmark runner.`);
   lines.push(`- Iterations: ${run.iterations}`);
   lines.push(`- Concurrency: ${run.concurrency}`);
-  lines.push(`- Important context: the live execution host currently advertises \`availableSlots=1\`, so this load test includes real queueing under concurrency.`);
+  lines.push(`- Important context: run each test in isolation after prior queue backlog drains; timed-out synchronous requests can still leave background work in flight and contaminate later benchmark cases.`);
   lines.push("");
 
   for (const test of run.tests) {

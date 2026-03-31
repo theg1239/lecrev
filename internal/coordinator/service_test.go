@@ -143,11 +143,12 @@ func TestDrainHostClearsWarmPoolsAndPreventsSlotRecovery(t *testing.T) {
 	svc := New("ap-south-1", meta, nil)
 	sendCh := make(chan *regionv1.CoordinatorMessage, 4)
 	if err := svc.registerHost(&regionv1.RegisterHost{
-		HostId:         "host-ap-south-1-a",
-		Region:         "ap-south-1",
-		Driver:         "local-node",
-		AvailableSlots: 1,
-		BlankWarm:      1,
+		HostId:                    "host-ap-south-1-a",
+		Region:                    "ap-south-1",
+		Driver:                    "local-node",
+		AvailableSlots:            1,
+		AvailableFullNetworkSlots: 1,
+		BlankWarm:                 1,
 		FunctionWarm: []*regionv1.WarmPoolMetric{
 			{FunctionVersionId: "fn-1", Available: 2},
 		},
@@ -178,6 +179,9 @@ func TestDrainHostClearsWarmPoolsAndPreventsSlotRecovery(t *testing.T) {
 	if host.AvailableSlots != 0 {
 		t.Fatalf("expected host available slots 0, got %d", host.AvailableSlots)
 	}
+	if host.AvailableFullNetworkSlots != 0 {
+		t.Fatalf("expected host full-network slots 0, got %d", host.AvailableFullNetworkSlots)
+	}
 
 	pools, err := meta.ListWarmPoolsByRegion(context.Background(), "ap-south-1")
 	if err != nil {
@@ -187,13 +191,60 @@ func TestDrainHostClearsWarmPoolsAndPreventsSlotRecovery(t *testing.T) {
 		t.Fatalf("expected warm pools to be cleared, got %d", len(pools))
 	}
 
-	svc.releaseHostSlot("host-ap-south-1-a")
+	svc.releaseHostSlot("host-ap-south-1-a", domain.NetworkPolicyNone)
 	host, err = meta.GetHost(context.Background(), "host-ap-south-1-a")
 	if err != nil {
 		t.Fatalf("get host after release: %v", err)
 	}
 	if host.AvailableSlots != 0 {
 		t.Fatalf("expected draining host to stay unschedulable, got %d slots", host.AvailableSlots)
+	}
+}
+
+func TestPickHostSeparatesFullNetworkCapacityFromGeneralSlots(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	svc := New("ap-south-1", meta, nil)
+	if err := svc.registerHost(&regionv1.RegisterHost{
+		HostId:                    "host-ap-south-1-a",
+		Region:                    "ap-south-1",
+		Driver:                    "firecracker",
+		AvailableSlots:            4,
+		AvailableFullNetworkSlots: 1,
+		BlankWarm:                 1,
+	}, make(chan *regionv1.CoordinatorMessage, 4)); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	fullAssignment := domain.Assignment{
+		FunctionVersionID: "fn-full",
+		NetworkPolicy:     domain.NetworkPolicyFull,
+	}
+	if _, _, _, err := svc.pickHost(fullAssignment); err != nil {
+		t.Fatalf("pick full-network host: %v", err)
+	}
+
+	noneAssignment := domain.Assignment{
+		FunctionVersionID: "fn-none",
+		NetworkPolicy:     domain.NetworkPolicyNone,
+	}
+	if _, _, _, err := svc.pickHost(noneAssignment); err != nil {
+		t.Fatalf("pick general host after full-network reservation: %v", err)
+	}
+
+	svc.mu.Lock()
+	host := svc.hosts["host-ap-south-1-a"].host
+	svc.mu.Unlock()
+	if host.AvailableSlots != 2 {
+		t.Fatalf("expected two general slots remaining, got %d", host.AvailableSlots)
+	}
+	if host.AvailableFullNetworkSlots != 0 {
+		t.Fatalf("expected dedicated full-network budget to be exhausted, got %d", host.AvailableFullNetworkSlots)
+	}
+
+	if _, _, _, err := svc.pickHost(fullAssignment); err == nil {
+		t.Fatal("expected second full-network reservation to fail once dedicated budget is exhausted")
 	}
 }
 

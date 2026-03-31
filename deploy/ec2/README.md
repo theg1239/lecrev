@@ -184,7 +184,7 @@ ssh -i /path/to/key.pem ec2-user@<execution-host> 'sudo APP_USER=lecrev /usr/loc
 
 Important current constraint:
 
-- `configure-firecracker-network.sh` still provisions a single static `tap0`, so keep `LECREV_EXECUTION_HOST_SLOTS=1` if you need `networkPolicy=full`.
+- `configure-firecracker-network.sh` still provisions a single static `tap0`, so keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS=1` if you need `networkPolicy=full`, even when `LECREV_EXECUTION_HOST_SLOTS` is higher for `networkPolicy=none`.
 - the execution-host deployment now installs `lecrev-firecracker-network.service` so `tap0` is recreated after reboots before the node-agent starts.
 - Set `LECREV_PUBLIC_BASE_URL` on the control plane so created HTTP trigger URLs use the real external origin instead of the incoming request host header.
 - Set `LECREV_S3_BUCKET` on each execution host to the bucket mapped for that host's region in `LECREV_S3_REGION_BUCKETS`.

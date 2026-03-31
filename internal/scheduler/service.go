@@ -61,7 +61,7 @@ func New(store store.Store, dispatchers []RegionDispatcher) *Service {
 		schedulingTimeout:                10 * time.Second,
 		healthyWithin:                    15 * time.Second,
 		wakeCh:                           make(chan struct{}, 1),
-		maxActiveExecutionJobsPerProject: 50,
+		maxActiveExecutionJobsPerProject: 200,
 	}
 }
 

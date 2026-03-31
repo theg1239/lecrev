@@ -32,8 +32,10 @@ type Service struct {
 
 	mu             sync.Mutex
 	maxSlots       int
+	maxFullNetwork int
 	sendMu         sync.Mutex
 	availableSlots int
+	availableFull  int
 	blankWarm      int
 	functionWarm   map[string]int
 	bundleMu       sync.RWMutex
@@ -41,8 +43,8 @@ type Service struct {
 }
 
 const (
-	maxExecutionLogBytes    = 1 << 20
-	maxExecutionOutputBytes = 1 << 20
+	maxExecutionLogBytes    = 8 << 20
+	maxExecutionOutputBytes = 8 << 20
 )
 
 type EmbeddedCoordinator interface {
@@ -51,12 +53,19 @@ type EmbeddedCoordinator interface {
 }
 
 type Config struct {
-	MaxConcurrentAssignments int
+	MaxConcurrentAssignments     int
+	MaxConcurrentFullNetworkJobs int
 }
 
 func (c Config) withDefaults() Config {
 	if c.MaxConcurrentAssignments <= 0 {
-		c.MaxConcurrentAssignments = 1
+		c.MaxConcurrentAssignments = 4
+	}
+	if c.MaxConcurrentFullNetworkJobs <= 0 {
+		c.MaxConcurrentFullNetworkJobs = 1
+	}
+	if c.MaxConcurrentFullNetworkJobs > c.MaxConcurrentAssignments {
+		c.MaxConcurrentFullNetworkJobs = c.MaxConcurrentAssignments
 	}
 	return c
 }
@@ -84,7 +93,9 @@ func NewWithConfig(cfg Config, hostID, region, coordinatorAddr string, driver fi
 		secrets:         secrets,
 		dialOptions:     append([]grpc.DialOption(nil), dialOptions...),
 		maxSlots:        cfg.MaxConcurrentAssignments,
+		maxFullNetwork:  cfg.MaxConcurrentFullNetworkJobs,
 		availableSlots:  cfg.MaxConcurrentAssignments,
+		availableFull:   cfg.MaxConcurrentFullNetworkJobs,
 		blankWarm:       1,
 		functionWarm:    map[string]int{},
 		bundleCache:     map[string][]byte{},
@@ -242,11 +253,8 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 			"totalMs", time.Since(overallStarted).Milliseconds(),
 		)
 	}()
-	s.mu.Lock()
-	if s.availableSlots > 0 {
-		s.availableSlots--
-	}
-	s.mu.Unlock()
+	networkPolicy := msg.NetworkPolicy
+	s.reserveAssignmentSlots(networkPolicy)
 	released := false
 	holdDeferredRelease := false
 	releaseSlot := func() {
@@ -254,11 +262,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 			return
 		}
 		released = true
-		s.mu.Lock()
-		if s.availableSlots < s.maxSlots {
-			s.availableSlots++
-		}
-		s.mu.Unlock()
+		s.releaseAssignmentSlots(networkPolicy)
 	}
 	defer func() {
 		if holdDeferredRelease {
@@ -454,9 +458,9 @@ func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersi
 }
 
 func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnapshot, sendHeartbeat func()) {
-	s.reserveSlot()
+	s.reserveAssignmentSlots(msg.NetworkPolicy)
 	defer func() {
-		s.releaseSlot()
+		s.releaseAssignmentSlots(msg.NetworkPolicy)
 		sendHeartbeat()
 	}()
 
@@ -609,14 +613,16 @@ func (s *Service) registrationMessage() *regionv1.RegisterHost {
 	inventory := s.warmInventory()
 	s.mu.Lock()
 	availableSlots := s.availableSlots
+	availableFull := s.availableFull
 	s.mu.Unlock()
 	return &regionv1.RegisterHost{
-		HostId:         s.hostID,
-		Region:         s.region,
-		Driver:         s.driverName,
-		AvailableSlots: int32(availableSlots),
-		BlankWarm:      int32(inventory.BlankWarm),
-		FunctionWarm:   warmMetrics(inventory.FunctionWarm),
+		HostId:                    s.hostID,
+		Region:                    s.region,
+		Driver:                    s.driverName,
+		AvailableSlots:            int32(availableSlots),
+		BlankWarm:                 int32(inventory.BlankWarm),
+		FunctionWarm:              warmMetrics(inventory.FunctionWarm),
+		AvailableFullNetworkSlots: int32(availableFull),
 	}
 }
 
@@ -630,13 +636,15 @@ func (s *Service) heartbeatMessage() *regionv1.HostHeartbeat {
 	inventory := s.warmInventory()
 	s.mu.Lock()
 	availableSlots := s.availableSlots
+	availableFull := s.availableFull
 	s.mu.Unlock()
 	return &regionv1.HostHeartbeat{
-		HostId:         s.hostID,
-		Region:         s.region,
-		AvailableSlots: int32(availableSlots),
-		BlankWarm:      int32(inventory.BlankWarm),
-		FunctionWarm:   warmMetrics(inventory.FunctionWarm),
+		HostId:                    s.hostID,
+		Region:                    s.region,
+		AvailableSlots:            int32(availableSlots),
+		BlankWarm:                 int32(inventory.BlankWarm),
+		FunctionWarm:              warmMetrics(inventory.FunctionWarm),
+		AvailableFullNetworkSlots: int32(availableFull),
 	}
 }
 
@@ -691,8 +699,31 @@ func (s *Service) applyDrain() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.availableSlots = 0
+	s.availableFull = 0
 	s.blankWarm = 0
 	s.functionWarm = map[string]int{}
+}
+
+func (s *Service) reserveAssignmentSlots(networkPolicy string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.availableSlots > 0 {
+		s.availableSlots--
+	}
+	if isFullNetworkPolicy(networkPolicy) && s.availableFull > 0 {
+		s.availableFull--
+	}
+}
+
+func (s *Service) releaseAssignmentSlots(networkPolicy string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.availableSlots < s.maxSlots {
+		s.availableSlots++
+	}
+	if isFullNetworkPolicy(networkPolicy) && s.availableFull < s.maxFullNetwork {
+		s.availableFull++
+	}
 }
 
 func warmMetrics(input map[string]int) []*regionv1.WarmPoolMetric {
@@ -711,4 +742,8 @@ func minInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func isFullNetworkPolicy(policy string) bool {
+	return strings.EqualFold(strings.TrimSpace(policy), "full")
 }

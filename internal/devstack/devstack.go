@@ -38,43 +38,44 @@ import (
 )
 
 type Config struct {
-	LoadEnv                bool
-	APIAddr                string
-	ExecutionRegions       []string
-	CoordinatorBasePort    int
-	CoordinatorBindHost    string
-	ControlPlaneBaseURL    string
-	NodeAgentHostID        string
-	NodeAgentRegion        string
-	NodeAgentCoordinator   string
-	PostgresDSN            string
-	NATSURL                string
-	S3Region               string
-	S3RegionBuckets        map[string]string
-	S3Endpoint             string
-	S3AccessKey            string
-	S3SecretKey            string
-	S3Bucket               string
-	SecretsBackend         string
-	AWSRegion              string
-	AWSAccessKey           string
-	AWSSecretKey           string
-	SecretsProxyToken      string
-	BootstrapAdminAPIKey   string
-	EnableMTLS             bool
-	GRPCCACertPath         string
-	GRPCServerCertPath     string
-	GRPCServerKeyPath      string
-	GRPCClientCertPath     string
-	GRPCClientKeyPath      string
-	GRPCServerName         string
-	ExecutionDriver        string
-	ExecutionHostSlots     int
-	BuildWorkersPerRegion  int
-	BuildGitCloneTimeout   time.Duration
-	BuildNPMInstallTimeout time.Duration
-	BuildNPMBuildTimeout   time.Duration
-	BuildNPMPruneTimeout   time.Duration
+	LoadEnv                       bool
+	APIAddr                       string
+	ExecutionRegions              []string
+	CoordinatorBasePort           int
+	CoordinatorBindHost           string
+	ControlPlaneBaseURL           string
+	NodeAgentHostID               string
+	NodeAgentRegion               string
+	NodeAgentCoordinator          string
+	PostgresDSN                   string
+	NATSURL                       string
+	S3Region                      string
+	S3RegionBuckets               map[string]string
+	S3Endpoint                    string
+	S3AccessKey                   string
+	S3SecretKey                   string
+	S3Bucket                      string
+	SecretsBackend                string
+	AWSRegion                     string
+	AWSAccessKey                  string
+	AWSSecretKey                  string
+	SecretsProxyToken             string
+	BootstrapAdminAPIKey          string
+	EnableMTLS                    bool
+	GRPCCACertPath                string
+	GRPCServerCertPath            string
+	GRPCServerKeyPath             string
+	GRPCClientCertPath            string
+	GRPCClientKeyPath             string
+	GRPCServerName                string
+	ExecutionDriver               string
+	ExecutionHostSlots            int
+	ExecutionHostFullNetworkSlots int
+	BuildWorkersPerRegion         int
+	BuildGitCloneTimeout          time.Duration
+	BuildNPMInstallTimeout        time.Duration
+	BuildNPMBuildTimeout          time.Duration
+	BuildNPMPruneTimeout          time.Duration
 
 	FirecrackerBinary      string
 	JailerBinary           string
@@ -195,6 +196,15 @@ func prepareConfig(cfg *Config) error {
 				return fmt.Errorf("parse LECREV_EXECUTION_HOST_SLOTS: %w", err)
 			}
 			cfg.ExecutionHostSlots = value
+		}
+	}
+	if cfg.LoadEnv && cfg.ExecutionHostFullNetworkSlots == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS: %w", err)
+			}
+			cfg.ExecutionHostFullNetworkSlots = value
 		}
 	}
 	if cfg.LoadEnv && cfg.BuildWorkersPerRegion == 0 {
@@ -318,22 +328,28 @@ func prepareConfig(cfg *Config) error {
 		cfg.ExecutionDriver = "local-node"
 	}
 	if cfg.ExecutionHostSlots <= 0 {
-		cfg.ExecutionHostSlots = 1
+		cfg.ExecutionHostSlots = 4
+	}
+	if cfg.ExecutionHostFullNetworkSlots <= 0 {
+		cfg.ExecutionHostFullNetworkSlots = 1
+	}
+	if cfg.ExecutionHostFullNetworkSlots > cfg.ExecutionHostSlots {
+		cfg.ExecutionHostFullNetworkSlots = cfg.ExecutionHostSlots
 	}
 	if cfg.BuildWorkersPerRegion <= 0 {
-		cfg.BuildWorkersPerRegion = 2
+		cfg.BuildWorkersPerRegion = 4
 	}
 	if cfg.BuildGitCloneTimeout <= 0 {
-		cfg.BuildGitCloneTimeout = 90 * time.Second
+		cfg.BuildGitCloneTimeout = 3 * time.Minute
 	}
 	if cfg.BuildNPMInstallTimeout <= 0 {
-		cfg.BuildNPMInstallTimeout = 3 * time.Minute
+		cfg.BuildNPMInstallTimeout = 8 * time.Minute
 	}
 	if cfg.BuildNPMBuildTimeout <= 0 {
-		cfg.BuildNPMBuildTimeout = 3 * time.Minute
+		cfg.BuildNPMBuildTimeout = 10 * time.Minute
 	}
 	if cfg.BuildNPMPruneTimeout <= 0 {
-		cfg.BuildNPMPruneTimeout = 90 * time.Second
+		cfg.BuildNPMPruneTimeout = 3 * time.Minute
 	}
 	if cfg.LoadEnv {
 		if raw := strings.TrimSpace(os.Getenv("LECREV_ENABLE_MTLS")); raw != "" {
@@ -518,7 +534,8 @@ func runNetworked(ctx context.Context, cfg Config) error {
 				return err
 			}
 			return nodeagent.NewWithConfig(nodeagent.Config{
-				MaxConcurrentAssignments: cfg.ExecutionHostSlots,
+				MaxConcurrentAssignments:     cfg.ExecutionHostSlots,
+				MaxConcurrentFullNetworkJobs: cfg.ExecutionHostFullNetworkSlots,
 			}, region.host, region.name, region.addr, driver, objectStore, secretsClient, grpcDialOptions...).Run(ctx)
 		})
 	}
