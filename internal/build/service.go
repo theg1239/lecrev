@@ -925,6 +925,9 @@ func prepareNodeWorkspace(ctx context.Context, recorder *buildRecorder, root str
 		return nil
 	}
 	if isNextWorkspace(pkg) {
+		if err := ensureNextStandaloneConfig(root, recorder); err != nil {
+			return fmt.Errorf("prepare next.js standalone config: %w", err)
+		}
 		buildEnv = append(buildEnv, "NEXT_PRIVATE_STANDALONE=true")
 		recorder.Printf("detected next.js workspace; enabling standalone build output")
 	}
@@ -1045,6 +1048,89 @@ func usesModernYarn(root, packageManager string) bool {
 		major = major[:idx]
 	}
 	return major != "" && major != "0" && major != "1"
+}
+
+func ensureNextStandaloneConfig(root string, recorder *buildRecorder) error {
+	candidates := []string{
+		"next.config.ts",
+		"next.config.mjs",
+		"next.config.js",
+		"next.config.cjs",
+	}
+	for _, name := range candidates {
+		configPath := filepath.Join(root, name)
+		if _, err := os.Stat(configPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		backupName := strings.Replace(name, "next.config.", "next.config.lecrev.orig.", 1)
+		backupPath := filepath.Join(root, backupName)
+		if _, err := os.Stat(backupPath); err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			if err := os.Rename(configPath, backupPath); err != nil {
+				return fmt.Errorf("backup %s: %w", name, err)
+			}
+		}
+		wrapper := nextStandaloneConfigWrapper(name, backupName)
+		if err := os.WriteFile(configPath, []byte(wrapper), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+		if recorder != nil {
+			recorder.Printf("wrapped %s to force next.js standalone output", name)
+		}
+		return nil
+	}
+
+	configPath := filepath.Join(root, "next.config.mjs")
+	if err := os.WriteFile(configPath, []byte("export default { output: 'standalone' };\n"), 0o644); err != nil {
+		return fmt.Errorf("write next.config.mjs: %w", err)
+	}
+	if recorder != nil {
+		recorder.Printf("generated next.config.mjs to force next.js standalone output")
+	}
+	return nil
+}
+
+func nextStandaloneConfigWrapper(configName, backupName string) string {
+	switch filepath.Ext(configName) {
+	case ".mjs":
+		return fmt.Sprintf(`import originalConfig from './%s';
+
+const withStandalone = (config) => ({ ...(config ?? {}), output: 'standalone' });
+
+export default async function lecrevNextConfig(...args) {
+  const resolved = typeof originalConfig === 'function' ? await originalConfig(...args) : await originalConfig;
+  return withStandalone(resolved);
+}
+`, backupName)
+	case ".ts":
+		return fmt.Sprintf(`import originalConfig from './%s';
+
+const withStandalone = (config: Record<string, unknown> | undefined | null) => ({ ...(config ?? {}), output: 'standalone' });
+
+export default async function lecrevNextConfig(...args: any[]) {
+  const resolved = typeof originalConfig === 'function' ? await originalConfig(...args) : await originalConfig;
+  return withStandalone((resolved ?? undefined) as Record<string, unknown> | undefined);
+}
+`, backupName)
+	default:
+		return fmt.Sprintf(`const originalModule = require('./%s');
+const originalConfig = originalModule && typeof originalModule === 'object' && 'default' in originalModule
+  ? originalModule.default
+  : originalModule;
+
+const withStandalone = (config) => ({ ...(config ?? {}), output: 'standalone' });
+
+module.exports = async (...args) => {
+  const resolved = typeof originalConfig === 'function' ? await originalConfig(...args) : await originalConfig;
+  return withStandalone(resolved);
+};
+`, backupName)
+	}
 }
 
 func verifyEntrypoint(root, entrypoint string) error {
