@@ -26,6 +26,7 @@ import (
 const preparedRoot = "/var/lib/lecrev/functions"
 const guestNodeBinary = "/usr/local/bin/node"
 const preparedWorkerStartupTimeout = 10 * time.Second
+const guestShutdownDelay = 25 * time.Millisecond
 
 func main() {
 	if err := mountGuestFilesystems(); err != nil {
@@ -110,7 +111,7 @@ func serve(port uint32) error {
 			return err
 		}
 		if shouldShutdown {
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(guestShutdownDelay)
 			_ = unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
 			return nil
 		}

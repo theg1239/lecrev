@@ -319,7 +319,7 @@ func (v *vmInstance) cleanupWithTimeout(timeout time.Duration) {
 	}
 	v.cleanupOnce.Do(func() {
 		if v.proc != nil {
-			_ = v.proc.wait(timeout)
+			_ = v.proc.terminate(timeout)
 		}
 		if v.layout != nil && v.layout.cleanup != nil {
 			v.layout.cleanup()

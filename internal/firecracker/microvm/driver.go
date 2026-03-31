@@ -388,6 +388,29 @@ func (p *vmProcess) close() error {
 	return p.wait(2 * time.Second)
 }
 
+func (p *vmProcess) terminate(timeout time.Duration) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	if p.done {
+		err := p.waitErr
+		p.mu.Unlock()
+		return err
+	}
+	p.mu.Unlock()
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+	select {
+	case err := <-p.waitCh:
+		p.markDone(err)
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("timed out waiting for firecracker process to terminate")
+	}
+}
+
 func (p *vmProcess) markDone(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
