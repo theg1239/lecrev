@@ -176,7 +176,16 @@ func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req fi
 	defer cancel()
 
 	invokeStarted := time.Now()
-	response, err := invokeGuest(invokeCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, guestInvocationRequest(req, usePreparedRoot))
+	guestReq := guestInvocationRequest(req, usePreparedRoot)
+	var (
+		response *firecracker.GuestInvocationResponse
+		err      error
+	)
+	if req.EnableStreaming && req.StreamKind == firecracker.StreamKindHTTP && req.HTTPStream != nil {
+		response, err = invokeGuestStream(invokeCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, guestReq, req.HTTPStream)
+	} else {
+		response, err = invokeGuest(invokeCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, guestReq)
+	}
 	trace.Step("invoke_guest", invokeStarted)
 
 	if response == nil {
@@ -218,6 +227,8 @@ func guestInvocationRequest(req firecracker.ExecuteRequest, usePreparedRoot bool
 		TimeoutMillis:   req.Timeout.Milliseconds(),
 		Region:          req.Region,
 		HostID:          req.HostID,
+		EnableStreaming: req.EnableStreaming,
+		StreamKind:      req.StreamKind,
 	}
 }
 

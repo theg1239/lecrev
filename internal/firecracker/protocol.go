@@ -13,6 +13,28 @@ const (
 	GuestActionExecute GuestAction = "execute"
 )
 
+type StreamKind string
+
+const (
+	StreamKindNone StreamKind = ""
+	StreamKindHTTP StreamKind = "http"
+)
+
+type HTTPStreamEventType string
+
+const (
+	HTTPStreamEventStart HTTPStreamEventType = "http_start"
+	HTTPStreamEventChunk HTTPStreamEventType = "http_chunk"
+	HTTPStreamEventEnd   HTTPStreamEventType = "http_end"
+)
+
+type HTTPStreamEvent struct {
+	Type       HTTPStreamEventType `json:"type"`
+	StatusCode int                 `json:"statusCode,omitempty"`
+	Headers    map[string]string   `json:"headers,omitempty"`
+	Chunk      []byte              `json:"chunk,omitempty"`
+}
+
 type GuestRequest struct {
 	Action     GuestAction             `json:"action"`
 	Ping       *GuestPingRequest       `json:"ping,omitempty"`
@@ -25,6 +47,20 @@ type GuestResponse struct {
 	Ping       *GuestPingResponse       `json:"ping,omitempty"`
 	Prepare    *GuestPrepareResponse    `json:"prepare,omitempty"`
 	Invocation *GuestInvocationResponse `json:"invocation,omitempty"`
+}
+
+type GuestStreamFrameType string
+
+const (
+	GuestStreamFrameHTTPEvent  GuestStreamFrameType = "http_event"
+	GuestStreamFrameInvocation GuestStreamFrameType = "invocation"
+)
+
+type GuestStreamFrame struct {
+	Type       GuestStreamFrameType     `json:"type"`
+	HTTPEvent  *HTTPStreamEvent         `json:"httpEvent,omitempty"`
+	Invocation *GuestInvocationResponse `json:"invocation,omitempty"`
+	Error      string                   `json:"error,omitempty"`
 }
 
 type GuestPingRequest struct{}
@@ -58,6 +94,8 @@ type GuestInvocationRequest struct {
 	TimeoutMillis   int64             `json:"timeoutMillis"`
 	Region          string            `json:"region"`
 	HostID          string            `json:"hostId"`
+	EnableStreaming bool              `json:"enableStreaming,omitempty"`
+	StreamKind      StreamKind        `json:"streamKind,omitempty"`
 }
 
 type GuestInvocationResponse struct {

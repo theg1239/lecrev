@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
@@ -32,17 +33,21 @@ type PrepareWorkerRequest struct {
 }
 
 type preparedWorkerMessage struct {
-	Type    string            `json:"type"`
-	Payload json.RawMessage   `json:"payload,omitempty"`
-	Context map[string]any    `json:"context,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
+	Type            string                 `json:"type"`
+	Payload         json.RawMessage        `json:"payload,omitempty"`
+	Context         map[string]any         `json:"context,omitempty"`
+	Env             map[string]string      `json:"env,omitempty"`
+	EnableStreaming bool                   `json:"enableStreaming,omitempty"`
+	StreamKind      firecracker.StreamKind `json:"streamKind,omitempty"`
 }
 
 type preparedWorkerResponse struct {
-	Ready  bool            `json:"ready,omitempty"`
-	Logs   string          `json:"logs,omitempty"`
-	Output json.RawMessage `json:"output,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Type      string                       `json:"type,omitempty"`
+	Ready     bool                         `json:"ready,omitempty"`
+	Logs      string                       `json:"logs,omitempty"`
+	Output    json.RawMessage              `json:"output,omitempty"`
+	Error     string                       `json:"error,omitempty"`
+	HTTPEvent *firecracker.HTTPStreamEvent `json:"httpEvent,omitempty"`
 }
 
 type preparedWorkerController struct {
@@ -57,6 +62,12 @@ type preparedWorkerController struct {
 	stderrMu sync.Mutex
 	stderr   bytes.Buffer
 }
+
+const (
+	preparedWorkerResponseTypeReady     = "ready"
+	preparedWorkerResponseTypeResult    = "result"
+	preparedWorkerResponseTypeHTTPEvent = "http_event"
+)
 
 var preparedWorkers sync.Map
 
@@ -136,6 +147,9 @@ func StartPreparedWorker(ctx context.Context, req PrepareWorkerRequest) error {
 }
 
 func ExecutePreparedWorker(ctx context.Context, req WorkspaceRequest) (*Result, error) {
+	if req.HTTPStream != nil {
+		return ExecutePreparedWorkerStream(ctx, req)
+	}
 	startedAt := time.Now().UTC()
 	trace := timetrace.New()
 
@@ -149,10 +163,12 @@ func ExecutePreparedWorker(ctx context.Context, req WorkspaceRequest) (*Result, 
 
 	workerInvokeStarted := time.Now()
 	response, err := preparedWorkerRequest(ctx, req.FunctionID, preparedWorkerMessage{
-		Type:    "invoke",
-		Payload: req.Payload,
-		Context: contextValue,
-		Env:     req.Env,
+		Type:            "invoke",
+		Payload:         req.Payload,
+		Context:         contextValue,
+		Env:             req.Env,
+		EnableStreaming: req.HTTPStream != nil,
+		StreamKind:      firecracker.StreamKindHTTP,
 	})
 	trace.Step("prepared_worker_invoke", workerInvokeStarted)
 	finishedAt := time.Now().UTC()
@@ -201,6 +217,48 @@ func pingPreparedWorker(ctx context.Context, functionID string) (bool, error) {
 	return response.Ready, nil
 }
 
+func ExecutePreparedWorkerStream(ctx context.Context, req WorkspaceRequest) (*Result, error) {
+	startedAt := time.Now().UTC()
+	trace := timetrace.New()
+
+	contextStarted := time.Now()
+	contextValue := invocationContext(req)
+	trace.Step("build_context", contextStarted)
+
+	if len(req.Payload) == 0 {
+		req.Payload = json.RawMessage(`null`)
+	}
+
+	workerInvokeStarted := time.Now()
+	response, err := preparedWorkerStreamingRequest(ctx, req.FunctionID, preparedWorkerMessage{
+		Type:            "invoke",
+		Payload:         req.Payload,
+		Context:         contextValue,
+		Env:             req.Env,
+		EnableStreaming: true,
+		StreamKind:      firecracker.StreamKindHTTP,
+	}, req.HTTPStream)
+	trace.Step("prepared_worker_invoke", workerInvokeStarted)
+	finishedAt := time.Now().UTC()
+	if err != nil {
+		return nil, err
+	}
+
+	result := &Result{
+		ExitCode:      0,
+		Logs:          strings.TrimSpace(response.Logs),
+		Output:        normalizedWorkerOutput(response.Output),
+		PlatformTrace: trace.String(),
+		StartedAt:     startedAt,
+		FinishedAt:    finishedAt,
+	}
+	if response.Error != "" {
+		result.ExitCode = 1
+		return result, errors.New(response.Error)
+	}
+	return result, nil
+}
+
 func ReleasePreparedWorkerConnection(functionID string) {
 	controller, ok := loadPreparedWorker(functionID)
 	if !ok {
@@ -224,6 +282,31 @@ func preparedWorkerRequest(ctx context.Context, functionID string, request prepa
 	controller.closeConnection()
 	if reconnectErr := controller.openConnection(ctx); reconnectErr == nil {
 		response, retryErr := controller.request(ctx, request)
+		if retryErr == nil {
+			return response, nil
+		}
+		err = retryErr
+	}
+	preparedWorkers.Delete(functionID)
+	controller.close()
+	return nil, err
+}
+
+func preparedWorkerStreamingRequest(ctx context.Context, functionID string, request preparedWorkerMessage, sink func(firecracker.HTTPStreamEvent) error) (*preparedWorkerResponse, error) {
+	if strings.TrimSpace(functionID) == "" {
+		return nil, fmt.Errorf("%w: functionID is required", ErrPreparedWorkerUnavailable)
+	}
+	controller, ok := loadPreparedWorker(functionID)
+	if !ok {
+		return nil, fmt.Errorf("%w: missing prepared worker controller", ErrPreparedWorkerUnavailable)
+	}
+	response, err := controller.requestStream(ctx, request, sink)
+	if err == nil {
+		return response, nil
+	}
+	controller.closeConnection()
+	if reconnectErr := controller.openConnection(ctx); reconnectErr == nil {
+		response, retryErr := controller.requestStream(ctx, request, sink)
 		if retryErr == nil {
 			return response, nil
 		}
@@ -315,6 +398,42 @@ func (c *preparedWorkerController) request(ctx context.Context, request prepared
 		return nil, fmt.Errorf("%w: read prepared worker response: %v", ErrPreparedWorkerUnavailable, err)
 	}
 	return &response, nil
+}
+
+func (c *preparedWorkerController) requestStream(ctx context.Context, request preparedWorkerMessage, sink func(firecracker.HTTPStreamEvent) error) (*preparedWorkerResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil, fmt.Errorf("%w: prepared worker control connection is not ready", ErrPreparedWorkerUnavailable)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = c.conn.SetDeadline(deadline)
+	} else {
+		_ = c.conn.SetDeadline(time.Time{})
+	}
+	if err := json.NewEncoder(c.conn).Encode(request); err != nil {
+		c.closeConnectionLocked()
+		return nil, fmt.Errorf("%w: send prepared worker request: %v", ErrPreparedWorkerUnavailable, err)
+	}
+
+	decoder := json.NewDecoder(c.reader)
+	for {
+		var response preparedWorkerResponse
+		if err := decoder.Decode(&response); err != nil {
+			c.closeConnectionLocked()
+			return nil, fmt.Errorf("%w: read prepared worker response: %v", ErrPreparedWorkerUnavailable, err)
+		}
+		if response.Type == preparedWorkerResponseTypeHTTPEvent {
+			if sink != nil && response.HTTPEvent != nil {
+				if err := sink(*response.HTTPEvent); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		return &response, nil
+	}
 }
 
 func (c *preparedWorkerController) closeConnection() {
@@ -484,17 +603,107 @@ function applyEnv(overrides) {
 }
 
 function handleRequest(socket, protocolWrite, request) {
+  const emit = (value) => {
+    protocolWrite(JSON.stringify(value) + '\n');
+  };
+  const createHttpStream = () => {
+    if (!request.enableStreaming || request.streamKind !== 'http') {
+      return null;
+    }
+    let started = false;
+    let ended = false;
+    const normalizeChunk = (chunk) => {
+      if (chunk == null) {
+        return Buffer.alloc(0);
+      }
+      if (typeof chunk === 'string') {
+        return Buffer.from(chunk);
+      }
+      if (chunk instanceof Uint8Array) {
+        return Buffer.from(chunk);
+      }
+      if (ArrayBuffer.isView(chunk)) {
+        return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      }
+      if (chunk instanceof ArrayBuffer) {
+        return Buffer.from(chunk);
+      }
+      return Buffer.from(String(chunk));
+    };
+    return {
+      get active() {
+        return started;
+      },
+      get closed() {
+        return ended;
+      },
+      async start(init = {}) {
+        if (ended) {
+          throw new Error('http stream is already closed');
+        }
+        if (started) {
+          return;
+        }
+        started = true;
+        emit({
+          type: 'http_event',
+          httpEvent: {
+            type: 'http_start',
+            statusCode: Number.isInteger(init?.statusCode) ? init.statusCode : 200,
+            headers: init?.headers ?? {},
+          },
+        });
+      },
+      async write(chunk) {
+        if (!started) {
+          await this.start();
+        }
+        if (ended) {
+          throw new Error('http stream is already closed');
+        }
+        const buffer = normalizeChunk(chunk);
+        if (buffer.length === 0) {
+          return;
+        }
+        emit({
+          type: 'http_event',
+          httpEvent: {
+            type: 'http_chunk',
+            chunk: buffer.toString('base64'),
+          },
+        });
+      },
+      async end(chunk) {
+        if (ended) {
+          return;
+        }
+        if (chunk !== undefined) {
+          await this.write(chunk);
+        } else if (!started) {
+          await this.start();
+        }
+        emit({
+          type: 'http_event',
+          httpEvent: {
+            type: 'http_end',
+          },
+        });
+        ended = true;
+      },
+    };
+  };
+
   if (request.type === 'ping') {
-    protocolWrite(JSON.stringify({ ready: true }) + '\n');
+    emit({ type: 'ready', ready: true });
     return false;
   }
   if (request.type === 'shutdown') {
-    protocolWrite(JSON.stringify({ ready: false }) + '\n');
+    emit({ type: 'ready', ready: false });
     server.close(() => process.exit(0));
     return true;
   }
   if (request.type !== 'invoke') {
-    protocolWrite(JSON.stringify({ error: 'unsupported prepared worker request' }) + '\n');
+    emit({ type: 'result', error: 'unsupported prepared worker request' });
     return false;
   }
 
@@ -503,15 +712,23 @@ function handleRequest(socket, protocolWrite, request) {
   activeLogs = logs;
   const hasEnvOverrides = request.env && Object.keys(request.env).length > 0;
   const restoreEnv = hasEnvOverrides ? applyEnv(request.env) : null;
+  const stream = createHttpStream();
+  const context = stream ? { ...(request.context ?? {}), stream } : (request.context ?? {});
 
   return Promise.resolve()
-    .then(() => mod.handler(request.payload ?? null, request.context ?? {}))
+    .then(() => mod.handler(request.payload ?? null, context))
     .then((output) => {
-      protocolWrite(JSON.stringify({ output: output ?? null, logs: logs.join('') }) + '\n');
+      if (stream?.active && !stream.closed) {
+        return stream.end().then(() => output);
+      }
+      return output;
+    })
+    .then((output) => {
+      emit({ type: 'result', output: output ?? null, logs: logs.join('') });
       return false;
     })
     .catch((error) => {
-      protocolWrite(JSON.stringify({ error: error?.stack ?? String(error), logs: logs.join('') }) + '\n');
+      emit({ type: 'result', error: error?.stack ?? String(error), logs: logs.join('') });
       return false;
     })
     .finally(() => {

@@ -554,11 +554,29 @@ func invokeGuest(ctx context.Context, socketPath string, port uint32, request fi
 	return response.Invocation, err
 }
 
+func invokeGuestStream(ctx context.Context, socketPath string, port uint32, request firecracker.GuestInvocationRequest, sink func(firecracker.HTTPStreamEvent) error) (*firecracker.GuestInvocationResponse, error) {
+	response, err := guestStreamRequest(ctx, socketPath, port, firecracker.GuestRequest{
+		Action:     firecracker.GuestActionExecute,
+		Invocation: &request,
+	}, sink)
+	if response == nil {
+		return nil, err
+	}
+	return response.Invocation, err
+}
+
 func guestRequest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestRequest) (*firecracker.GuestResponse, error) {
 	return guestRequestWithDialer(ctx, func(ctx context.Context) (net.Conn, error) {
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, "unix", socketPath)
 	}, port, request)
+}
+
+func guestStreamRequest(ctx context.Context, socketPath string, port uint32, request firecracker.GuestRequest, sink func(firecracker.HTTPStreamEvent) error) (*firecracker.GuestStreamFrame, error) {
+	return guestStreamRequestWithDialer(ctx, func(ctx context.Context) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, "unix", socketPath)
+	}, port, request, sink)
 }
 
 func guestRequestWithDialer(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestRequest) (*firecracker.GuestResponse, error) {
@@ -569,6 +587,30 @@ func guestRequestWithDialer(ctx context.Context, dial func(context.Context) (net
 	}
 	for time.Now().Before(deadline) {
 		response, err := guestRequestOnce(ctx, dial, port, request)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(guestRequestRetryInterval):
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out waiting for guest runner")
+	}
+	return nil, lastErr
+}
+
+func guestStreamRequestWithDialer(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestRequest, sink func(firecracker.HTTPStreamEvent) error) (*firecracker.GuestStreamFrame, error) {
+	var lastErr error
+	deadline := time.Now().Add(10 * time.Second)
+	if cut, ok := ctx.Deadline(); ok {
+		deadline = cut
+	}
+	for time.Now().Before(deadline) {
+		response, err := guestStreamRequestOnce(ctx, dial, port, request, sink)
 		if err == nil {
 			return response, nil
 		}
@@ -611,6 +653,45 @@ func guestRequestOnce(ctx context.Context, dial func(context.Context) (net.Conn,
 		return nil, err
 	}
 	return &response, nil
+}
+
+func guestStreamRequestOnce(ctx context.Context, dial func(context.Context) (net.Conn, error), port uint32, request firecracker.GuestRequest, sink func(firecracker.HTTPStreamEvent) error) (*firecracker.GuestStreamFrame, error) {
+	conn, err := dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, fmt.Sprintf("CONNECT %d\n", port)); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(line), "OK") {
+		return nil, fmt.Errorf("unexpected vsock handshake response %q", strings.TrimSpace(line))
+	}
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(reader)
+	for {
+		var frame firecracker.GuestStreamFrame
+		if err := decoder.Decode(&frame); err != nil {
+			return nil, err
+		}
+		if frame.Type == firecracker.GuestStreamFrameHTTPEvent {
+			if sink != nil && frame.HTTPEvent != nil {
+				if err := sink(*frame.HTTPEvent); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		return &frame, nil
+	}
 }
 
 func waitForFile(ctx context.Context, path string, timeout time.Duration, proc *vmProcess) error {

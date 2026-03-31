@@ -1,11 +1,13 @@
 package nodeexec
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
@@ -30,6 +33,7 @@ type Request struct {
 	Region         string
 	HostID         string
 	NodeBinary     string
+	HTTPStream     func(firecracker.HTTPStreamEvent) error
 }
 
 type WorkspaceRequest struct {
@@ -44,6 +48,7 @@ type WorkspaceRequest struct {
 	Region     string
 	HostID     string
 	NodeBinary string
+	HTTPStream func(firecracker.HTTPStreamEvent) error
 }
 
 type Result struct {
@@ -89,6 +94,7 @@ func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
 		Region:     req.Region,
 		HostID:     req.HostID,
 		NodeBinary: req.NodeBinary,
+		HTTPStream: req.HTTPStream,
 	})
 	trace.Step("execute_workspace", executeStarted)
 	if result != nil {
@@ -160,10 +166,23 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = commandEnv(req.Env, contextJSON, compileCacheDir)
+	streamReader, streamWriter, streamConsumeErrCh, err := setupExecutionStream(cmd, req.HTTPStream)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = commandEnv(req.Env, contextJSON, compileCacheDir, req.HTTPStream != nil)
 
 	runStarted := time.Now()
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		closeExecutionStream(streamReader, streamWriter)
+		return nil, err
+	}
+	if streamWriter != nil {
+		_ = streamWriter.Close()
+		streamWriter = nil
+	}
+	runErr := cmd.Wait()
+	streamErr := waitExecutionStream(streamReader, streamConsumeErrCh)
 	trace.Step("node_run", runStarted)
 	logParts := make([]string, 0, 2)
 	if stdout.Len() > 0 {
@@ -182,6 +201,15 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 			StartedAt:     startedAt,
 			FinishedAt:    time.Now().UTC(),
 		}, fmt.Errorf("execution timed out after %s", req.Timeout)
+	}
+	if streamErr != nil {
+		return &Result{
+			ExitCode:      exitCode(runErr),
+			Logs:          logs,
+			PlatformTrace: trace.String(),
+			StartedAt:     startedAt,
+			FinishedAt:    time.Now().UTC(),
+		}, streamErr
 	}
 
 	if runErr != nil {
@@ -211,6 +239,60 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	}, nil
 }
 
+func setupExecutionStream(cmd *exec.Cmd, sink func(firecracker.HTTPStreamEvent) error) (*os.File, *os.File, <-chan error, error) {
+	if sink == nil {
+		return nil, nil, nil, nil
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cmd.ExtraFiles = append(cmd.ExtraFiles, writer)
+	streamErrCh := make(chan error, 1)
+	go func() {
+		defer close(streamErrCh)
+		streamErrCh <- consumeExecutionStream(reader, sink)
+	}()
+	return reader, writer, streamErrCh, nil
+}
+
+func waitExecutionStream(reader *os.File, streamErrCh <-chan error) error {
+	if reader == nil || streamErrCh == nil {
+		return nil
+	}
+	err := <-streamErrCh
+	_ = reader.Close()
+	return err
+}
+
+func closeExecutionStream(reader *os.File, writer *os.File) {
+	if writer != nil {
+		_ = writer.Close()
+	}
+	if reader != nil {
+		_ = reader.Close()
+	}
+}
+
+func consumeExecutionStream(reader *os.File, sink func(firecracker.HTTPStreamEvent) error) error {
+	decoder := json.NewDecoder(bufio.NewReader(reader))
+	for {
+		var event firecracker.HTTPStreamEvent
+		if err := decoder.Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if sink == nil {
+			continue
+		}
+		if err := sink(event); err != nil {
+			return err
+		}
+	}
+}
+
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -236,10 +318,13 @@ func invocationContext(req WorkspaceRequest) map[string]any {
 	}
 }
 
-func commandEnv(env map[string]string, contextJSON []byte, compileCacheDir string) []string {
+func commandEnv(env map[string]string, contextJSON []byte, compileCacheDir string, enableHTTPStream bool) []string {
 	cmdEnv := append(os.Environ(), "LECREV_CONTEXT="+string(contextJSON))
 	if strings.TrimSpace(compileCacheDir) != "" {
 		cmdEnv = append(cmdEnv, "NODE_COMPILE_CACHE="+compileCacheDir)
+	}
+	if enableHTTPStream {
+		cmdEnv = append(cmdEnv, "LECREV_STREAM_FD=3", "LECREV_STREAM_KIND=http")
 	}
 	for key, value := range env {
 		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", key, value))
@@ -261,16 +346,106 @@ func ensureCompileCacheDir(workspace, fallbackBase string) (string, error) {
 }
 
 const wrapperScript = `import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const [payloadPath, entrypointPath, resultPath] = process.argv.slice(2);
 const payload = JSON.parse(await fs.readFile(payloadPath, 'utf8'));
 const context = JSON.parse(process.env.LECREV_CONTEXT ?? '{}');
+const streamFdRaw = process.env.LECREV_STREAM_FD ?? '';
+const streamKind = process.env.LECREV_STREAM_KIND ?? '';
 const mod = await import(pathToFileURL(path.resolve(entrypointPath)).href);
 if (typeof mod.handler !== 'function') {
   throw new Error('entrypoint must export an async handler(event, context)');
 }
-const result = await mod.handler(payload, context);
+function createHttpStream() {
+  if (streamKind !== 'http' || streamFdRaw === '') {
+    return null;
+  }
+  const streamFd = Number.parseInt(streamFdRaw, 10);
+  if (!Number.isFinite(streamFd)) {
+    return null;
+  }
+  let started = false;
+  let ended = false;
+  const emit = (event) => {
+    fsSync.writeSync(streamFd, JSON.stringify(event) + '\n');
+  };
+  const normalizeChunk = (chunk) => {
+    if (chunk == null) {
+      return Buffer.alloc(0);
+    }
+    if (typeof chunk === 'string') {
+      return Buffer.from(chunk);
+    }
+    if (chunk instanceof Uint8Array) {
+      return Buffer.from(chunk);
+    }
+    if (ArrayBuffer.isView(chunk)) {
+      return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    }
+    if (chunk instanceof ArrayBuffer) {
+      return Buffer.from(chunk);
+    }
+    return Buffer.from(String(chunk));
+  };
+  return {
+    get active() {
+      return started;
+    },
+    get closed() {
+      return ended;
+    },
+    async start(init = {}) {
+      if (ended) {
+        throw new Error('http stream is already closed');
+      }
+      if (started) {
+        return;
+      }
+      started = true;
+      emit({
+        type: 'http_start',
+        statusCode: Number.isInteger(init?.statusCode) ? init.statusCode : 200,
+        headers: init?.headers ?? {},
+      });
+    },
+    async write(chunk) {
+      if (!started) {
+        await this.start();
+      }
+      if (ended) {
+        throw new Error('http stream is already closed');
+      }
+      const buffer = normalizeChunk(chunk);
+      if (buffer.length === 0) {
+        return;
+      }
+      emit({
+        type: 'http_chunk',
+        chunk: buffer.toString('base64'),
+      });
+    },
+    async end(chunk) {
+      if (ended) {
+        return;
+      }
+      if (chunk !== undefined) {
+        await this.write(chunk);
+      } else if (!started) {
+        await this.start();
+      }
+      emit({ type: 'http_end' });
+      ended = true;
+    },
+  };
+}
+const stream = createHttpStream();
+const handlerContext = stream ? { ...context, stream } : context;
+const result = await mod.handler(payload, handlerContext);
+if (stream?.active && !stream.closed) {
+  await stream.end();
+}
 await fs.writeFile(resultPath, JSON.stringify(result ?? null));
 `

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	memstore "github.com/theg1239/lecrev/internal/store/memory"
 )
 
@@ -58,6 +59,13 @@ func (f *directFakeDispatcher) ExecuteDirect(_ context.Context, assignment domai
 			LatencyMs:  1,
 		},
 	}, nil
+}
+
+func (f *directFakeDispatcher) ExecuteDirectStream(ctx context.Context, assignment domain.Assignment, onMeta func(string, string, domain.StartMode), _ func(firecracker.HTTPStreamEvent) error) (*domain.DirectExecutionResult, error) {
+	if onMeta != nil {
+		onMeta(assignment.JobID, assignment.AttemptID, domain.StartModeFunctionWarm)
+	}
+	return f.ExecuteDirect(ctx, assignment)
 }
 
 func (f *fakeDispatcher) PrepareFunctionWarm(_ context.Context, version *domain.FunctionVersion) error {

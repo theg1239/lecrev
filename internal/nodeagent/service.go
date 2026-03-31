@@ -2,6 +2,7 @@ package nodeagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -355,6 +356,18 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		Region:         s.region,
 		HostID:         s.hostID,
 	}
+	if isDirectStreamAttempt(msg.AttemptId) {
+		executeReq.EnableStreaming = true
+		executeReq.StreamKind = firecracker.StreamKindHTTP
+		executeReq.HTTPStream = func(event firecracker.HTTPStreamEvent) error {
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", encoded, "", 0)
+			return nil
+		}
+	}
 
 	driverExecuteStarted := time.Now()
 	var (
@@ -423,6 +436,10 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	releaseSlot()
 	sendHeartbeat()
 	s.prepareWarmAsync(executeReq, msg.FunctionVersionId, nil, sendHeartbeat)
+}
+
+func isDirectStreamAttempt(attemptID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(attemptID), "direct-attempt-")
 }
 
 func (s *Service) shouldHoldSlotDuringWarmPrepare(req firecracker.ExecuteRequest) bool {

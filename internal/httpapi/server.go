@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,6 +24,7 @@ import (
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/metrics"
 	"github.com/theg1239/lecrev/internal/scheduler"
 	"github.com/theg1239/lecrev/internal/store"
@@ -1002,9 +1004,18 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	streamWriter := newHTTPDirectStreamWriter(w, r.Method, token, version.ID)
 	directCtx, cancelDirect := context.WithTimeout(requestCtx, httpTriggerTimeout(version.TimeoutSec))
 	directStarted := time.Now()
-	directResult, directErr := s.scheduler.ExecuteDirect(directCtx, trigger.FunctionVersionID, payload)
+	directResult, directErr := s.scheduler.ExecuteDirectStream(
+		directCtx,
+		trigger.FunctionVersionID,
+		payload,
+		func(jobID, _ string, startMode domain.StartMode) {
+			streamWriter.SetMeta(jobID, startMode)
+		},
+		streamWriter.HandleEvent,
+	)
 	directInvokeMs = time.Since(directStarted).Milliseconds()
 	cancelDirect()
 	if directErr == nil {
@@ -1015,7 +1026,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 			state = string(directResult.State)
 			errMsg = directResult.Error
 		}
-		returnDirectHTTPResult(w, r.Method, token, version.ID, directResult)
+		returnDirectHTTPResult(streamWriter, directResult)
 		return
 	}
 	switch {
@@ -1119,10 +1130,10 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func returnDirectHTTPResult(w http.ResponseWriter, method, token, versionID string, result *domain.DirectExecutionResult) {
+func returnDirectHTTPResult(streamWriter *httpDirectStreamWriter, result *domain.DirectExecutionResult) {
 	if result == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"functionVersionId": versionID,
+		writeJSON(streamWriter.writer, http.StatusBadGateway, map[string]any{
+			"functionVersionId": streamWriter.versionID,
 			"state":             domain.JobStateFailed,
 			"error":             "direct execution returned no result",
 		})
@@ -1139,32 +1150,155 @@ func returnDirectHTTPResult(w http.ResponseWriter, method, token, versionID stri
 		latencyMs = 1
 	}
 
-	w.Header().Set("X-Lecrev-Job-Id", result.JobID)
-	w.Header().Set("X-Lecrev-Function-Version-Id", versionID)
-	w.Header().Set("X-Lecrev-Function-Url-Token", token)
-	w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
-	if result.StartMode != "" {
-		w.Header().Set("X-Lecrev-Start-Mode", string(result.StartMode))
-	}
+	streamWriter.SetMeta(result.JobID, result.StartMode)
+	streamWriter.SetLatency(latencyMs)
 
 	if result.State != domain.JobStateSucceeded || result.Result == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
+		if streamWriter.Started() {
+			return
+		}
+		writeJSON(streamWriter.writer, http.StatusBadGateway, map[string]any{
 			"jobId":             result.JobID,
-			"functionVersionId": versionID,
+			"functionVersionId": streamWriter.versionID,
 			"state":             result.State,
 			"error":             result.Error,
 			"latencyMs":         latencyMs,
 		})
 		return
 	}
-	if err := writeHTTPFunctionResult(w, method, result.Result.Output, latencyMs); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
+	if streamWriter.Started() {
+		streamWriter.Close()
+		return
+	}
+	if err := writeHTTPFunctionResult(streamWriter.writer, streamWriter.method, result.Result.Output, latencyMs); err != nil {
+		writeJSON(streamWriter.writer, http.StatusBadGateway, map[string]any{
 			"jobId":             result.JobID,
-			"functionVersionId": versionID,
+			"functionVersionId": streamWriter.versionID,
 			"state":             domain.JobStateFailed,
 			"error":             err.Error(),
 			"latencyMs":         latencyMs,
 		})
+	}
+}
+
+type httpDirectStreamWriter struct {
+	writer    http.ResponseWriter
+	method    string
+	token     string
+	versionID string
+	flusher   http.Flusher
+
+	mu        sync.Mutex
+	started   bool
+	closed    bool
+	status    int
+	jobID     string
+	startMode domain.StartMode
+}
+
+func newHTTPDirectStreamWriter(w http.ResponseWriter, method, token, versionID string) *httpDirectStreamWriter {
+	sw := &httpDirectStreamWriter{
+		writer:    w,
+		method:    method,
+		token:     token,
+		versionID: versionID,
+		status:    http.StatusOK,
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		sw.flusher = flusher
+	}
+	return sw
+}
+
+func (w *httpDirectStreamWriter) SetMeta(jobID string, startMode domain.StartMode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.started {
+		return
+	}
+	if strings.TrimSpace(jobID) != "" {
+		w.jobID = jobID
+		w.writer.Header().Set("X-Lecrev-Job-Id", jobID)
+	}
+	w.writer.Header().Set("X-Lecrev-Function-Version-Id", w.versionID)
+	w.writer.Header().Set("X-Lecrev-Function-Url-Token", w.token)
+	if startMode != "" {
+		w.startMode = startMode
+		w.writer.Header().Set("X-Lecrev-Start-Mode", string(startMode))
+	}
+}
+
+func (w *httpDirectStreamWriter) SetLatency(latencyMs int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if latencyMs > 0 {
+		w.writer.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
+	}
+}
+
+func (w *httpDirectStreamWriter) Started() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.started
+}
+
+func (w *httpDirectStreamWriter) HandleEvent(event firecracker.HTTPStreamEvent) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
+	switch event.Type {
+	case firecracker.HTTPStreamEventStart:
+		if w.started {
+			return nil
+		}
+		if event.StatusCode > 0 {
+			w.status = event.StatusCode
+		}
+		for key, value := range event.Headers {
+			if key == "" {
+				continue
+			}
+			w.writer.Header().Set(key, value)
+		}
+		w.writer.WriteHeader(w.status)
+		w.started = true
+		if w.flusher != nil {
+			w.flusher.Flush()
+		}
+	case firecracker.HTTPStreamEventChunk:
+		if !w.started {
+			w.writer.WriteHeader(w.status)
+			w.started = true
+		}
+		if w.method != http.MethodHead && len(event.Chunk) > 0 {
+			if _, err := w.writer.Write(event.Chunk); err != nil {
+				return err
+			}
+		}
+		if w.flusher != nil {
+			w.flusher.Flush()
+		}
+	case firecracker.HTTPStreamEventEnd:
+		if !w.started {
+			w.writer.WriteHeader(w.status)
+			w.started = true
+		}
+		if w.flusher != nil {
+			w.flusher.Flush()
+		}
+		w.closed = true
+	}
+	return nil
+}
+
+func (w *httpDirectStreamWriter) Close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	if w.flusher != nil {
+		w.flusher.Flush()
 	}
 }
 

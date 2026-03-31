@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/idempotency"
 	"github.com/theg1239/lecrev/internal/store"
 )
@@ -25,6 +26,10 @@ type RegionDispatcher interface {
 
 type DirectDispatcher interface {
 	ExecuteDirect(ctx context.Context, assignment domain.Assignment) (*domain.DirectExecutionResult, error)
+}
+
+type DirectStreamDispatcher interface {
+	ExecuteDirectStream(ctx context.Context, assignment domain.Assignment, onMeta func(string, string, domain.StartMode), onHTTPEvent func(firecracker.HTTPStreamEvent) error) (*domain.DirectExecutionResult, error)
 }
 
 type WarmPreparer interface {
@@ -294,6 +299,10 @@ func (s *Service) PrepareFunctionVersion(ctx context.Context, version *domain.Fu
 }
 
 func (s *Service) ExecuteDirect(ctx context.Context, versionID string, payload []byte) (*domain.DirectExecutionResult, error) {
+	return s.ExecuteDirectStream(ctx, versionID, payload, nil, nil)
+}
+
+func (s *Service) ExecuteDirectStream(ctx context.Context, versionID string, payload []byte, onMeta func(string, string, domain.StartMode), onHTTPEvent func(firecracker.HTTPStreamEvent) error) (*domain.DirectExecutionResult, error) {
 	version, err := s.store.GetFunctionVersion(ctx, versionID)
 	if err != nil {
 		return nil, err
@@ -338,7 +347,15 @@ func (s *Service) ExecuteDirect(ctx context.Context, versionID string, payload [
 			TimeoutSec:        version.TimeoutSec,
 			MemoryMB:          version.MemoryMB,
 		}
-		result, err := dispatcher.ExecuteDirect(ctx, assignment)
+		var result *domain.DirectExecutionResult
+		if streamDispatcher, ok := candidate.dispatcher.(DirectStreamDispatcher); ok {
+			result, err = streamDispatcher.ExecuteDirectStream(ctx, assignment, onMeta, onHTTPEvent)
+		} else {
+			if onMeta != nil {
+				onMeta(assignment.JobID, assignment.AttemptID, "")
+			}
+			result, err = dispatcher.ExecuteDirect(ctx, assignment)
+		}
 		if err == nil {
 			return result, nil
 		}
@@ -373,6 +390,9 @@ func (s *Service) hasDirectDispatcher(version *domain.FunctionVersion) bool {
 			continue
 		}
 		if _, ok := dispatcher.(DirectDispatcher); ok {
+			return true
+		}
+		if _, ok := dispatcher.(DirectStreamDispatcher); ok {
 			return true
 		}
 	}

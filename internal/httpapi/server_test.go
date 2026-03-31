@@ -14,6 +14,7 @@ import (
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/build"
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/scheduler"
 	memstore "github.com/theg1239/lecrev/internal/store/memory"
 )
@@ -42,6 +43,11 @@ type directTestDispatcher struct {
 	assignments []domain.Assignment
 	result      *domain.DirectExecutionResult
 	err         error
+	streamMeta  struct {
+		jobID     string
+		startMode domain.StartMode
+	}
+	streamEvents []firecracker.HTTPStreamEvent
 }
 
 func (d *directTestDispatcher) Region() string { return d.region }
@@ -72,6 +78,33 @@ func (d *directTestDispatcher) ExecuteDirect(_ context.Context, assignment domai
 			LatencyMs:  7,
 		},
 	}, nil
+}
+
+func (d *directTestDispatcher) ExecuteDirectStream(_ context.Context, assignment domain.Assignment, onMeta func(string, string, domain.StartMode), onHTTPEvent func(firecracker.HTTPStreamEvent) error) (*domain.DirectExecutionResult, error) {
+	result, err := d.ExecuteDirect(context.Background(), assignment)
+	if err != nil {
+		return nil, err
+	}
+	if onMeta != nil {
+		jobID := result.JobID
+		if strings.TrimSpace(d.streamMeta.jobID) != "" {
+			jobID = d.streamMeta.jobID
+		}
+		startMode := result.StartMode
+		if d.streamMeta.startMode != "" {
+			startMode = d.streamMeta.startMode
+		}
+		onMeta(jobID, result.AttemptID, startMode)
+	}
+	for _, event := range d.streamEvents {
+		if onHTTPEvent == nil {
+			continue
+		}
+		if err := onHTTPEvent(event); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 type warmTestDispatcher struct {
@@ -605,6 +638,121 @@ func TestHTTPTriggerInvokeUsesDirectExecutionWhenAvailable(t *testing.T) {
 	}
 	if len(jobs) != 0 {
 		t.Fatalf("expected direct invoke to skip persisted jobs, got %d", len(jobs))
+	}
+}
+
+func TestHTTPTriggerInvokeStreamsDirectExecutionEvents(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	dispatcher := &directTestDispatcher{
+		region: "ap-south-1",
+		result: &domain.DirectExecutionResult{
+			JobID:     "direct-job-stream",
+			AttemptID: "direct-attempt-stream",
+			State:     domain.JobStateSucceeded,
+			StartMode: domain.StartModeFunctionWarm,
+			Result: &domain.JobResult{
+				ExitCode:   0,
+				Output:     json.RawMessage(`{"statusCode":200,"headers":{"Content-Type":"text/plain; charset=utf-8"},"body":"ignored-after-stream"}`),
+				HostID:     "host-ap-south-1",
+				Region:     "ap-south-1",
+				StartedAt:  time.Now().UTC(),
+				FinishedAt: time.Now().UTC(),
+				LatencyMs:  19,
+			},
+		},
+		streamEvents: []firecracker.HTTPStreamEvent{
+			{
+				Type:       firecracker.HTTPStreamEventStart,
+				StatusCode: http.StatusAccepted,
+				Headers: map[string]string{
+					"Content-Type":  "text/plain; charset=utf-8",
+					"X-Stream-Test": "yes",
+				},
+			},
+			{
+				Type:  firecracker.HTTPStreamEventChunk,
+				Chunk: []byte("hello "),
+			},
+			{
+				Type:  firecracker.HTTPStreamEventChunk,
+				Chunk: []byte("world"),
+			},
+			{
+				Type: firecracker.HTTPStreamEventEnd,
+			},
+		},
+	}
+	dispatcher.streamMeta.jobID = "direct-job-stream"
+	dispatcher.streamMeta.startMode = domain.StartModeFunctionWarm
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{dispatcher})
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:    "digest-stream",
+		BundleKey: "artifacts/digest-stream/bundle.tgz",
+		Regions: map[string]time.Time{
+			"ap-south-1": time.Now().UTC(),
+		},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-stream",
+		ProjectID:      "demo",
+		Name:           "stream",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest-stream",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "stream-http-trigger",
+		ProjectID:         "demo",
+		FunctionVersionID: "fn-http-stream",
+		AuthMode:          domain.HTTPTriggerAuthModeNone,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/f/stream-http-trigger/demo", nil)
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, recorder.Code)
+	}
+	if got := recorder.Body.String(); got != "hello world" {
+		t.Fatalf("expected streamed body, got %q", got)
+	}
+	if got := recorder.Header().Get("X-Lecrev-Job-Id"); got != "direct-job-stream" {
+		t.Fatalf("expected direct job header, got %q", got)
+	}
+	if got := recorder.Header().Get("X-Lecrev-Start-Mode"); got != string(domain.StartModeFunctionWarm) {
+		t.Fatalf("expected start mode header, got %q", got)
+	}
+	if got := recorder.Header().Get("X-Lecrev-Latency-Ms"); got != "19" {
+		t.Fatalf("expected latency header, got %q", got)
+	}
+	if got := recorder.Header().Get("X-Stream-Test"); got != "yes" {
+		t.Fatalf("expected stream header, got %q", got)
+	}
+	if recorder.flushCount == 0 {
+		t.Fatal("expected streamed direct invoke to flush chunks")
 	}
 }
 

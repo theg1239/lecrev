@@ -7,18 +7,21 @@ import (
 )
 
 type ExecuteRequest struct {
-	AttemptID      string
-	JobID          string
-	FunctionID     string
-	Entrypoint     string
-	ArtifactBundle []byte
-	Payload        json.RawMessage
-	Env            map[string]string
-	Timeout        time.Duration
-	MemoryMB       int
-	NetworkPolicy  string
-	Region         string
-	HostID         string
+	AttemptID       string
+	JobID           string
+	FunctionID      string
+	Entrypoint      string
+	ArtifactBundle  []byte
+	Payload         json.RawMessage
+	Env             map[string]string
+	Timeout         time.Duration
+	MemoryMB        int
+	NetworkPolicy   string
+	Region          string
+	HostID          string
+	EnableStreaming bool
+	StreamKind      StreamKind
+	HTTPStream      func(HTTPStreamEvent) error
 }
 
 type ExecuteResult struct {

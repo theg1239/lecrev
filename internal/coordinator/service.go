@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/dispatch"
 	"github.com/theg1239/lecrev/internal/domain"
+	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/store"
 	"github.com/theg1239/lecrev/internal/transport"
 )
@@ -232,6 +234,10 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 }
 
 func (s *Service) ExecuteDirect(ctx context.Context, assignment domain.Assignment) (*domain.DirectExecutionResult, error) {
+	return s.ExecuteDirectStream(ctx, assignment, nil, nil)
+}
+
+func (s *Service) ExecuteDirectStream(ctx context.Context, assignment domain.Assignment, onMeta func(string, string, domain.StartMode), onHTTPEvent func(firecracker.HTTPStreamEvent) error) (*domain.DirectExecutionResult, error) {
 	startedAt := time.Now().UTC()
 	if strings.TrimSpace(assignment.AttemptID) == "" {
 		assignment.AttemptID = "direct-attempt-" + uuid.NewString()
@@ -246,6 +252,9 @@ func (s *Service) ExecuteDirect(ctx context.Context, assignment domain.Assignmen
 			return nil, fmt.Errorf("%w: %v", domain.ErrNoExecutionCapacity, err)
 		}
 		return nil, err
+	}
+	if onMeta != nil {
+		onMeta(assignment.JobID, assignment.AttemptID, startMode)
 	}
 
 	waiter := &directInvokeWaiter{updates: make(chan *regionv1.AssignmentUpdate, 16)}
@@ -302,6 +311,15 @@ func (s *Service) ExecuteDirect(ctx context.Context, assignment domain.Assignmen
 			case regionv1.AssignmentState_ASSIGNMENT_STATE_STARTING, regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING:
 				if resultStartedAt.IsZero() {
 					resultStartedAt = time.Now().UTC()
+				}
+				if len(update.OutputJson) > 0 && onHTTPEvent != nil {
+					var event firecracker.HTTPStreamEvent
+					if err := json.Unmarshal(update.OutputJson, &event); err != nil {
+						return nil, err
+					}
+					if err := onHTTPEvent(event); err != nil {
+						return nil, err
+					}
 				}
 			case regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED:
 				finishedAt := time.Now().UTC()

@@ -124,6 +124,13 @@ func handleConnection(conn io.ReadWriteCloser) (bool, error) {
 		return false, err
 	}
 
+	if request.Action == firecracker.GuestActionExecute && request.Invocation != nil && request.Invocation.EnableStreaming && request.Invocation.StreamKind == firecracker.StreamKindHTTP {
+		if _, err := executeStream(conn, request.Invocation); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
 	var response firecracker.GuestResponse
 	shouldShutdown := false
 	switch request.Action {
@@ -255,6 +262,91 @@ func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInv
 		StartedAt:  result.StartedAt,
 		FinishedAt: result.FinishedAt,
 	}, err
+}
+
+func executeStream(conn io.Writer, request *firecracker.GuestInvocationRequest) (*firecracker.GuestInvocationResponse, error) {
+	if request == nil {
+		return &firecracker.GuestInvocationResponse{
+			ExitCode:   1,
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+			Error:      "missing invocation request",
+		}, fmt.Errorf("missing invocation request")
+	}
+
+	encoder := json.NewEncoder(conn)
+	stream := func(event firecracker.HTTPStreamEvent) error {
+		return encoder.Encode(&firecracker.GuestStreamFrame{
+			Type:      firecracker.GuestStreamFrameHTTPEvent,
+			HTTPEvent: &event,
+		})
+	}
+
+	var (
+		result *nodeexec.Result
+		err    error
+	)
+	workspaceReq := nodeexec.WorkspaceRequest{
+		AttemptID:  request.AttemptID,
+		JobID:      request.JobID,
+		FunctionID: request.FunctionID,
+		Workspace:  preparedWorkspace(request.FunctionID),
+		Entrypoint: request.Entrypoint,
+		Payload:    request.Payload,
+		Env:        request.Env,
+		Timeout:    time.Duration(request.TimeoutMillis) * time.Millisecond,
+		Region:     request.Region,
+		HostID:     request.HostID,
+		NodeBinary: guestNodeBinary,
+		HTTPStream: stream,
+	}
+	if request.UsePreparedRoot {
+		result, err = nodeexec.ExecutePreparedWorker(context.Background(), workspaceReq)
+		if err != nil && errors.Is(err, nodeexec.ErrPreparedWorkerUnavailable) {
+			result, err = nodeexec.ExecuteWorkspace(context.Background(), workspaceReq)
+		}
+	} else {
+		result, err = nodeexec.ExecuteBundle(context.Background(), nodeexec.Request{
+			AttemptID:      request.AttemptID,
+			JobID:          request.JobID,
+			FunctionID:     request.FunctionID,
+			Entrypoint:     request.Entrypoint,
+			ArtifactBundle: request.ArtifactBundle,
+			Payload:        request.Payload,
+			Env:            request.Env,
+			Timeout:        time.Duration(request.TimeoutMillis) * time.Millisecond,
+			Region:         request.Region,
+			HostID:         request.HostID,
+			NodeBinary:     guestNodeBinary,
+			HTTPStream:     stream,
+		})
+	}
+	if result == nil {
+		result = &nodeexec.Result{
+			ExitCode:   1,
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		}
+	}
+	logs := timetrace.Combine(result.PlatformTrace, result.Logs)
+	response := &firecracker.GuestInvocationResponse{
+		ExitCode:   result.ExitCode,
+		Logs:       logs,
+		Output:     result.Output,
+		StartedAt:  result.StartedAt,
+		FinishedAt: result.FinishedAt,
+	}
+	if err != nil {
+		response.Error = err.Error()
+	}
+	if encodeErr := encoder.Encode(&firecracker.GuestStreamFrame{
+		Type:       firecracker.GuestStreamFrameInvocation,
+		Invocation: response,
+		Error:      response.Error,
+	}); encodeErr != nil {
+		return response, encodeErr
+	}
+	return response, nil
 }
 
 func preparedWorkspace(functionID string) string {
