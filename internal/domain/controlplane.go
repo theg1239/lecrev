@@ -12,6 +12,7 @@ var (
 	ErrProjectBuildQuota       = errors.New("project build quota exceeded")
 	ErrProjectExecutionQuota   = errors.New("project execution quota exceeded")
 	ErrNoExecutionCapacity     = errors.New("no execution capacity available")
+	ErrDirectInvokeUnavailable = errors.New("direct invoke unavailable")
 	ErrBuildLogsNotReady       = errors.New("build logs not ready")
 	ErrExecutionResultNotReady = errors.New("execution result not ready")
 )

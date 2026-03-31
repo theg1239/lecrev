@@ -30,6 +30,36 @@ func (f *fakeDispatcher) EnqueueExecution(_ context.Context, assignment domain.A
 	return nil
 }
 
+type directFakeDispatcher struct {
+	*fakeDispatcher
+	directErr    error
+	directResult *domain.DirectExecutionResult
+}
+
+func (f *directFakeDispatcher) ExecuteDirect(_ context.Context, assignment domain.Assignment) (*domain.DirectExecutionResult, error) {
+	if f.directErr != nil {
+		return nil, f.directErr
+	}
+	f.assignments = append(f.assignments, assignment)
+	if f.directResult != nil {
+		return f.directResult, nil
+	}
+	return &domain.DirectExecutionResult{
+		JobID:     assignment.JobID,
+		AttemptID: assignment.AttemptID,
+		State:     domain.JobStateSucceeded,
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"ok":true}`),
+			HostID:     "host-" + f.region,
+			Region:     f.region,
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+			LatencyMs:  1,
+		},
+	}, nil
+}
+
 func (f *fakeDispatcher) PrepareFunctionWarm(_ context.Context, version *domain.FunctionVersion) error {
 	if f.warmErr != nil {
 		return f.warmErr
@@ -60,6 +90,40 @@ func TestDispatchExecutionQueuesJob(t *testing.T) {
 	}
 	if job.AttemptCount != 0 {
 		t.Fatalf("expected no attempts before scheduling, got %d", job.AttemptCount)
+	}
+}
+
+func TestExecuteDirectPrefersWarmRegion(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-direct", []string{"ap-south-1", "ap-southeast-1"})
+
+	coldRegion := &directFakeDispatcher{fakeDispatcher: &fakeDispatcher{
+		region: "ap-south-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 1},
+	}}
+	warmRegion := &directFakeDispatcher{fakeDispatcher: &fakeDispatcher{
+		region: "ap-southeast-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, FunctionWarm: 2},
+	}}
+	svc := New(store, []RegionDispatcher{coldRegion, warmRegion})
+
+	result, err := svc.ExecuteDirect(context.Background(), "fn-direct", json.RawMessage(`{"msg":"hi"}`))
+	if err != nil {
+		t.Fatalf("execute direct: %v", err)
+	}
+	if result == nil || result.Result == nil {
+		t.Fatalf("expected direct execution result, got %+v", result)
+	}
+	if result.Result.Region != "ap-southeast-1" {
+		t.Fatalf("expected warm region result, got %s", result.Result.Region)
+	}
+	if len(warmRegion.assignments) != 1 {
+		t.Fatalf("expected warm region to receive direct assignment, got %d", len(warmRegion.assignments))
+	}
+	if len(coldRegion.assignments) != 0 {
+		t.Fatalf("expected cold region to remain unused, got %d", len(coldRegion.assignments))
 	}
 }
 

@@ -23,6 +23,10 @@ type RegionDispatcher interface {
 	EnqueueExecution(ctx context.Context, assignment domain.Assignment) error
 }
 
+type DirectDispatcher interface {
+	ExecuteDirect(ctx context.Context, assignment domain.Assignment) (*domain.DirectExecutionResult, error)
+}
+
 type WarmPreparer interface {
 	PrepareFunctionWarm(ctx context.Context, version *domain.FunctionVersion) error
 }
@@ -287,6 +291,92 @@ func (s *Service) PrepareFunctionVersion(ctx context.Context, version *domain.Fu
 		return fmt.Errorf("prepare function version %s: %s", version.ID, strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func (s *Service) ExecuteDirect(ctx context.Context, versionID string, payload []byte) (*domain.DirectExecutionResult, error) {
+	version, err := s.store.GetFunctionVersion(ctx, versionID)
+	if err != nil {
+		return nil, err
+	}
+	if version.State != domain.FunctionStateReady {
+		return nil, domain.ErrFunctionVersionNotReady
+	}
+	if !s.hasDirectDispatcher(version) {
+		return nil, domain.ErrDirectInvokeUnavailable
+	}
+
+	artifactMeta, err := s.store.GetArtifact(ctx, version.ArtifactDigest)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := s.rankDispatchers(ctx, version)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		sawDirect      bool
+		capacityErrors []string
+		dispatchErrors []string
+	)
+	for _, candidate := range candidates {
+		dispatcher, ok := candidate.dispatcher.(DirectDispatcher)
+		if !ok {
+			continue
+		}
+		sawDirect = true
+		assignment := domain.Assignment{
+			AttemptID:         "direct-attempt-" + uuid.NewString(),
+			JobID:             "direct-job-" + uuid.NewString(),
+			FunctionVersionID: version.ID,
+			ArtifactDigest:    version.ArtifactDigest,
+			ArtifactBundleKey: artifactMeta.BundleKey,
+			Entrypoint:        version.Entrypoint,
+			EnvRefs:           append([]string(nil), version.EnvRefs...),
+			Payload:           append([]byte(nil), payload...),
+			NetworkPolicy:     version.NetworkPolicy,
+			TimeoutSec:        version.TimeoutSec,
+			MemoryMB:          version.MemoryMB,
+		}
+		result, err := dispatcher.ExecuteDirect(ctx, assignment)
+		if err == nil {
+			return result, nil
+		}
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return nil, err
+		case errors.Is(err, domain.ErrNoExecutionCapacity):
+			capacityErrors = append(capacityErrors, fmt.Sprintf("%s: %v", candidate.region, err))
+		default:
+			dispatchErrors = append(dispatchErrors, fmt.Sprintf("%s: %v", candidate.region, err))
+		}
+	}
+	if !sawDirect {
+		return nil, domain.ErrDirectInvokeUnavailable
+	}
+	if len(capacityErrors) > 0 && len(dispatchErrors) == 0 {
+		return nil, fmt.Errorf("%w: %s", domain.ErrNoExecutionCapacity, strings.Join(capacityErrors, "; "))
+	}
+	if len(dispatchErrors) > 0 {
+		return nil, fmt.Errorf("direct invoke failed: %s", strings.Join(dispatchErrors, "; "))
+	}
+	return nil, domain.ErrDirectInvokeUnavailable
+}
+
+func (s *Service) hasDirectDispatcher(version *domain.FunctionVersion) bool {
+	if version == nil {
+		return false
+	}
+	for _, region := range version.Regions {
+		dispatcher, ok := s.dispatchers[region]
+		if !ok {
+			continue
+		}
+		if _, ok := dispatcher.(DirectDispatcher); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) Run(ctx context.Context) error {

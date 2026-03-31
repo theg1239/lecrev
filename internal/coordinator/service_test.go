@@ -347,6 +347,72 @@ func TestPrepareFunctionWarmSendsSnapshotPrepCommand(t *testing.T) {
 	}
 }
 
+func TestExecuteDirectReturnsTerminalResult(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	svc := New("ap-south-1", meta, nil)
+	if err := svc.RegisterEmbeddedHost(context.Background(), &regionv1.RegisterHost{
+		HostId:                    "host-ap-south-1-a",
+		Region:                    "ap-south-1",
+		Driver:                    "firecracker",
+		AvailableSlots:            1,
+		AvailableFullNetworkSlots: 1,
+		BlankWarm:                 1,
+	}, func(execCtx context.Context, assignment *regionv1.ExecutionAssignment) {
+		_ = svc.ApplyAssignmentUpdate(execCtx, &regionv1.AssignmentUpdate{
+			HostId:    "host-ap-south-1-a",
+			Region:    "ap-south-1",
+			AttemptId: assignment.AttemptId,
+			JobId:     assignment.JobId,
+			State:     regionv1.AssignmentState_ASSIGNMENT_STATE_STARTING,
+		})
+		_ = svc.ApplyAssignmentUpdate(execCtx, &regionv1.AssignmentUpdate{
+			HostId:     "host-ap-south-1-a",
+			Region:     "ap-south-1",
+			AttemptId:  assignment.AttemptId,
+			JobId:      assignment.JobId,
+			State:      regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED,
+			ExitCode:   0,
+			Logs:       "done",
+			OutputJson: []byte(`{"ok":true}`),
+		})
+	}, nil); err != nil {
+		t.Fatalf("register embedded host: %v", err)
+	}
+
+	result, err := svc.ExecuteDirect(context.Background(), domain.Assignment{
+		JobID:             "direct-job-1",
+		AttemptID:         "direct-attempt-1",
+		FunctionVersionID: "fn-http",
+		ArtifactDigest:    "digest",
+		ArtifactBundleKey: "artifacts/digest/bundle.tgz",
+		Entrypoint:        "index.mjs",
+		Payload:           []byte(`{"hello":"world"}`),
+		NetworkPolicy:     domain.NetworkPolicyFull,
+		TimeoutSec:        5,
+		MemoryMB:          128,
+	})
+	if err != nil {
+		t.Fatalf("execute direct: %v", err)
+	}
+	if result.State != domain.JobStateSucceeded {
+		t.Fatalf("expected success state, got %s", result.State)
+	}
+	if result.Result == nil {
+		t.Fatal("expected direct result payload")
+	}
+	if result.Result.HostID != "host-ap-south-1-a" {
+		t.Fatalf("expected host host-ap-south-1-a, got %s", result.Result.HostID)
+	}
+	if string(result.Result.Output) != `{"ok":true}` {
+		t.Fatalf("unexpected direct output: %s", string(result.Result.Output))
+	}
+	if result.StartMode != domain.StartModeBlankWarm {
+		t.Fatalf("expected blank-warm start mode, got %s", result.StartMode)
+	}
+}
+
 func TestPrepareFunctionWarmIncludesFullNetworkVersions(t *testing.T) {
 	t.Parallel()
 

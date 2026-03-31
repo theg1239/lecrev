@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 
 	regionv1 "github.com/theg1239/lecrev/lecrev/region/v1"
@@ -36,6 +37,8 @@ type Service struct {
 
 	mu    sync.Mutex
 	hosts map[string]*hostSession
+
+	directInvokes map[string]*directInvokeWaiter
 }
 
 type hostSession struct {
@@ -43,6 +46,11 @@ type hostSession struct {
 	sendCh   chan *regionv1.CoordinatorMessage
 	executor EmbeddedExecutor
 	preparer EmbeddedPreparer
+}
+
+type directInvokeWaiter struct {
+	updates  chan *regionv1.AssignmentUpdate
+	canceled bool
 }
 
 type EmbeddedExecutor func(context.Context, *regionv1.ExecutionAssignment)
@@ -61,6 +69,7 @@ func New(region string, store store.Store, retry Retryer) *Service {
 		staleHostAfter: 20 * time.Second,
 		reapInterval:   5 * time.Second,
 		hosts:          make(map[string]*hostSession),
+		directInvokes:  make(map[string]*directInvokeWaiter),
 	}
 }
 
@@ -219,6 +228,115 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 	default:
 		s.restorePreparationReservation(hostID, version.NetworkPolicy)
 		return fmt.Errorf("host %s control channel full", hostID)
+	}
+}
+
+func (s *Service) ExecuteDirect(ctx context.Context, assignment domain.Assignment) (*domain.DirectExecutionResult, error) {
+	startedAt := time.Now().UTC()
+	if strings.TrimSpace(assignment.AttemptID) == "" {
+		assignment.AttemptID = "direct-attempt-" + uuid.NewString()
+	}
+	if strings.TrimSpace(assignment.JobID) == "" {
+		assignment.JobID = "direct-job-" + uuid.NewString()
+	}
+
+	hostID, session, startMode, err := s.pickHost(assignment)
+	if err != nil {
+		if strings.Contains(err.Error(), "no active hosts available") {
+			return nil, fmt.Errorf("%w: %v", domain.ErrNoExecutionCapacity, err)
+		}
+		return nil, err
+	}
+
+	waiter := &directInvokeWaiter{updates: make(chan *regionv1.AssignmentUpdate, 16)}
+	s.mu.Lock()
+	s.directInvokes[assignment.AttemptID] = waiter
+	s.mu.Unlock()
+
+	execAssignment := &regionv1.ExecutionAssignment{
+		AttemptId:         assignment.AttemptID,
+		JobId:             assignment.JobID,
+		FunctionVersionId: assignment.FunctionVersionID,
+		ArtifactDigest:    assignment.ArtifactDigest,
+		ArtifactBundleKey: assignment.ArtifactBundleKey,
+		Entrypoint:        assignment.Entrypoint,
+		PayloadJson:       assignment.Payload,
+		EnvRefs:           assignment.EnvRefs,
+		NetworkPolicy:     string(assignment.NetworkPolicy),
+		TimeoutSec:        int32(assignment.TimeoutSec),
+		MemoryMb:          int32(assignment.MemoryMB),
+	}
+	msg := &regionv1.CoordinatorMessage{
+		Body: &regionv1.CoordinatorMessage_Assignment{
+			Assignment: execAssignment,
+		},
+	}
+
+	if session.executor != nil {
+		go session.executor(context.Background(), execAssignment)
+	} else {
+		select {
+		case session.sendCh <- msg:
+		case <-ctx.Done():
+			s.removeDirectInvoke(assignment.AttemptID)
+			s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode, assignment.NetworkPolicy)
+			return nil, ctx.Err()
+		default:
+			s.removeDirectInvoke(assignment.AttemptID)
+			s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode, assignment.NetworkPolicy)
+			return nil, fmt.Errorf("host %s control channel full", hostID)
+		}
+	}
+
+	resultStartedAt := startedAt
+	for {
+		select {
+		case <-ctx.Done():
+			s.cancelDirectInvoke(assignment.AttemptID)
+			return nil, ctx.Err()
+		case update := <-waiter.updates:
+			if update == nil {
+				continue
+			}
+			switch update.State {
+			case regionv1.AssignmentState_ASSIGNMENT_STATE_STARTING, regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING:
+				if resultStartedAt.IsZero() {
+					resultStartedAt = time.Now().UTC()
+				}
+			case regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED:
+				finishedAt := time.Now().UTC()
+				if resultStartedAt.IsZero() {
+					resultStartedAt = startedAt
+				}
+				latencyMs := finishedAt.Sub(resultStartedAt).Milliseconds()
+				if latencyMs <= 0 {
+					latencyMs = 1
+				}
+				jobState := domain.JobStateSucceeded
+				if update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED {
+					jobState = domain.JobStateFailed
+				}
+				return &domain.DirectExecutionResult{
+					JobID:      assignment.JobID,
+					AttemptID:  assignment.AttemptID,
+					State:      jobState,
+					Error:      update.ErrorMessage,
+					StartMode:  startMode,
+					StartedAt:  resultStartedAt,
+					FinishedAt: finishedAt,
+					Result: &domain.JobResult{
+						ExitCode:   int(update.ExitCode),
+						Logs:       update.Logs,
+						Output:     append([]byte(nil), update.OutputJson...),
+						HostID:     update.HostId,
+						Region:     update.Region,
+						StartedAt:  resultStartedAt,
+						FinishedAt: finishedAt,
+						LatencyMs:  latencyMs,
+					},
+				}, nil
+			}
+		}
 	}
 }
 
@@ -460,6 +578,9 @@ func (s *Service) ApplyAssignmentUpdate(ctx context.Context, msg *regionv1.Assig
 }
 
 func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.AssignmentUpdate) error {
+	if s.handleDirectInvokeUpdate(msg) {
+		return nil
+	}
 	started := time.Now()
 	var (
 		loadAttemptMs   int64
@@ -598,6 +719,55 @@ func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.Assi
 		}(job.ID)
 	}
 	return nil
+}
+
+func (s *Service) handleDirectInvokeUpdate(msg *regionv1.AssignmentUpdate) bool {
+	s.mu.Lock()
+	waiter, ok := s.directInvokes[msg.AttemptId]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	terminal := msg.State == regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED || msg.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED
+	if terminal {
+		delete(s.directInvokes, msg.AttemptId)
+	}
+	updates := waiter.updates
+	canceled := waiter.canceled
+	s.mu.Unlock()
+	if canceled || updates == nil {
+		return true
+	}
+	if terminal {
+		select {
+		case updates <- msg:
+		default:
+			go func() { updates <- msg }()
+		}
+		return true
+	}
+	select {
+	case updates <- msg:
+	default:
+	}
+	return true
+}
+
+func (s *Service) cancelDirectInvoke(attemptID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiter, ok := s.directInvokes[attemptID]
+	if !ok {
+		return
+	}
+	waiter.canceled = true
+	waiter.updates = nil
+}
+
+func (s *Service) removeDirectInvoke(attemptID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.directInvokes, attemptID)
 }
 
 func (s *Service) pickHost(assignment domain.Assignment) (string, *hostSession, domain.StartMode, error) {

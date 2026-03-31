@@ -923,6 +923,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		triggerLookupMs int64
 		versionLoadMs   int64
 		buildPayloadMs  int64
+		directInvokeMs  int64
 		dispatchMs      int64
 		waitMs          int64
 		versionID       string
@@ -940,6 +941,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 			"triggerLookupMs", triggerLookupMs,
 			"versionLoadMs", versionLoadMs,
 			"buildPayloadMs", buildPayloadMs,
+			"directInvokeMs", directInvokeMs,
 			"dispatchMs", dispatchMs,
 			"waitMs", waitMs,
 			"totalMs", time.Since(requestStartedAt).Milliseconds(),
@@ -997,6 +999,44 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		state = "payload_failed"
 		errMsg = err.Error()
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	directCtx, cancelDirect := context.WithTimeout(requestCtx, httpTriggerTimeout(version.TimeoutSec))
+	directStarted := time.Now()
+	directResult, directErr := s.scheduler.ExecuteDirect(directCtx, trigger.FunctionVersionID, payload)
+	directInvokeMs = time.Since(directStarted).Milliseconds()
+	cancelDirect()
+	if directErr == nil {
+		jobID = directResult.JobID
+		if directResult.State == domain.JobStateSucceeded {
+			state = "succeeded_direct"
+		} else {
+			state = string(directResult.State)
+			errMsg = directResult.Error
+		}
+		returnDirectHTTPResult(w, r.Method, token, version.ID, directResult)
+		return
+	}
+	switch {
+	case errors.Is(directErr, domain.ErrDirectInvokeUnavailable), errors.Is(directErr, domain.ErrNoExecutionCapacity):
+		state = "direct_fallback"
+	case errors.Is(directErr, context.DeadlineExceeded), errors.Is(directErr, context.Canceled):
+		latencyMs := computeLatencyMs(requestStartedAt, time.Now().UTC())
+		state = "timeout_direct"
+		errMsg = directErr.Error()
+		w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
+		writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+			"functionVersionId": version.ID,
+			"state":             "timeout",
+			"message":           "function url execution did not complete before the response deadline",
+			"latencyMs":         latencyMs,
+		})
+		return
+	default:
+		state = "direct_failed"
+		errMsg = directErr.Error()
+		writeServiceError(w, directErr)
 		return
 	}
 
@@ -1073,6 +1113,55 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 			"jobId":             job.ID,
 			"functionVersionId": version.ID,
 			"state":             job.State,
+			"error":             err.Error(),
+			"latencyMs":         latencyMs,
+		})
+	}
+}
+
+func returnDirectHTTPResult(w http.ResponseWriter, method, token, versionID string, result *domain.DirectExecutionResult) {
+	if result == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"functionVersionId": versionID,
+			"state":             domain.JobStateFailed,
+			"error":             "direct execution returned no result",
+		})
+		return
+	}
+	latencyMs := int64(0)
+	if result.Result != nil {
+		latencyMs = result.Result.LatencyMs
+	}
+	if latencyMs <= 0 && !result.FinishedAt.IsZero() {
+		latencyMs = computeLatencyMs(result.StartedAt, result.FinishedAt)
+	}
+	if latencyMs <= 0 {
+		latencyMs = 1
+	}
+
+	w.Header().Set("X-Lecrev-Job-Id", result.JobID)
+	w.Header().Set("X-Lecrev-Function-Version-Id", versionID)
+	w.Header().Set("X-Lecrev-Function-Url-Token", token)
+	w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
+	if result.StartMode != "" {
+		w.Header().Set("X-Lecrev-Start-Mode", string(result.StartMode))
+	}
+
+	if result.State != domain.JobStateSucceeded || result.Result == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             result.JobID,
+			"functionVersionId": versionID,
+			"state":             result.State,
+			"error":             result.Error,
+			"latencyMs":         latencyMs,
+		})
+		return
+	}
+	if err := writeHTTPFunctionResult(w, method, result.Result.Output, latencyMs); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             result.JobID,
+			"functionVersionId": versionID,
+			"state":             domain.JobStateFailed,
 			"error":             err.Error(),
 			"latencyMs":         latencyMs,
 		})

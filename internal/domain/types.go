@@ -153,6 +153,17 @@ type JobResult struct {
 	LatencyMs  int64           `json:"latencyMs"`
 }
 
+type DirectExecutionResult struct {
+	JobID      string     `json:"jobId"`
+	AttemptID  string     `json:"attemptId"`
+	State      JobState   `json:"state"`
+	Error      string     `json:"error,omitempty"`
+	StartMode  StartMode  `json:"startMode,omitempty"`
+	Result     *JobResult `json:"result,omitempty"`
+	FinishedAt time.Time  `json:"finishedAt,omitempty"`
+	StartedAt  time.Time  `json:"startedAt,omitempty"`
+}
+
 type ExecutionJob struct {
 	ID                string          `json:"id"`
 	FunctionVersionID string          `json:"functionVersionId"`

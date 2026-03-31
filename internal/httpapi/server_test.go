@@ -37,6 +37,43 @@ func (d testDispatcher) Stats() domain.RegionStats {
 }
 func (d testDispatcher) EnqueueExecution(context.Context, domain.Assignment) error { return nil }
 
+type directTestDispatcher struct {
+	region      string
+	assignments []domain.Assignment
+	result      *domain.DirectExecutionResult
+	err         error
+}
+
+func (d *directTestDispatcher) Region() string { return d.region }
+func (d *directTestDispatcher) Stats() domain.RegionStats {
+	return domain.RegionStats{AvailableHosts: 1, BlankWarm: 1}
+}
+func (d *directTestDispatcher) EnqueueExecution(context.Context, domain.Assignment) error { return nil }
+func (d *directTestDispatcher) ExecuteDirect(_ context.Context, assignment domain.Assignment) (*domain.DirectExecutionResult, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	d.assignments = append(d.assignments, assignment)
+	if d.result != nil {
+		return d.result, nil
+	}
+	return &domain.DirectExecutionResult{
+		JobID:     assignment.JobID,
+		AttemptID: assignment.AttemptID,
+		State:     domain.JobStateSucceeded,
+		StartMode: domain.StartModeFunctionWarm,
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"statusCode":200,"headers":{"Content-Type":"application/json"},"body":{"ok":true}}`),
+			HostID:     "host-" + d.region,
+			Region:     d.region,
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+			LatencyMs:  7,
+		},
+	}, nil
+}
+
 type warmTestDispatcher struct {
 	region  string
 	warmups []string
@@ -498,6 +535,76 @@ func TestHTTPTriggerInvokeReturnsStructuredHTTPResponse(t *testing.T) {
 	}
 	if request["path"] != "/echo" {
 		t.Fatalf("expected function path /echo, got %+v", request["path"])
+	}
+}
+
+func TestHTTPTriggerInvokeUsesDirectExecutionWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	dispatcher := &directTestDispatcher{region: "ap-south-1"}
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{dispatcher})
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:    "digest",
+		BundleKey: "artifacts/digest/bundle.tgz",
+		Regions: map[string]time.Time{
+			"ap-south-1": time.Now().UTC(),
+		},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-http-direct",
+		ProjectID:      "demo",
+		Name:           "echo",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "direct-http-trigger",
+		ProjectID:         "demo",
+		FunctionVersionID: "fn-http-direct",
+		AuthMode:          domain.HTTPTriggerAuthModeNone,
+		Enabled:           true,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/f/direct-http-trigger/hello", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	if len(dispatcher.assignments) != 1 {
+		t.Fatalf("expected one direct assignment, got %d", len(dispatcher.assignments))
+	}
+	if got := resp.Header().Get("X-Lecrev-Start-Mode"); got != string(domain.StartModeFunctionWarm) {
+		t.Fatalf("expected start mode header %s, got %s", domain.StartModeFunctionWarm, got)
+	}
+	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("list execution jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected direct invoke to skip persisted jobs, got %d", len(jobs))
 	}
 }
 
