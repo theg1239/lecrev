@@ -269,7 +269,7 @@ Current deploy admission caps in the implementation:
 - env refs: up to `128`
 - archived execution artifact size: up to `64 MiB`
 - execution logs: up to `8 MiB`
-- execution output payload: up to `8 MiB`
+- execution output payload: up to `32 MiB`
 - active build jobs per project: up to `20`
 - active execution jobs per project: up to `200`
 

@@ -45,7 +45,7 @@ type Service struct {
 
 const (
 	maxExecutionLogBytes    = 8 << 20
-	maxExecutionOutputBytes = 8 << 20
+	maxExecutionOutputBytes = 32 << 20
 )
 
 type EmbeddedCoordinator interface {
