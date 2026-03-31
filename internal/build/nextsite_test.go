@@ -88,6 +88,7 @@ http.createServer((req, res) => {
 		Entrypoint:     site.Entrypoint,
 		ArtifactBundle: bundle,
 		Payload:        payload,
+		Env:            map[string]string{"LECREV_NEXT_READY_TIMEOUT_MS": "5000"},
 		Timeout:        10 * time.Second,
 		Region:         "ap-south-1",
 		HostID:         "host-test",

@@ -230,7 +230,10 @@ import { fileURLToPath } from 'node:url';
 
 const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 const serverEntrypoint = path.join(workspaceRoot, 'server.js');
-
+const configuredReadyTimeoutMs = Number(process.env.LECREV_NEXT_READY_TIMEOUT_MS || 30000);
+const readyTimeoutMs = Number.isFinite(configuredReadyTimeoutMs) && configuredReadyTimeoutMs > 0
+  ? configuredReadyTimeoutMs
+  : 30000;
 let bootPromise = null;
 let serverState = null;
 
@@ -289,7 +292,7 @@ async function findAvailablePort() {
 
 async function waitUntilReady(port, child, stderrRef) {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 12000) {
+  while (Date.now() - startedAt < readyTimeoutMs) {
     if (!childAlive(child)) {
       throw new Error('next standalone server exited before becoming ready: ' + stderrRef());
     }
