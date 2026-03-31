@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 )
 
 type networkConfig struct {
@@ -17,20 +18,28 @@ type networkConfig struct {
 }
 
 type networkPool struct {
-	leases chan networkConfig
+	mu     sync.Mutex
+	order  []string
+	cfgs   map[string]networkConfig
+	inUse  map[string]bool
+	next   int
 }
 
 type networkLease struct {
-	cfg     networkConfig
-	release func()
-	once    sync.Once
+	cfg   networkConfig
+	pool  *networkPool
+	once  sync.Once
 }
 
 func newNetworkPool(configs []networkConfig) (*networkPool, error) {
 	if len(configs) == 0 {
 		return nil, nil
 	}
-	leases := make(chan networkConfig, len(configs))
+	pool := &networkPool{
+		order: make([]string, 0, len(configs)),
+		cfgs:  make(map[string]networkConfig, len(configs)),
+		inUse: make(map[string]bool, len(configs)),
+	}
 	for _, cfg := range configs {
 		if strings.TrimSpace(cfg.TapDevice) == "" {
 			return nil, fmt.Errorf("network pool entry missing tap device")
@@ -38,33 +47,99 @@ func newNetworkPool(configs []networkConfig) (*networkPool, error) {
 		if strings.TrimSpace(cfg.GuestIP) == "" || strings.TrimSpace(cfg.GatewayIP) == "" || strings.TrimSpace(cfg.Netmask) == "" {
 			return nil, fmt.Errorf("network pool entry %s missing guest network tuple", cfg.TapDevice)
 		}
-		leases <- cfg
+		tapDevice := strings.TrimSpace(cfg.TapDevice)
+		pool.order = append(pool.order, tapDevice)
+		pool.cfgs[tapDevice] = cfg
+		pool.inUse[tapDevice] = false
 	}
-	return &networkPool{leases: leases}, nil
+	return pool, nil
 }
 
 func (p *networkPool) acquire(ctx context.Context) (networkLease, error) {
 	if p == nil {
 		return networkLease{}, fmt.Errorf("full-network execution requires a configured tap pool")
 	}
-	select {
-	case cfg := <-p.leases:
-		return networkLease{
-			cfg: cfg,
-			release: func() {
-				p.leases <- cfg
-			},
-		}, nil
-	case <-ctx.Done():
-		return networkLease{}, ctx.Err()
+	for {
+		p.mu.Lock()
+		if cfg, ok := p.acquireNextLocked(); ok {
+			p.mu.Unlock()
+			return networkLease{cfg: cfg, pool: p}, nil
+		}
+		p.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return networkLease{}, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func (p *networkPool) acquireSpecific(ctx context.Context, tapDevice string) (networkLease, error) {
+	if p == nil {
+		return networkLease{}, fmt.Errorf("full-network execution requires a configured tap pool")
+	}
+	tapDevice = strings.TrimSpace(tapDevice)
+	if tapDevice == "" {
+		return networkLease{}, fmt.Errorf("tap device is required")
+	}
+	for {
+		p.mu.Lock()
+		cfg, exists := p.cfgs[tapDevice]
+		if !exists {
+			p.mu.Unlock()
+			return networkLease{}, fmt.Errorf("unknown tap device %s", tapDevice)
+		}
+		if !p.inUse[tapDevice] {
+			p.inUse[tapDevice] = true
+			p.mu.Unlock()
+			return networkLease{cfg: cfg, pool: p}, nil
+		}
+		p.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return networkLease{}, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
 func (l *networkLease) Release() {
-	if l == nil || l.release == nil {
+	if l == nil || l.pool == nil {
 		return
 	}
-	l.once.Do(l.release)
+	l.once.Do(func() {
+		l.pool.release(strings.TrimSpace(l.cfg.TapDevice))
+	})
+}
+
+func (p *networkPool) acquireNextLocked() (networkConfig, bool) {
+	if len(p.order) == 0 {
+		return networkConfig{}, false
+	}
+	for offset := 0; offset < len(p.order); offset++ {
+		index := (p.next + offset) % len(p.order)
+		tapDevice := p.order[index]
+		if p.inUse[tapDevice] {
+			continue
+		}
+		p.inUse[tapDevice] = true
+		p.next = (index + 1) % len(p.order)
+		return p.cfgs[tapDevice], true
+	}
+	return networkConfig{}, false
+}
+
+func (p *networkPool) release(tapDevice string) {
+	if p == nil || tapDevice == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.inUse[tapDevice]; exists {
+		p.inUse[tapDevice] = false
+	}
 }
 
 func (c Config) buildNetworkPool() (*networkPool, error) {

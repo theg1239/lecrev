@@ -250,7 +250,11 @@ func (s *Service) PrepareFunctionVersion(ctx context.Context, version *domain.Fu
 	if version == nil {
 		return fmt.Errorf("function version is required")
 	}
-	var errs []string
+	var (
+		errs      []string
+		successes int
+		attempted int
+	)
 	for _, region := range version.Regions {
 		dispatcher, ok := s.dispatchers[region]
 		if !ok {
@@ -261,9 +265,23 @@ func (s *Service) PrepareFunctionVersion(ctx context.Context, version *domain.Fu
 		if !ok {
 			continue
 		}
+		attempted++
 		if err := preparer.PrepareFunctionWarm(ctx, version); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", region, err))
+			continue
 		}
+		successes++
+	}
+	if successes > 0 {
+		if len(errs) > 0 {
+			slog.Warn("warm preparation partially deferred",
+				"functionVersionID", version.ID,
+				"successfulRegions", successes,
+				"attemptedRegions", attempted,
+				"errors", strings.Join(errs, "; "),
+			)
+		}
+		return nil
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("prepare function version %s: %s", version.ID, strings.Join(errs, "; "))

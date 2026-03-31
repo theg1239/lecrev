@@ -548,6 +548,11 @@ func (d *Driver) ensureNetworkFunctionSnapshotLocked(ctx context.Context, req fi
 			instance, err = d.restoreInstance(ctx, req, blankAsset, nil)
 		}
 	}
+	lease, err := d.networkPool.acquireSpecific(ctx, network.TapDevice)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
 	if instance == nil {
 		instance, err = d.bootInstance(ctx, req, nil, &network)
 	}
@@ -831,6 +836,11 @@ func (d *Driver) ensureNetworkBlankSnapshotLocked(ctx context.Context, network n
 	if asset.complete() {
 		return nil
 	}
+	lease, err := d.networkPool.acquireSpecific(ctx, network.TapDevice)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
 	req := firecracker.ExecuteRequest{
 		AttemptID:     "blank-snapshot-" + sanitizeID(network.TapDevice),
 		FunctionID:    "blank-snapshot-" + sanitizeID(network.TapDevice),

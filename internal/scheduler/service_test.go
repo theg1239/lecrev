@@ -372,6 +372,26 @@ func TestPrepareFunctionVersionIncludesFullNetworkWarmPrep(t *testing.T) {
 	}
 }
 
+func TestPrepareFunctionVersionSucceedsWhenOneRegionWarms(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	version := seedFunctionVersion(t, store, "fn-warm-partial", []string{"ap-south-1", "ap-south-2"})
+	first := &fakeDispatcher{region: "ap-south-1"}
+	second := &fakeDispatcher{region: "ap-south-2", warmErr: domain.ErrNoExecutionCapacity}
+	svc := New(store, []RegionDispatcher{first, second})
+
+	if err := svc.PrepareFunctionVersion(context.Background(), version); err != nil {
+		t.Fatalf("prepare function version: %v", err)
+	}
+	if len(first.warmups) != 1 || first.warmups[0] != version.ID {
+		t.Fatalf("expected successful warm prep in first region, got %+v", first.warmups)
+	}
+	if len(second.warmups) != 0 {
+		t.Fatalf("expected no warm prep success in second region, got %+v", second.warmups)
+	}
+}
+
 func TestRecoverStaleSchedulingRequeuesJob(t *testing.T) {
 	t.Parallel()
 

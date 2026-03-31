@@ -68,3 +68,39 @@ func TestNetworkPoolAcquireRelease(t *testing.T) {
 	leaseB.Release()
 	leaseC.Release()
 }
+
+func TestNetworkPoolAcquireSpecificWaitsForRelease(t *testing.T) {
+	t.Parallel()
+
+	pool, err := newNetworkPool([]networkConfig{
+		{TapDevice: "tap0", GuestIP: "172.16.0.2", GatewayIP: "172.16.0.1", Netmask: "255.255.255.252"},
+		{TapDevice: "tap1", GuestIP: "172.16.0.6", GatewayIP: "172.16.0.5", Netmask: "255.255.255.252"},
+	})
+	if err != nil {
+		t.Fatalf("new network pool: %v", err)
+	}
+
+	lease, err := pool.acquireSpecific(context.Background(), "tap0")
+	if err != nil {
+		t.Fatalf("acquire specific lease: %v", err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		lease.Release()
+		close(released)
+	}()
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	nextLease, err := pool.acquireSpecific(waitCtx, "tap0")
+	if err != nil {
+		t.Fatalf("reacquire specific lease after release: %v", err)
+	}
+	if nextLease.cfg.TapDevice != "tap0" {
+		t.Fatalf("expected tap0 lease, got %s", nextLease.cfg.TapDevice)
+	}
+	<-released
+	nextLease.Release()
+}
