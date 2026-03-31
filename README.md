@@ -151,8 +151,9 @@ Run the real Firecracker driver on a Linux execution host:
 go build -o ./dist/lecrev-guest-runner ./cmd/lecrev-guest-runner
 
 export LECREV_EXECUTION_DRIVER='firecracker'
-export LECREV_EXECUTION_HOST_SLOTS='4'
+export LECREV_EXECUTION_HOST_SLOTS='2'
 export LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS='2'
+export LECREV_FIRECRACKER_VCPU_COUNT='4'
 export LECREV_FIRECRACKER_BINARY='/usr/local/bin/firecracker'
 export LECREV_JAILER_BINARY='/usr/local/bin/jailer'
 export LECREV_FIRECRACKER_USE_JAILER='true'
@@ -164,6 +165,8 @@ export LECREV_FIRECRACKER_SNAPSHOT_DIR='/var/lib/lecrev/runtime/snapshots'
 export LECREV_FIRECRACKER_GUEST_INIT='/usr/local/bin/lecrev-guest-runner'
 go run ./cmd/lecrev node-agent
 ```
+
+Those settings are the current production baseline for Next.js websites: fewer execution slots, but larger `4 vCPU` Firecracker guests.
 
 On EC2, use the deployment helpers instead of hand-building the guest image:
 
