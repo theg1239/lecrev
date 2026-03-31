@@ -222,7 +222,8 @@ func encodeWebsiteManifest(versionID, staticPrefix, entrypoint string, createdAt
 	return json.MarshalIndent(manifest, "", "  ")
 }
 
-const nextSiteHandlerScript = `import { spawn } from 'node:child_process';
+const nextSiteHandlerScript = `import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
@@ -234,6 +235,9 @@ const configuredReadyTimeoutMs = Number(process.env.LECREV_NEXT_READY_TIMEOUT_MS
 const readyTimeoutMs = Number.isFinite(configuredReadyTimeoutMs) && configuredReadyTimeoutMs > 0
   ? configuredReadyTimeoutMs
   : 30000;
+const logDir = path.join(workspaceRoot, '.lecrev-next-runtime');
+const stdoutLogPath = path.join(logDir, 'server.stdout.log');
+const stderrLogPath = path.join(logDir, 'server.stderr.log');
 let bootPromise = null;
 let serverState = null;
 
@@ -271,6 +275,43 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function ensureLogFile(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, '', { encoding: 'utf8' });
+}
+
+function readLogTail(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    if (content.length <= 0) {
+      return '';
+    }
+    const maxLength = 8192;
+    if (content.length <= maxLength) {
+      return content.trim();
+    }
+    return ('…' + content.slice(-maxLength)).trim();
+  } catch {
+    return '';
+  }
+}
+
+function formatStartupLogs(stderrRef, stdoutRef) {
+  const stderr = stderrRef();
+  const stdout = stdoutRef();
+  const parts = [];
+  if (stderr !== '') {
+    parts.push('stderr:\n' + stderr);
+  }
+  if (stdout !== '') {
+    parts.push('stdout:\n' + stdout);
+  }
+  if (parts.length === 0) {
+    return 'no stdout/stderr captured';
+  }
+  return parts.join('\n\n');
+}
+
 async function findAvailablePort() {
   return await new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -290,11 +331,11 @@ async function findAvailablePort() {
   });
 }
 
-async function waitUntilReady(port, child, stderrRef) {
+async function waitUntilReady(port, child, stderrRef, stdoutRef) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < readyTimeoutMs) {
     if (!childAlive(child)) {
-      throw new Error('next standalone server exited before becoming ready: ' + stderrRef());
+      throw new Error('next standalone server exited before becoming ready: ' + formatStartupLogs(stderrRef, stdoutRef));
     }
     try {
       await new Promise((resolve, reject) => {
@@ -310,7 +351,7 @@ async function waitUntilReady(port, child, stderrRef) {
     } catch {}
     await delay(50);
   }
-  throw new Error('timed out waiting for next standalone server to listen: ' + stderrRef());
+  throw new Error('timed out waiting for next standalone server to listen: ' + formatStartupLogs(stderrRef, stdoutRef));
 }
 
 async function ensureServer() {
@@ -322,6 +363,10 @@ async function ensureServer() {
   }
   bootPromise = (async () => {
     const port = await findAvailablePort();
+    ensureLogFile(stdoutLogPath);
+    ensureLogFile(stderrLogPath);
+    const stdoutFd = fs.openSync(stdoutLogPath, 'a');
+    const stderrFd = fs.openSync(stderrLogPath, 'a');
     const child = spawn(process.execPath, [serverEntrypoint], {
       cwd: workspaceRoot,
       env: {
@@ -330,19 +375,26 @@ async function ensureServer() {
         HOSTNAME: '127.0.0.1',
         NODE_ENV: process.env.NODE_ENV || 'production',
       },
-      stdio: ['ignore', 'ignore', 'ignore'],
+      stdio: ['ignore', stdoutFd, stderrFd],
     });
+    try {
+      fs.closeSync(stdoutFd);
+    } catch {}
+    try {
+      fs.closeSync(stderrFd);
+    } catch {}
     child.on('exit', () => {
       if (serverState?.child === child) {
         serverState = null;
       }
     });
     child.unref();
-    await waitUntilReady(port, child, () => '');
+    await waitUntilReady(port, child, () => readLogTail(stderrLogPath), () => readLogTail(stdoutLogPath));
     serverState = {
       port,
       child,
-      stderr: () => '',
+      stderr: () => readLogTail(stderrLogPath),
+      stdout: () => readLogTail(stdoutLogPath),
     };
     return serverState;
   })();

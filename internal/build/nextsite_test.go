@@ -115,3 +115,71 @@ http.createServer((req, res) => {
 		t.Fatalf("unexpected body %q", response.Body)
 	}
 }
+
+func TestMaybePrepareNextSiteSurfacesStartupLogs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	serverRoot := filepath.Join(root, ".next", "standalone")
+	if err := os.MkdirAll(serverRoot, 0o755); err != nil {
+		t.Fatalf("mkdir standalone root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverRoot, "server.js"), []byte(`
+console.error('next boot failed: missing runtime input');
+process.exit(1);
+`), 0o644); err != nil {
+		t.Fatalf("write failing server.js: %v", err)
+	}
+
+	site, err := maybePrepareNextSite(root, nil)
+	if err != nil {
+		t.Fatalf("maybePrepareNextSite: %v", err)
+	}
+	if site == nil {
+		t.Fatal("expected next site to be detected")
+	}
+
+	bundle, err := artifact.BundleFromDirectory(site.BundleRoot, map[string][]byte{
+		"function.json": []byte(`{"entrypoint":"` + site.Entrypoint + `"}`),
+		"startup.json":  []byte(`{"entrypoint":"` + site.Entrypoint + `"}`),
+	})
+	if err != nil {
+		t.Fatalf("bundle next site: %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"request": map[string]any{
+			"method":   "GET",
+			"scheme":   "https",
+			"host":     "preview.lecrev.test",
+			"path":     "/",
+			"rawQuery": "",
+			"headers":  map[string]string{"accept": "text/html"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	result, execErr := nodeexec.ExecuteBundle(context.Background(), nodeexec.Request{
+		AttemptID:      "attempt-next-fail",
+		JobID:          "job-next-fail",
+		FunctionID:     "fn-next-fail",
+		Entrypoint:     site.Entrypoint,
+		ArtifactBundle: bundle,
+		Payload:        payload,
+		Env:            map[string]string{"LECREV_NEXT_READY_TIMEOUT_MS": "5000"},
+		Timeout:        10 * time.Second,
+		Region:         "ap-south-1",
+		HostID:         "host-test",
+	})
+	if execErr == nil {
+		t.Fatal("expected execute next site bundle to fail")
+	}
+	if result == nil {
+		t.Fatal("expected result on startup failure")
+	}
+	if !strings.Contains(result.Logs, "next boot failed: missing runtime input") {
+		t.Fatalf("expected startup logs in result, got %q", result.Logs)
+	}
+}
