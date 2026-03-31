@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	guestRequestRetryInterval = 25 * time.Millisecond
-	fileWaitPollInterval      = 25 * time.Millisecond
+	guestRequestRetryInterval = 5 * time.Millisecond
+	fileWaitPollInterval      = 5 * time.Millisecond
 )
 
 type Config struct {

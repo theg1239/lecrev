@@ -173,11 +173,11 @@ func ShutdownPreparedWorker(ctx context.Context, functionID string) error {
 }
 
 func waitForPreparedWorker(ctx context.Context, functionID string, waitCh <-chan error) error {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		pingCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		pingCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 		ready, err := pingPreparedWorker(pingCtx, functionID)
 		cancel()
 		if err == nil && ready {
