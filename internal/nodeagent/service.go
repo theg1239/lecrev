@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -61,8 +62,12 @@ func (c Config) withDefaults() Config {
 	if c.MaxConcurrentAssignments <= 0 {
 		c.MaxConcurrentAssignments = 4
 	}
+	hostCPUs := runtime.NumCPU()
+	if hostCPUs <= 0 {
+		hostCPUs = 1
+	}
 	if c.MaxConcurrentFullNetworkJobs <= 0 {
-		c.MaxConcurrentFullNetworkJobs = 1
+		c.MaxConcurrentFullNetworkJobs = hostCPUs
 	}
 	if c.MaxConcurrentFullNetworkJobs > c.MaxConcurrentAssignments {
 		c.MaxConcurrentFullNetworkJobs = c.MaxConcurrentAssignments
@@ -412,7 +417,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 }
 
 func (s *Service) shouldHoldSlotDuringWarmPrepare(req firecracker.ExecuteRequest) bool {
-	return strings.EqualFold(strings.TrimSpace(req.NetworkPolicy), "full")
+	return false
 }
 
 func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersionID string, releaseSlot func(), sendHeartbeat func()) {

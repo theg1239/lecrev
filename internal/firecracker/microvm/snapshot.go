@@ -29,6 +29,7 @@ type snapshotMetadata struct {
 	FunctionID     string    `json:"functionId,omitempty"`
 	Entrypoint     string    `json:"entrypoint,omitempty"`
 	NetworkPolicy  string    `json:"networkPolicy,omitempty"`
+	TapDevice      string    `json:"tapDevice,omitempty"`
 	MemoryMB       int       `json:"memoryMb,omitempty"`
 	WorkerPrepared bool      `json:"workerPrepared,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
@@ -59,6 +60,46 @@ func (d *Driver) ExecuteDeferred(ctx context.Context, req firecracker.ExecuteReq
 	if req.MemoryMB <= 0 {
 		req.MemoryMB = int(d.config.DefaultMemoryMB)
 	}
+	if isFullNetworkPolicy(req.NetworkPolicy) {
+		lease, err := d.networkPool.acquire(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if asset, ok := d.networkFunctionSnapshotAssetForRequest(req, lease.cfg); ok {
+			trace.Note("execution_path", "startMode=network-function-warm")
+			result, cleanup, err := d.executeFromSnapshotDeferred(ctx, req, asset, true, trace)
+			if cleanup == nil {
+				lease.Release()
+				return result, nil, err
+			}
+			return result, func() {
+				cleanup()
+				lease.Release()
+			}, err
+		}
+		if asset, ok := d.networkBlankSnapshotAssetForRequest(req, lease.cfg); ok {
+			trace.Note("execution_path", "startMode=network-blank-warm")
+			result, cleanup, err := d.executeFromSnapshotDeferred(ctx, req, asset, false, trace)
+			if cleanup == nil {
+				lease.Release()
+				return result, nil, err
+			}
+			return result, func() {
+				cleanup()
+				lease.Release()
+			}, err
+		}
+		trace.Note("execution_path", "startMode=network-cold")
+		result, cleanup, err := d.executeColdDeferred(ctx, req, trace, &lease.cfg)
+		if cleanup == nil {
+			lease.Release()
+			return result, nil, err
+		}
+		return result, func() {
+			cleanup()
+			lease.Release()
+		}, err
+	}
 	if asset, ok := d.functionSnapshotAsset(req.FunctionID); ok {
 		trace.Note("execution_path", "startMode=function-warm")
 		return d.executeFromSnapshotDeferred(ctx, req, asset, true, trace)
@@ -68,19 +109,19 @@ func (d *Driver) ExecuteDeferred(ctx context.Context, req firecracker.ExecuteReq
 		return d.executeFromSnapshotDeferred(ctx, req, asset, false, trace)
 	}
 	trace.Note("execution_path", "startMode=cold")
-	return d.executeColdDeferred(ctx, req, trace)
+	return d.executeColdDeferred(ctx, req, trace, nil)
 }
 
 func (d *Driver) executeCold(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {
-	result, cleanup, err := d.executeColdDeferred(ctx, req, trace)
+	result, cleanup, err := d.executeColdDeferred(ctx, req, trace, nil)
 	if cleanup != nil {
 		cleanup()
 	}
 	return result, err
 }
 
-func (d *Driver) executeColdDeferred(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*firecracker.ExecuteResult, func(), error) {
-	instance, err := d.bootInstance(ctx, req, trace)
+func (d *Driver) executeColdDeferred(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder, network *networkConfig) (*firecracker.ExecuteResult, func(), error) {
+	instance, err := d.bootInstance(ctx, req, trace, network)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -180,7 +221,7 @@ func guestInvocationRequest(req firecracker.ExecuteRequest, usePreparedRoot bool
 	}
 }
 
-func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*vmInstance, error) {
+func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder, network *networkConfig) (*vmInstance, error) {
 	prepareLayoutStarted := time.Now()
 	layout, vmID, err := d.prepareLayout(req.AttemptID)
 	if err != nil {
@@ -223,7 +264,7 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 
 	api := newAPIClient(layout.apiSocketHost)
 	guestCID := d.allocCID()
-	bootArgs, err := d.bootArgs(req)
+	bootArgs, err := d.bootArgs(req, network)
 	if err != nil {
 		layout.cleanup()
 		_ = proc.close()
@@ -262,12 +303,17 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 		return nil, fmt.Errorf("configure rootfs: %w; logs: %s", err, proc.logs())
 	}
 	trace.Step("configure_rootfs_drive", rootfsDriveStarted)
-	if strings.EqualFold(req.NetworkPolicy, "full") {
+	if isFullNetworkPolicy(req.NetworkPolicy) {
+		if network == nil {
+			layout.cleanup()
+			_ = proc.close()
+			return nil, fmt.Errorf("networkPolicy=full requires a leased tap device")
+		}
 		networkStarted := time.Now()
 		if err := api.put(ctx, "/network-interfaces/eth0", networkInterface{
 			IfaceID:     "eth0",
-			HostDevName: d.config.TapDevice,
-			GuestMAC:    d.config.GuestMAC,
+			HostDevName: network.TapDevice,
+			GuestMAC:    network.GuestMAC,
 		}); err != nil {
 			layout.cleanup()
 			_ = proc.close()
@@ -392,38 +438,42 @@ func (v *vmInstance) cleanupWithTimeout(timeout time.Duration) {
 
 func (d *Driver) ensureBlankSnapshotLocked(ctx context.Context) error {
 	asset := d.blankSnapshotAsset()
-	if asset.complete() {
-		return nil
-	}
+	if !asset.complete() {
+		req := firecracker.ExecuteRequest{
+			AttemptID:     "blank-snapshot",
+			FunctionID:    "blank-snapshot",
+			Timeout:       d.config.PrepareTimeout,
+			MemoryMB:      int(d.config.DefaultMemoryMB),
+			NetworkPolicy: "none",
+		}
+		instance, err := d.bootInstance(ctx, req, nil, nil)
+		if err != nil {
+			return err
+		}
+		defer instance.cleanup()
 
-	req := firecracker.ExecuteRequest{
-		AttemptID:     "blank-snapshot",
-		FunctionID:    "blank-snapshot",
-		Timeout:       d.config.PrepareTimeout,
-		MemoryMB:      int(d.config.DefaultMemoryMB),
-		NetworkPolicy: "none",
-	}
-	instance, err := d.bootInstance(ctx, req, nil)
-	if err != nil {
-		return err
-	}
-	defer instance.cleanup()
+		pingCtx, cancel := context.WithTimeout(ctx, d.config.ConnectTimeout)
+		defer cancel()
+		if err := pingGuest(pingCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort); err != nil {
+			return fmt.Errorf("ping guest for blank snapshot: %w; firecracker logs: %s", err, instance.proc.logs())
+		}
 
-	pingCtx, cancel := context.WithTimeout(ctx, d.config.ConnectTimeout)
-	defer cancel()
-	if err := pingGuest(pingCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort); err != nil {
-		return fmt.Errorf("ping guest for blank snapshot: %w; firecracker logs: %s", err, instance.proc.logs())
+		if err := d.createSnapshotAsset(ctx, instance, asset, snapshotMetadata{
+			Kind:          "blank",
+			NetworkPolicy: "none",
+			MemoryMB:      int(d.config.DefaultMemoryMB),
+			CreatedAt:     time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
 	}
-
-	return d.createSnapshotAsset(ctx, instance, asset, snapshotMetadata{
-		Kind:          "blank",
-		NetworkPolicy: "none",
-		MemoryMB:      int(d.config.DefaultMemoryMB),
-		CreatedAt:     time.Now().UTC(),
-	})
+	return d.ensureNetworkBlankSnapshotsLocked(ctx)
 }
 
 func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecracker.ExecuteRequest) error {
+	if isFullNetworkPolicy(req.NetworkPolicy) {
+		return d.ensureNetworkFunctionSnapshotsLocked(ctx, req)
+	}
 	asset := d.functionSnapshotPath(req.FunctionID)
 	if asset.complete() {
 		return nil
@@ -441,7 +491,7 @@ func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecrack
 		}
 	}
 	if instance == nil {
-		instance, err = d.bootInstance(ctx, req, nil)
+		instance, err = d.bootInstance(ctx, req, nil, nil)
 	}
 	if err != nil {
 		return err
@@ -465,6 +515,65 @@ func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecrack
 		FunctionID:     req.FunctionID,
 		Entrypoint:     req.Entrypoint,
 		NetworkPolicy:  req.NetworkPolicy,
+		MemoryMB:       req.MemoryMB,
+		WorkerPrepared: prepareResp != nil && prepareResp.WorkerPrepared,
+		CreatedAt:      time.Now().UTC(),
+	})
+}
+
+func (d *Driver) ensureNetworkFunctionSnapshotsLocked(ctx context.Context, req firecracker.ExecuteRequest) error {
+	if !isFullNetworkPolicy(req.NetworkPolicy) {
+		return nil
+	}
+	for _, network := range d.networks {
+		if err := d.ensureNetworkFunctionSnapshotLocked(ctx, req, network); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Driver) ensureNetworkFunctionSnapshotLocked(ctx context.Context, req firecracker.ExecuteRequest, network networkConfig) error {
+	asset := d.networkFunctionSnapshotAsset(req.FunctionID, network)
+	if asset.complete() {
+		return nil
+	}
+
+	var (
+		instance *vmInstance
+		err      error
+	)
+	if err := d.ensureNetworkBlankSnapshotLocked(ctx, network); err == nil {
+		if blankAsset, ok := d.networkBlankSnapshotAssetForRequest(req, network); ok {
+			instance, err = d.restoreInstance(ctx, req, blankAsset, nil)
+		}
+	}
+	if instance == nil {
+		instance, err = d.bootInstance(ctx, req, nil, &network)
+	}
+	if err != nil {
+		return err
+	}
+	defer instance.cleanup()
+
+	prepareCtx, cancel := context.WithTimeout(ctx, d.config.PrepareTimeout)
+	defer cancel()
+	prepareResp, err := prepareGuest(prepareCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, firecracker.GuestPrepareRequest{
+		FunctionID:     req.FunctionID,
+		Entrypoint:     req.Entrypoint,
+		ArtifactBundle: req.ArtifactBundle,
+		Env:            req.Env,
+	})
+	if err != nil {
+		return fmt.Errorf("prepare full-network function snapshot for %s on %s: %w; firecracker logs: %s", req.FunctionID, network.TapDevice, err, instance.proc.logs())
+	}
+
+	return d.createSnapshotAsset(ctx, instance, asset, snapshotMetadata{
+		Kind:           "function",
+		FunctionID:     req.FunctionID,
+		Entrypoint:     req.Entrypoint,
+		NetworkPolicy:  req.NetworkPolicy,
+		TapDevice:      network.TapDevice,
 		MemoryMB:       req.MemoryMB,
 		WorkerPrepared: prepareResp != nil && prepareResp.WorkerPrepared,
 		CreatedAt:      time.Now().UTC(),
@@ -520,31 +629,58 @@ func (d *Driver) createSnapshotAsset(ctx context.Context, instance *vmInstance, 
 }
 
 func (d *Driver) functionWarmInventory() map[string]int {
-	root := filepath.Join(d.config.SnapshotDir, "functions")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return map[string]int{}
-	}
-	out := make(map[string]int, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		asset := snapshotAsset{
-			dir:          filepath.Join(root, entry.Name()),
-			statePath:    filepath.Join(root, entry.Name(), "snapshot.state"),
-			memoryPath:   filepath.Join(root, entry.Name(), "snapshot.mem"),
-			rootFSPath:   filepath.Join(root, entry.Name(), "rootfs.ext4"),
-			metadataPath: filepath.Join(root, entry.Name(), "metadata.json"),
-		}
+	out := map[string]int{}
+	record := func(asset snapshotAsset) {
 		if !asset.complete() {
-			continue
+			return
 		}
 		meta, err := asset.metadata()
 		if err != nil || meta.Kind != "function" || strings.TrimSpace(meta.FunctionID) == "" {
-			continue
+			return
 		}
-		out[meta.FunctionID] = 1
+		out[meta.FunctionID]++
+	}
+
+	flatRoot := filepath.Join(d.config.SnapshotDir, "functions")
+	if entries, err := os.ReadDir(flatRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			record(snapshotAsset{
+				dir:          filepath.Join(flatRoot, entry.Name()),
+				statePath:    filepath.Join(flatRoot, entry.Name(), "snapshot.state"),
+				memoryPath:   filepath.Join(flatRoot, entry.Name(), "snapshot.mem"),
+				rootFSPath:   filepath.Join(flatRoot, entry.Name(), "rootfs.ext4"),
+				metadataPath: filepath.Join(flatRoot, entry.Name(), "metadata.json"),
+			})
+		}
+	}
+
+	perTapRoot := filepath.Join(d.config.SnapshotDir, "functions-full")
+	if functionEntries, err := os.ReadDir(perTapRoot); err == nil {
+		for _, functionEntry := range functionEntries {
+			if !functionEntry.IsDir() {
+				continue
+			}
+			tapRoot := filepath.Join(perTapRoot, functionEntry.Name())
+			tapEntries, err := os.ReadDir(tapRoot)
+			if err != nil {
+				continue
+			}
+			for _, tapEntry := range tapEntries {
+				if !tapEntry.IsDir() {
+					continue
+				}
+				record(snapshotAsset{
+					dir:          filepath.Join(tapRoot, tapEntry.Name()),
+					statePath:    filepath.Join(tapRoot, tapEntry.Name(), "snapshot.state"),
+					memoryPath:   filepath.Join(tapRoot, tapEntry.Name(), "snapshot.mem"),
+					rootFSPath:   filepath.Join(tapRoot, tapEntry.Name(), "rootfs.ext4"),
+					metadataPath: filepath.Join(tapRoot, tapEntry.Name(), "metadata.json"),
+				})
+			}
+		}
 	}
 	return out
 }
@@ -576,6 +712,28 @@ func (d *Driver) blankSnapshotAsset() snapshotAsset {
 	}
 }
 
+func (d *Driver) networkBlankSnapshotAsset(network networkConfig) snapshotAsset {
+	dir := filepath.Join(d.config.SnapshotDir, "blank-full", sanitizeID(network.TapDevice))
+	return snapshotAsset{
+		dir:          dir,
+		statePath:    filepath.Join(dir, "snapshot.state"),
+		memoryPath:   filepath.Join(dir, "snapshot.mem"),
+		rootFSPath:   filepath.Join(dir, "rootfs.ext4"),
+		metadataPath: filepath.Join(dir, "metadata.json"),
+	}
+}
+
+func (d *Driver) networkFunctionSnapshotAsset(functionID string, network networkConfig) snapshotAsset {
+	dir := filepath.Join(d.config.SnapshotDir, "functions-full", sanitizeID(functionID), sanitizeID(network.TapDevice))
+	return snapshotAsset{
+		dir:          dir,
+		statePath:    filepath.Join(dir, "snapshot.state"),
+		memoryPath:   filepath.Join(dir, "snapshot.mem"),
+		rootFSPath:   filepath.Join(dir, "rootfs.ext4"),
+		metadataPath: filepath.Join(dir, "metadata.json"),
+	}
+}
+
 func (d *Driver) blankSnapshotAssetForRequest(req firecracker.ExecuteRequest) (snapshotAsset, bool) {
 	asset := d.blankSnapshotAsset()
 	if !asset.complete() {
@@ -597,6 +755,57 @@ func (d *Driver) blankSnapshotAssetForRequest(req firecracker.ExecuteRequest) (s
 	return asset, true
 }
 
+func (d *Driver) networkBlankSnapshotAssetForRequest(req firecracker.ExecuteRequest, network networkConfig) (snapshotAsset, bool) {
+	if !isFullNetworkPolicy(req.NetworkPolicy) {
+		return snapshotAsset{}, false
+	}
+	asset := d.networkBlankSnapshotAsset(network)
+	if !asset.complete() {
+		return snapshotAsset{}, false
+	}
+	meta, err := asset.metadata()
+	if err != nil {
+		return snapshotAsset{}, false
+	}
+	if meta.Kind != "blank" || !isFullNetworkPolicy(meta.NetworkPolicy) {
+		return snapshotAsset{}, false
+	}
+	if strings.TrimSpace(meta.TapDevice) != strings.TrimSpace(network.TapDevice) {
+		return snapshotAsset{}, false
+	}
+	if meta.MemoryMB > 0 && req.MemoryMB > 0 && meta.MemoryMB != req.MemoryMB {
+		return snapshotAsset{}, false
+	}
+	return asset, true
+}
+
+func (d *Driver) networkFunctionSnapshotAssetForRequest(req firecracker.ExecuteRequest, network networkConfig) (snapshotAsset, bool) {
+	if !isFullNetworkPolicy(req.NetworkPolicy) {
+		return snapshotAsset{}, false
+	}
+	asset := d.networkFunctionSnapshotAsset(req.FunctionID, network)
+	if !asset.complete() {
+		return snapshotAsset{}, false
+	}
+	meta, err := asset.metadata()
+	if err != nil {
+		return snapshotAsset{}, false
+	}
+	if meta.Kind != "function" || !isFullNetworkPolicy(meta.NetworkPolicy) {
+		return snapshotAsset{}, false
+	}
+	if strings.TrimSpace(meta.FunctionID) != strings.TrimSpace(req.FunctionID) {
+		return snapshotAsset{}, false
+	}
+	if strings.TrimSpace(meta.TapDevice) != strings.TrimSpace(network.TapDevice) {
+		return snapshotAsset{}, false
+	}
+	if meta.MemoryMB > 0 && req.MemoryMB > 0 && meta.MemoryMB != req.MemoryMB {
+		return snapshotAsset{}, false
+	}
+	return asset, true
+}
+
 func (d *Driver) functionSnapshotPath(functionID string) snapshotAsset {
 	dir := filepath.Join(d.config.SnapshotDir, "functions", sanitizeID(functionID))
 	return snapshotAsset{
@@ -606,6 +815,48 @@ func (d *Driver) functionSnapshotPath(functionID string) snapshotAsset {
 		rootFSPath:   filepath.Join(dir, "rootfs.ext4"),
 		metadataPath: filepath.Join(dir, "metadata.json"),
 	}
+}
+
+func (d *Driver) ensureNetworkBlankSnapshotsLocked(ctx context.Context) error {
+	for _, network := range d.networks {
+		if err := d.ensureNetworkBlankSnapshotLocked(ctx, network); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Driver) ensureNetworkBlankSnapshotLocked(ctx context.Context, network networkConfig) error {
+	asset := d.networkBlankSnapshotAsset(network)
+	if asset.complete() {
+		return nil
+	}
+	req := firecracker.ExecuteRequest{
+		AttemptID:     "blank-snapshot-" + sanitizeID(network.TapDevice),
+		FunctionID:    "blank-snapshot-" + sanitizeID(network.TapDevice),
+		Timeout:       d.config.PrepareTimeout,
+		MemoryMB:      int(d.config.DefaultMemoryMB),
+		NetworkPolicy: "full",
+	}
+	instance, err := d.bootInstance(ctx, req, nil, &network)
+	if err != nil {
+		return err
+	}
+	defer instance.cleanup()
+
+	pingCtx, cancel := context.WithTimeout(ctx, d.config.ConnectTimeout)
+	defer cancel()
+	if err := pingGuest(pingCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort); err != nil {
+		return fmt.Errorf("ping guest for full-network blank snapshot on %s: %w; firecracker logs: %s", network.TapDevice, err, instance.proc.logs())
+	}
+
+	return d.createSnapshotAsset(ctx, instance, asset, snapshotMetadata{
+		Kind:          "blank",
+		NetworkPolicy: "full",
+		TapDevice:     network.TapDevice,
+		MemoryMB:      int(d.config.DefaultMemoryMB),
+		CreatedAt:     time.Now().UTC(),
+	})
 }
 
 func (d *Driver) prepareOwnership(layout *vmLayout, paths ...string) error {

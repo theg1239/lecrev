@@ -135,14 +135,7 @@ func ExecutePreparedWorker(ctx context.Context, req WorkspaceRequest) (*Result, 
 	trace := timetrace.New()
 
 	contextStarted := time.Now()
-	contextJSON, err := invocationContextJSON(req)
-	if err != nil {
-		return nil, err
-	}
-	var contextValue map[string]any
-	if err := json.Unmarshal(contextJSON, &contextValue); err != nil {
-		return nil, err
-	}
+	contextValue := invocationContext(req)
 	trace.Step("build_context", contextStarted)
 
 	if len(req.Payload) == 0 {
@@ -434,28 +427,27 @@ function formatValue(value) {
     : util.inspect(value, { depth: 6, colors: false, breakLength: Infinity });
 }
 
-function captureConsole(logs) {
-  const originals = {};
-  for (const method of ['log', 'info', 'warn', 'error', 'debug']) {
-    originals[method] = console[method];
-    console[method] = (...args) => {
-      logs.push(args.map(formatValue).join(' ') + '\n');
-    };
+let activeLogs = null;
+
+function appendLog(text) {
+  if (!activeLogs) {
+    return;
   }
-  return () => {
-    for (const method of Object.keys(originals)) {
-      console[method] = originals[method];
-    }
+  activeLogs.push(text);
+}
+
+for (const method of ['log', 'info', 'warn', 'error', 'debug']) {
+  console[method] = (...args) => {
+    appendLog(args.map(formatValue).join(' ') + '\n');
   };
 }
 
-function captureStream(stream, logs) {
-  const original = stream.write.bind(stream);
-  stream.write = (chunk, encoding, callback) => {
+for (const stream of [process.stdout, process.stderr]) {
+  stream.write = ((original) => (chunk, encoding, callback) => {
     const text = Buffer.isBuffer(chunk)
       ? chunk.toString(typeof encoding === 'string' ? encoding : undefined)
       : String(chunk ?? '');
-    logs.push(text);
+    appendLog(text);
     if (typeof encoding === 'function') {
       encoding();
     }
@@ -463,10 +455,7 @@ function captureStream(stream, logs) {
       callback();
     }
     return true;
-  };
-  return () => {
-    stream.write = original;
-  };
+  })(stream.write.bind(stream));
 }
 
 function applyEnv(overrides) {
@@ -502,10 +491,10 @@ function handleRequest(socket, protocolWrite, request) {
   }
 
   const logs = [];
-  const restoreEnv = applyEnv(request.env);
-  const restoreStdout = captureStream(process.stdout, logs);
-  const restoreStderr = captureStream(process.stderr, logs);
-  const restoreConsole = captureConsole(logs);
+  const previousLogs = activeLogs;
+  activeLogs = logs;
+  const hasEnvOverrides = request.env && Object.keys(request.env).length > 0;
+  const restoreEnv = hasEnvOverrides ? applyEnv(request.env) : null;
 
   return Promise.resolve()
     .then(() => mod.handler(request.payload ?? null, request.context ?? {}))
@@ -518,10 +507,10 @@ function handleRequest(socket, protocolWrite, request) {
       return false;
     })
     .finally(() => {
-      restoreConsole();
-      restoreStdout();
-      restoreStderr();
-      restoreEnv();
+      activeLogs = previousLogs;
+      if (restoreEnv) {
+        restoreEnv();
+      }
     });
 }
 

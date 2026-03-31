@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -251,6 +252,9 @@ func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignm
 	if err != nil {
 		state = "pick_host_failed"
 		errMsg = err.Error()
+		if strings.Contains(err.Error(), "no active hosts available") {
+			return fmt.Errorf("%w: %v", domain.ErrNoExecutionCapacity, err)
+		}
 		return err
 	}
 

@@ -91,6 +91,10 @@ type Config struct {
 	FirecrackerGuestIP     string
 	FirecrackerGatewayIP   string
 	FirecrackerNetmask     string
+	FirecrackerTapPrefix   string
+	FirecrackerTapCount    int
+	FirecrackerTapCIDR     string
+	FirecrackerTapSubnet   int
 	FirecrackerVCPUCount   int
 	FirecrackerMemoryMB    int
 	FirecrackerJailerUID   int
@@ -300,6 +304,30 @@ func prepareConfig(cfg *Config) error {
 	if cfg.LoadEnv && cfg.FirecrackerNetmask == "" {
 		cfg.FirecrackerNetmask = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_NETMASK"))
 	}
+	if cfg.LoadEnv && cfg.FirecrackerTapPrefix == "" {
+		cfg.FirecrackerTapPrefix = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_TAP_DEVICE_PREFIX"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerTapCount == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_TAP_COUNT")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_TAP_COUNT: %w", err)
+			}
+			cfg.FirecrackerTapCount = value
+		}
+	}
+	if cfg.LoadEnv && cfg.FirecrackerTapCIDR == "" {
+		cfg.FirecrackerTapCIDR = strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_TAP_NETWORK_CIDR"))
+	}
+	if cfg.LoadEnv && cfg.FirecrackerTapSubnet == 0 {
+		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_TAP_SUBNET_PREFIX")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("parse LECREV_FIRECRACKER_TAP_SUBNET_PREFIX: %w", err)
+			}
+			cfg.FirecrackerTapSubnet = value
+		}
+	}
 	if cfg.LoadEnv && cfg.FirecrackerVCPUCount == 0 {
 		if raw := strings.TrimSpace(os.Getenv("LECREV_FIRECRACKER_VCPU_COUNT")); raw != "" {
 			value, err := strconv.Atoi(raw)
@@ -331,7 +359,11 @@ func prepareConfig(cfg *Config) error {
 		cfg.ExecutionHostSlots = 4
 	}
 	if cfg.ExecutionHostFullNetworkSlots <= 0 {
-		cfg.ExecutionHostFullNetworkSlots = 1
+		if cfg.FirecrackerTapCount > 0 {
+			cfg.ExecutionHostFullNetworkSlots = cfg.FirecrackerTapCount
+		} else {
+			cfg.ExecutionHostFullNetworkSlots = 1
+		}
 	}
 	if cfg.ExecutionHostFullNetworkSlots > cfg.ExecutionHostSlots {
 		cfg.ExecutionHostFullNetworkSlots = cfg.ExecutionHostSlots
@@ -818,6 +850,10 @@ func buildExecutionDriver(cfg Config) (firecracker.Driver, error) {
 			GuestIP:           cfg.FirecrackerGuestIP,
 			GatewayIP:         cfg.FirecrackerGatewayIP,
 			Netmask:           cfg.FirecrackerNetmask,
+			TapDevicePrefix:   cfg.FirecrackerTapPrefix,
+			TapCount:          cfg.FirecrackerTapCount,
+			TapNetworkCIDR:    cfg.FirecrackerTapCIDR,
+			TapSubnetPrefix:   cfg.FirecrackerTapSubnet,
 			VCPUCount:         int64(cfg.FirecrackerVCPUCount),
 			DefaultMemoryMB:   int64(cfg.FirecrackerMemoryMB),
 			JailerUID:         jailerUID,

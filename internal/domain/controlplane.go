@@ -11,6 +11,7 @@ var (
 	ErrFunctionVersionNotReady = errors.New("function version not ready")
 	ErrProjectBuildQuota       = errors.New("project build quota exceeded")
 	ErrProjectExecutionQuota   = errors.New("project execution quota exceeded")
+	ErrNoExecutionCapacity     = errors.New("no execution capacity available")
 	ErrBuildLogsNotReady       = errors.New("build logs not ready")
 	ErrExecutionResultNotReady = errors.New("execution result not ready")
 )

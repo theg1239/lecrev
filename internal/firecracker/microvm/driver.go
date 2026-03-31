@@ -51,6 +51,11 @@ type Config struct {
 	GatewayIP string
 	Netmask   string
 
+	TapDevicePrefix string
+	TapCount        int
+	TapNetworkCIDR  string
+	TapSubnetPrefix int
+
 	StartTimeout          time.Duration
 	ConnectTimeout        time.Duration
 	PrepareTimeout        time.Duration
@@ -62,10 +67,12 @@ type Config struct {
 }
 
 type Driver struct {
-	config     Config
-	mu         sync.Mutex
-	snapshotMu sync.Mutex
-	nextCID    uint32
+	config      Config
+	mu          sync.Mutex
+	snapshotMu  sync.Mutex
+	nextCID     uint32
+	networkPool *networkPool
+	networks    []networkConfig
 }
 
 func New(cfg Config) (*Driver, error) {
@@ -73,9 +80,19 @@ func New(cfg Config) (*Driver, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	networks, err := cfg.networkConfigs()
+	if err != nil {
+		return nil, err
+	}
+	pool, err := newNetworkPool(networks)
+	if err != nil {
+		return nil, err
+	}
 	return &Driver{
-		config:  cfg,
-		nextCID: cfg.GuestCIDStart,
+		config:      cfg,
+		nextCID:     cfg.GuestCIDStart,
+		networkPool: pool,
+		networks:    networks,
 	}, nil
 }
 
@@ -142,7 +159,7 @@ func (d *Driver) allocCID() uint32 {
 	return cid
 }
 
-func (d *Driver) bootArgs(req firecracker.ExecuteRequest) (string, error) {
+func (d *Driver) bootArgs(req firecracker.ExecuteRequest, network *networkConfig) (string, error) {
 	parts := []string{
 		"console=ttyS0",
 		"reboot=k",
@@ -155,11 +172,11 @@ func (d *Driver) bootArgs(req firecracker.ExecuteRequest) (string, error) {
 	if strings.TrimSpace(d.config.BootArgs) != "" {
 		parts = append(parts, strings.Fields(d.config.BootArgs)...)
 	}
-	if strings.EqualFold(req.NetworkPolicy, "full") {
-		if strings.TrimSpace(d.config.TapDevice) == "" || strings.TrimSpace(d.config.GuestIP) == "" || strings.TrimSpace(d.config.GatewayIP) == "" || strings.TrimSpace(d.config.Netmask) == "" {
+	if isFullNetworkPolicy(req.NetworkPolicy) {
+		if network == nil || strings.TrimSpace(network.TapDevice) == "" || strings.TrimSpace(network.GuestIP) == "" || strings.TrimSpace(network.GatewayIP) == "" || strings.TrimSpace(network.Netmask) == "" {
 			return "", fmt.Errorf("networkPolicy=full requires tapDevice, guestIP, gatewayIP, and netmask")
 		}
-		parts = append(parts, fmt.Sprintf("ip=%s::%s:%s::eth0:off", d.config.GuestIP, d.config.GatewayIP, d.config.Netmask))
+		parts = append(parts, fmt.Sprintf("ip=%s::%s:%s::eth0:off", network.GuestIP, network.GatewayIP, network.Netmask))
 	}
 	return strings.Join(parts, " "), nil
 }
@@ -176,6 +193,12 @@ func (c Config) withDefaults() Config {
 	}
 	if strings.TrimSpace(c.GuestInitPath) == "" {
 		c.GuestInitPath = "/usr/local/bin/lecrev-guest-runner"
+	}
+	if strings.TrimSpace(c.TapDevicePrefix) == "" {
+		c.TapDevicePrefix = "tap"
+	}
+	if c.TapSubnetPrefix == 0 {
+		c.TapSubnetPrefix = 30
 	}
 	if c.GuestVSockPort == 0 {
 		c.GuestVSockPort = 5005

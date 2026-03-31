@@ -412,6 +412,7 @@ aws ec2 describe-instances \
 
 ## 13. Current platform constraints
 
-- `networkPolicy=full` still uses a single static `tap0`, so keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS=1` even if `LECREV_EXECUTION_HOST_SLOTS` is higher for `networkPolicy=none`.
+- `networkPolicy=full` now scales up to the configured tap-pool size on each execution host. Keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS` less than or equal to both `LECREV_FIRECRACKER_TAP_COUNT` and the host vCPU count.
+- Full-network functions now create tap-scoped blank and function-warm snapshots, so first-hit deploys can warm on the build path and later invokes can restore a tap-matched prepared snapshot safely.
 - The control plane is the only public entrypoint.
 - Function URLs are synchronous on the control plane and should be kept within the configured function timeout envelope.

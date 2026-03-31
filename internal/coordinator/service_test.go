@@ -323,6 +323,81 @@ func TestPrepareFunctionWarmSendsSnapshotPrepCommand(t *testing.T) {
 	}
 }
 
+func TestPrepareFunctionWarmIncludesFullNetworkVersions(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	now := time.Now().UTC()
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:     "digest",
+		SizeBytes:  128,
+		BundleKey:  "artifacts/digest/bundle.tgz",
+		StartupKey: "artifacts/digest/startup.json",
+		Regions: map[string]time.Time{
+			"ap-south-1": now,
+		},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-full",
+		ProjectID:      "demo",
+		Name:           "full",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		MemoryMB:       128,
+		TimeoutSec:     10,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+
+	svc := New("ap-south-1", meta, nil)
+	sendCh := make(chan *regionv1.CoordinatorMessage, 1)
+	if err := svc.registerHost(&regionv1.RegisterHost{
+		HostId:                    "host-ap-south-1-a",
+		Region:                    "ap-south-1",
+		Driver:                    "firecracker",
+		AvailableSlots:            2,
+		AvailableFullNetworkSlots: 2,
+		BlankWarm:                 1,
+	}, sendCh); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	version, err := meta.GetFunctionVersion(context.Background(), "fn-full")
+	if err != nil {
+		t.Fatalf("get function version: %v", err)
+	}
+	if err := svc.PrepareFunctionWarm(context.Background(), version); err != nil {
+		t.Fatalf("prepare function warm: %v", err)
+	}
+	select {
+	case msg := <-sendCh:
+		prepare, ok := msg.Body.(*regionv1.CoordinatorMessage_Prepare)
+		if !ok {
+			t.Fatalf("expected prepare message for full-network version, got %+v", msg)
+		}
+		if prepare.Prepare.SnapshotKind != regionv1.SnapshotKind_SNAPSHOT_KIND_FUNCTION {
+			t.Fatalf("expected function prepare snapshot kind, got %+v", prepare.Prepare)
+		}
+	default:
+		t.Fatal("expected prepare message for full-network version")
+	}
+	host, err := meta.GetHost(context.Background(), "host-ap-south-1-a")
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	if host.AvailableSlots != 1 || host.AvailableFullNetworkSlots != 1 {
+		t.Fatalf("expected prepare reservation to consume one slot from each budget, got %+v", host)
+	}
+}
+
 func TestReapStaleHostsMarksPersistedHostsDown(t *testing.T) {
 	t.Parallel()
 

@@ -152,7 +152,7 @@ go build -o ./dist/lecrev-guest-runner ./cmd/lecrev-guest-runner
 
 export LECREV_EXECUTION_DRIVER='firecracker'
 export LECREV_EXECUTION_HOST_SLOTS='4'
-export LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS='1'
+export LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS='2'
 export LECREV_FIRECRACKER_BINARY='/usr/local/bin/firecracker'
 export LECREV_JAILER_BINARY='/usr/local/bin/jailer'
 export LECREV_FIRECRACKER_USE_JAILER='true'
@@ -175,19 +175,18 @@ bash deploy/ec2/check-firecracker-host.sh
 
 The Linux Firecracker path now keeps a host-local snapshot cache under `LECREV_FIRECRACKER_SNAPSHOT_DIR`. It boots a clean guest runner as PID 1, creates a blank host-local snapshot for prep work, proactively builds per-function snapshots for snapshot-safe workloads once versions become ready, and later invocations restore those snapshots directly when warm capacity exists.
 
-For `networkPolicy=full`, configure a host tap device and guest network tuple as well:
+For `networkPolicy=full`, provision a tap pool on the host:
 
 ```bash
 bash deploy/ec2/configure-firecracker-network.sh
 
-export LECREV_FIRECRACKER_TAP_DEVICE='tap0'
-export LECREV_FIRECRACKER_GUEST_MAC='06:00:ac:10:00:02'
-export LECREV_FIRECRACKER_GUEST_IP='172.16.0.2'
-export LECREV_FIRECRACKER_GATEWAY_IP='172.16.0.1'
-export LECREV_FIRECRACKER_NETMASK='255.255.255.252'
+export LECREV_FIRECRACKER_TAP_DEVICE_PREFIX='tap'
+export LECREV_FIRECRACKER_TAP_COUNT='4'
+export LECREV_FIRECRACKER_TAP_NETWORK_CIDR='172.16.0.0/24'
+export LECREV_FIRECRACKER_TAP_SUBNET_PREFIX='30'
 ```
 
-The current EC2 helper uses a single static tap device, so keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS=1` when you need outbound guest networking, even if `LECREV_EXECUTION_HOST_SLOTS` is higher for `networkPolicy=none` functions.
+Each full-network execution now leases a dedicated tap/subnet from that pool. Keep `LECREV_EXECUTION_HOST_FULL_NETWORK_SLOTS` less than or equal to both the tap count and the host vCPU count. The node-agent defaults the full-network budget to the host CPU count, and each tap can now carry its own blank and function-warm snapshot chain so `networkPolicy=full` functions can hit the warm path safely.
 
 If you already have `devstack` running and want to smoke the live HTTP API instead of the embedded stack:
 

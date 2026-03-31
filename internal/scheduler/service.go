@@ -57,7 +57,7 @@ func New(store store.Store, dispatchers []RegionDispatcher) *Service {
 		store:                            store,
 		dispatchers:                      index,
 		now:                              func() time.Time { return time.Now().UTC() },
-		pollInterval:                     500 * time.Millisecond,
+		pollInterval:                     50 * time.Millisecond,
 		schedulingTimeout:                10 * time.Second,
 		healthyWithin:                    15 * time.Second,
 		wakeCh:                           make(chan struct{}, 1),
@@ -339,6 +339,9 @@ func (s *Service) scheduleNext(ctx context.Context) (bool, error) {
 	}
 
 	if err := s.dispatchJobAttempt(ctx, version, job); err != nil {
+		if errors.Is(err, domain.ErrNoExecutionCapacity) {
+			return false, nil
+		}
 		return true, nil
 	}
 	return true, nil
@@ -453,6 +456,21 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 			return s.store.UpdateExecutionJob(ctx, job)
 		} else {
 			enqueueMs = time.Since(enqueueStarted).Milliseconds()
+			if errors.Is(err, domain.ErrNoExecutionCapacity) {
+				attempt.State = domain.AttemptStateFailed
+				attempt.Error = err.Error()
+				attempt.LeaseExpiresAt = s.now()
+				attempt.UpdatedAt = s.now()
+				_ = s.store.UpdateAttempt(ctx, attempt)
+				job.State = domain.JobStateQueued
+				job.TargetRegion = ""
+				job.Error = ""
+				job.UpdatedAt = s.now()
+				_ = s.store.UpdateExecutionJob(ctx, job)
+				state = "capacity_unavailable"
+				errMsg = err.Error()
+				return err
+			}
 			attempt.State = domain.AttemptStateFailed
 			attempt.Error = err.Error()
 			attempt.LeaseExpiresAt = s.now()

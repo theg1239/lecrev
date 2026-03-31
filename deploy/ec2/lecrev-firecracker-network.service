@@ -6,6 +6,7 @@ Before=lecrev-node-agent.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/lecrev/node-agent.env
 Environment=APP_USER=lecrev
 ExecStart=/usr/local/bin/lecrev-configure-firecracker-network
 RemainAfterExit=yes

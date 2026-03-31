@@ -189,6 +189,44 @@ func TestScheduleNextFallsBackWhenTopRegionCannotAccept(t *testing.T) {
 	}
 }
 
+func TestScheduleNextStopsWhenCapacityIsTemporarilyExhausted(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	seedFunctionVersion(t, store, "fn-capacity", []string{"ap-south-1"})
+
+	dispatcher := &fakeDispatcher{
+		region: "ap-south-1",
+		stats:  domain.RegionStats{AvailableHosts: 1, BlankWarm: 1},
+		err:    domain.ErrNoExecutionCapacity,
+	}
+	svc := New(store, []RegionDispatcher{dispatcher})
+
+	job, err := svc.DispatchExecution(context.Background(), "fn-capacity", json.RawMessage(`{"msg":"hi"}`))
+	if err != nil {
+		t.Fatalf("queue execution: %v", err)
+	}
+
+	dispatched, err := svc.scheduleNext(context.Background())
+	if err != nil {
+		t.Fatalf("schedule next: %v", err)
+	}
+	if dispatched {
+		t.Fatal("expected scheduler to stop when capacity is temporarily unavailable")
+	}
+
+	job, err = store.GetExecutionJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != domain.JobStateQueued {
+		t.Fatalf("expected queued job after capacity miss, got %s", job.State)
+	}
+	if job.AttemptCount != 0 {
+		t.Fatalf("expected no counted attempts after capacity miss, got %d", job.AttemptCount)
+	}
+}
+
 func TestScheduleNextPrefersHealthyRegionOverStaleWarmerRegion(t *testing.T) {
 	t.Parallel()
 
@@ -299,6 +337,10 @@ func TestPrepareFunctionVersionTargetsConfiguredRegions(t *testing.T) {
 
 	store := memstore.New()
 	version := seedFunctionVersion(t, store, "fn-warm", []string{"ap-south-1", "ap-southeast-1"})
+	version.NetworkPolicy = domain.NetworkPolicyNone
+	if err := store.PutFunctionVersion(context.Background(), version); err != nil {
+		t.Fatalf("update function version: %v", err)
+	}
 	first := &fakeDispatcher{region: "ap-south-1"}
 	second := &fakeDispatcher{region: "ap-southeast-1"}
 	svc := New(store, []RegionDispatcher{first, second})
@@ -311,6 +353,22 @@ func TestPrepareFunctionVersionTargetsConfiguredRegions(t *testing.T) {
 	}
 	if len(second.warmups) != 1 || second.warmups[0] != version.ID {
 		t.Fatalf("expected second region warm prep for %s, got %+v", version.ID, second.warmups)
+	}
+}
+
+func TestPrepareFunctionVersionIncludesFullNetworkWarmPrep(t *testing.T) {
+	t.Parallel()
+
+	store := memstore.New()
+	version := seedFunctionVersion(t, store, "fn-warm-full", []string{"ap-south-1"})
+	dispatcher := &fakeDispatcher{region: "ap-south-1"}
+	svc := New(store, []RegionDispatcher{dispatcher})
+
+	if err := svc.PrepareFunctionVersion(context.Background(), version); err != nil {
+		t.Fatalf("prepare function version: %v", err)
+	}
+	if len(dispatcher.warmups) != 1 || dispatcher.warmups[0] != version.ID {
+		t.Fatalf("expected warm prep for full-network version %s, got %+v", version.ID, dispatcher.warmups)
 	}
 }
 

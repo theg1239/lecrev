@@ -3,6 +3,7 @@ package nodeagent
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +56,35 @@ func TestExecuteAssignmentFailsWhenLogsExceedLimit(t *testing.T) {
 	archivedLogs := waitForStoredObject(t, objects, artifact.ExecutionLogsKey("job-1", "attempt-1"))
 	if len(archivedLogs) != maxExecutionLogBytes {
 		t.Fatalf("expected archived truncated logs length %d, got %d", maxExecutionLogBytes, len(archivedLogs))
+	}
+}
+
+func TestConfigDefaultsUseHostCPUsForImplicitFullNetworkConcurrency(t *testing.T) {
+	t.Parallel()
+
+	cfg := (Config{
+		MaxConcurrentAssignments:     64,
+		MaxConcurrentFullNetworkJobs: 0,
+	}).withDefaults()
+
+	if cfg.MaxConcurrentFullNetworkJobs != runtime.NumCPU() {
+		t.Fatalf("expected implicit full-network concurrency to default to host CPUs, got %d want %d", cfg.MaxConcurrentFullNetworkJobs, runtime.NumCPU())
+	}
+	if cfg.MaxConcurrentFullNetworkJobs > cfg.MaxConcurrentAssignments {
+		t.Fatalf("expected full-network concurrency to stay within assignment limit, got %d > %d", cfg.MaxConcurrentFullNetworkJobs, cfg.MaxConcurrentAssignments)
+	}
+}
+
+func TestConfigDefaultsPreserveExplicitFullNetworkConcurrency(t *testing.T) {
+	t.Parallel()
+
+	cfg := (Config{
+		MaxConcurrentAssignments:     8,
+		MaxConcurrentFullNetworkJobs: 4,
+	}).withDefaults()
+
+	if cfg.MaxConcurrentFullNetworkJobs != 4 {
+		t.Fatalf("expected explicit full-network concurrency to be preserved, got %d", cfg.MaxConcurrentFullNetworkJobs)
 	}
 }
 
@@ -195,7 +225,7 @@ func TestExecuteAssignmentDoesNotBlockOnDeferredCleanup(t *testing.T) {
 	}
 }
 
-func TestExecuteAssignmentKeepsSlotReservedDuringFullNetworkWarmPrepare(t *testing.T) {
+func TestExecuteAssignmentWarmsFullNetworkOffRequestPath(t *testing.T) {
 	t.Parallel()
 
 	driver := &delayedWarmDriver{
@@ -218,20 +248,20 @@ func TestExecuteAssignmentKeepsSlotReservedDuringFullNetworkWarmPrepare(t *testi
 		t.Fatalf("expected executeAssignment to return before warm prepare finished, took %s", elapsed)
 	}
 
-	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots != 0 {
-		t.Fatalf("expected slot to remain reserved during full-network warm prepare, got %d", heartbeat.AvailableSlots)
+	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots != 1 {
+		t.Fatalf("expected full-network execution to release the general slot immediately, got %d", heartbeat.AvailableSlots)
 	}
-	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableFullNetworkSlots != 0 {
-		t.Fatalf("expected full-network slot to remain reserved during warm prepare, got %d", heartbeat.AvailableFullNetworkSlots)
+	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableFullNetworkSlots != 1 {
+		t.Fatalf("expected full-network execution to release the network slot immediately, got %d", heartbeat.AvailableFullNetworkSlots)
 	}
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots == 1 && heartbeat.AvailableFullNetworkSlots == 1 {
+		if driver.warmCount() == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("expected slots to be released after warm prepare completed")
+			t.Fatalf("expected full-network execution to trigger async warm preparation, got %d calls", driver.warmCount())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -262,8 +292,12 @@ func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
 	if register.AvailableSlots != 3 {
 		t.Fatalf("expected configured host slots 3, got %d", register.AvailableSlots)
 	}
-	if register.AvailableFullNetworkSlots != 1 {
-		t.Fatalf("expected default full-network slots 1, got %d", register.AvailableFullNetworkSlots)
+	wantFullNetwork := 3
+	if runtime.NumCPU() < wantFullNetwork {
+		wantFullNetwork = runtime.NumCPU()
+	}
+	if register.AvailableFullNetworkSlots != int32(wantFullNetwork) {
+		t.Fatalf("expected default full-network slots %d, got %d", wantFullNetwork, register.AvailableFullNetworkSlots)
 	}
 	if register.BlankWarm != 3 {
 		t.Fatalf("expected blank warm inventory from driver, got %d", register.BlankWarm)
@@ -314,7 +348,7 @@ func TestPrepareSnapshotUsesDriverWarmPreparation(t *testing.T) {
 
 	heartbeat := svc.heartbeatMessage()
 	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 2 {
-		t.Fatalf("expected function warm capacity 2 after prepare, got %+v", heartbeat.FunctionWarm)
+		t.Fatalf("expected full-network prepare to populate warm inventory, got %+v", heartbeat.FunctionWarm)
 	}
 }
 
@@ -477,6 +511,8 @@ func (d *deferredCleanupDriver) cleanupCount() int {
 type delayedWarmDriver struct {
 	result *firecracker.ExecuteResult
 	delay  time.Duration
+	mu     sync.Mutex
+	calls  int
 }
 
 func (d *delayedWarmDriver) Name() string {
@@ -488,8 +524,17 @@ func (d *delayedWarmDriver) Execute(context.Context, firecracker.ExecuteRequest)
 }
 
 func (d *delayedWarmDriver) PrepareFunctionWarm(context.Context, firecracker.ExecuteRequest) error {
+	d.mu.Lock()
+	d.calls++
+	d.mu.Unlock()
 	time.Sleep(d.delay)
 	return nil
+}
+
+func (d *delayedWarmDriver) warmCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
 }
 
 func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact.Store) {

@@ -214,13 +214,17 @@ func exitCode(err error) int {
 }
 
 func invocationContextJSON(req WorkspaceRequest) ([]byte, error) {
-	return json.Marshal(map[string]any{
+	return json.Marshal(invocationContext(req))
+}
+
+func invocationContext(req WorkspaceRequest) map[string]any {
+	return map[string]any{
 		"attemptId":  req.AttemptID,
 		"jobId":      req.JobID,
 		"functionId": req.FunctionID,
 		"region":     req.Region,
 		"hostId":     req.HostID,
-	})
+	}
 }
 
 func commandEnv(env map[string]string, contextJSON []byte) []string {

@@ -181,7 +181,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("list hosts: %w", err)
 	}
 
-	warmPools, err := waitForWarmPool(runCtx, cfg, resultRegion, version.ID)
+	warmPools, err := waitForWarmPool(runCtx, cfg, resultRegion, version.ID, version.NetworkPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +258,7 @@ func waitForJob(ctx context.Context, cfg Config, jobID string) (domain.Execution
 	}
 }
 
-func waitForWarmPool(ctx context.Context, cfg Config, region, functionVersionID string) ([]domain.WarmPool, error) {
+func waitForWarmPool(ctx context.Context, cfg Config, region, functionVersionID string, networkPolicy domain.NetworkPolicy) ([]domain.WarmPool, error) {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -269,6 +269,13 @@ func waitForWarmPool(ctx context.Context, cfg Config, region, functionVersionID 
 		for _, pool := range warmPools {
 			if pool.FunctionVersionID == functionVersionID && pool.FunctionWarm > 0 {
 				return warmPools, nil
+			}
+		}
+		if networkPolicy == domain.NetworkPolicyFull {
+			for _, pool := range warmPools {
+				if pool.FunctionVersionID == functionVersionID && pool.BlankWarm > 0 {
+					return warmPools, nil
+				}
 			}
 		}
 		select {

@@ -38,7 +38,12 @@ func TestBootArgsIncludeGuestRunnerAndNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new driver: %v", err)
 	}
-	args, err := driver.bootArgs(firecracker.ExecuteRequest{NetworkPolicy: "full"})
+	args, err := driver.bootArgs(firecracker.ExecuteRequest{NetworkPolicy: "full"}, &networkConfig{
+		TapDevice: "tap0",
+		GuestIP:   "172.16.0.2",
+		GatewayIP: "172.16.0.1",
+		Netmask:   "255.255.255.252",
+	})
 	if err != nil {
 		t.Fatalf("build boot args: %v", err)
 	}
@@ -191,6 +196,40 @@ func TestWarmInventoryReturnsPreparedSnapshots(t *testing.T) {
 	}
 	if inventory.FunctionWarm["fn-1"] != 1 {
 		t.Fatalf("expected function warm inventory for fn-1, got %+v", inventory.FunctionWarm)
+	}
+}
+
+func TestWarmInventorySkipsFullNetworkSnapshots(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	driver, err := New(Config{
+		FirecrackerBinary: "/usr/bin/firecracker",
+		KernelImagePath:   filepath.Join(dir, "vmlinux"),
+		RootFSPath:        filepath.Join(dir, "rootfs.ext4"),
+		WorkspaceDir:      dir,
+		SnapshotDir:       filepath.Join(dir, "snapshots"),
+	})
+	if err != nil {
+		t.Fatalf("new driver: %v", err)
+	}
+
+	asset := driver.functionSnapshotPath("fn-full")
+	if err := os.MkdirAll(asset.dir, 0o755); err != nil {
+		t.Fatalf("mkdir asset: %v", err)
+	}
+	for _, path := range []string{asset.statePath, asset.memoryPath, asset.rootFSPath} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatalf("write asset file %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(asset.metadataPath, []byte(`{"kind":"function","functionId":"fn-full","networkPolicy":"full"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	inventory := driver.WarmInventory()
+	if inventory.FunctionWarm["fn-full"] != 1 {
+		t.Fatalf("expected full-network snapshots to contribute warm inventory, got %+v", inventory.FunctionWarm)
 	}
 }
 
