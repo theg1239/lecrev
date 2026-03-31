@@ -61,8 +61,8 @@ const (
 	defaultMemoryMB      = 128
 	defaultTimeoutSec    = 30
 	defaultNetworkPolicy = domain.NetworkPolicyFull
-	websiteMemoryMB      = 1024
-	websiteTimeoutSec    = 120
+	websiteMemoryMB      = 2048
+	websiteTimeoutSec    = 180
 	minMemoryMB          = 64
 	maxMemoryMB          = 4096
 	maxTimeoutSec        = 900
