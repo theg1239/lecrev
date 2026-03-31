@@ -248,6 +248,30 @@ func TestPickHostSeparatesFullNetworkCapacityFromGeneralSlots(t *testing.T) {
 	}
 }
 
+func TestCloneHostCopiesFunctionWarmMap(t *testing.T) {
+	t.Parallel()
+
+	original := domain.Host{
+		ID:           "host-ap-south-1-a",
+		Region:       "ap-south-1",
+		Driver:       "firecracker",
+		State:        domain.HostStateActive,
+		BlankWarm:    1,
+		FunctionWarm: map[string]int{"fn-1": 2},
+	}
+
+	cloned := cloneHost(original)
+	cloned.FunctionWarm["fn-1"] = 9
+	cloned.FunctionWarm["fn-2"] = 1
+
+	if original.FunctionWarm["fn-1"] != 2 {
+		t.Fatalf("expected original fn-1 warm count to stay 2, got %d", original.FunctionWarm["fn-1"])
+	}
+	if _, ok := original.FunctionWarm["fn-2"]; ok {
+		t.Fatal("expected cloned function warm map to be independent from original")
+	}
+}
+
 func TestPrepareFunctionWarmSendsSnapshotPrepCommand(t *testing.T) {
 	t.Parallel()
 

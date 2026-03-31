@@ -136,7 +136,7 @@ func (s *Service) DrainHost(ctx context.Context, hostID, reason string) error {
 	session.host.State = domain.HostStateDraining
 	session.host.AvailableSlots = 0
 	session.host.AvailableFullNetworkSlots = 0
-	host := session.host
+	host := cloneHost(session.host)
 	sendCh := session.sendCh
 	s.mu.Unlock()
 
@@ -409,10 +409,11 @@ func (s *Service) registerHostSession(ctx context.Context, msg *regionv1.Registe
 	s.mu.Lock()
 	s.hosts[host.ID] = &hostSession{host: host, sendCh: sendCh, executor: executor, preparer: preparer}
 	s.mu.Unlock()
-	if err := s.store.PutHost(ctx, &host); err != nil {
+	hostSnapshot := cloneHost(host)
+	if err := s.store.PutHost(ctx, &hostSnapshot); err != nil {
 		return err
 	}
-	if err := s.store.ReplaceWarmPoolsForHost(ctx, host.Region, host.ID, warmPoolsForHost(host, s.now())); err != nil {
+	if err := s.store.ReplaceWarmPoolsForHost(ctx, hostSnapshot.Region, hostSnapshot.ID, warmPoolsForHost(hostSnapshot, s.now())); err != nil {
 		return err
 	}
 	return s.persistRegion()
@@ -438,7 +439,7 @@ func (s *Service) updateHeartbeatContext(ctx context.Context, msg *regionv1.Host
 	session.host.BlankWarm = int(msg.BlankWarm)
 	session.host.FunctionWarm = warmMap(msg.FunctionWarm)
 	session.host.LastHeartbeat = s.now()
-	host := session.host
+	host := cloneHost(session.host)
 	s.mu.Unlock()
 	if err := s.store.UpdateHost(ctx, &host); err != nil {
 		return err
@@ -634,8 +635,9 @@ func (s *Service) pickHost(assignment domain.Assignment) (string, *hostSession, 
 		}
 	}
 	host := chosen.session.host
-	_ = s.store.UpdateHost(context.Background(), &host)
-	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
+	hostSnapshot := cloneHost(host)
+	_ = s.store.UpdateHost(context.Background(), &hostSnapshot)
+	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), hostSnapshot.Region, hostSnapshot.ID, warmPoolsForHost(hostSnapshot, s.now()))
 	_ = s.persistRegionLocked()
 	return chosen.id, chosen.session, startMode, nil
 }
@@ -677,8 +679,9 @@ func (s *Service) pickWarmHost(functionVersionID string, networkPolicy domain.Ne
 		chosen.session.host.AvailableFullNetworkSlots--
 	}
 	host := chosen.session.host
-	_ = s.store.UpdateHost(context.Background(), &host)
-	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
+	hostSnapshot := cloneHost(host)
+	_ = s.store.UpdateHost(context.Background(), &hostSnapshot)
+	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), hostSnapshot.Region, hostSnapshot.ID, warmPoolsForHost(hostSnapshot, s.now()))
 	_ = s.persistRegionLocked()
 	return chosen.id, chosen.session, false, nil
 }
@@ -693,7 +696,7 @@ func (s *Service) releaseHostSlot(hostID string, networkPolicy domain.NetworkPol
 				session.host.AvailableFullNetworkSlots++
 			}
 		}
-		host := session.host
+		host := cloneHost(session.host)
 		_ = s.store.UpdateHost(context.Background(), &host)
 		_ = s.persistRegionLocked()
 	}
@@ -713,7 +716,7 @@ func (s *Service) restoreHostReservation(hostID, functionVersionID string, start
 		case domain.StartModeBlankWarm:
 			session.host.BlankWarm++
 		}
-		host := session.host
+		host := cloneHost(session.host)
 		_ = s.store.UpdateHost(context.Background(), &host)
 		_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
 		_ = s.persistRegionLocked()
@@ -728,7 +731,7 @@ func (s *Service) restorePreparationReservation(hostID string, networkPolicy dom
 		if networkPolicy == domain.NetworkPolicyFull {
 			session.host.AvailableFullNetworkSlots++
 		}
-		host := session.host
+		host := cloneHost(session.host)
 		_ = s.store.UpdateHost(context.Background(), &host)
 		_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, warmPoolsForHost(host, s.now()))
 		_ = s.persistRegionLocked()
@@ -747,7 +750,7 @@ func (s *Service) markHostDown(hostID string) {
 	session.host.AvailableFullNetworkSlots = 0
 	session.host.BlankWarm = 0
 	session.host.FunctionWarm = map[string]int{}
-	host := session.host
+	host := cloneHost(session.host)
 	_ = s.store.UpdateHost(context.Background(), &host)
 	_ = s.store.ReplaceWarmPoolsForHost(context.Background(), host.Region, host.ID, nil)
 	delete(s.hosts, hostID)
@@ -805,7 +808,7 @@ func (s *Service) markStoredHostDown(ctx context.Context, host domain.Host, cuto
 		session.host.AvailableFullNetworkSlots = 0
 		session.host.BlankWarm = 0
 		session.host.FunctionWarm = map[string]int{}
-		host = session.host
+		host = cloneHost(session.host)
 		delete(s.hosts, host.ID)
 	} else {
 		host.State = domain.HostStateDown
@@ -830,6 +833,19 @@ func warmMap(metrics []*regionv1.WarmPoolMetric) map[string]int {
 		out[metric.FunctionVersionId] = int(metric.Available)
 	}
 	return out
+}
+
+func cloneHost(host domain.Host) domain.Host {
+	cp := host
+	if host.FunctionWarm == nil {
+		cp.FunctionWarm = nil
+		return cp
+	}
+	cp.FunctionWarm = make(map[string]int, len(host.FunctionWarm))
+	for functionID, count := range host.FunctionWarm {
+		cp.FunctionWarm[functionID] = count
+	}
+	return cp
 }
 
 func startTimeOr(fallback, startedAt time.Time) time.Time {
