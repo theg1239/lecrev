@@ -25,6 +25,7 @@ type ExecuteResult struct {
 	ExitCode         int
 	Logs             string
 	Output           json.RawMessage
+	PlatformTrace    string
 	SnapshotEligible bool
 	StartedAt        time.Time
 	FinishedAt       time.Time

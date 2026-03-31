@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/theg1239/lecrev/internal/firecracker"
+	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 type snapshotAsset struct {
@@ -33,9 +35,10 @@ type snapshotMetadata struct {
 }
 
 type vmInstance struct {
-	layout *vmLayout
-	proc   *vmProcess
-	api    *apiClient
+	layout      *vmLayout
+	proc        *vmProcess
+	api         *apiClient
+	cleanupOnce sync.Once
 }
 
 func (d *Driver) validateHost() error {
@@ -48,28 +51,35 @@ func (d *Driver) validateHost() error {
 	return nil
 }
 
-func (d *Driver) executeCold(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
-	instance, err := d.bootInstance(ctx, req)
+func (d *Driver) executeCold(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {
+	instance, err := d.bootInstance(ctx, req, trace)
 	if err != nil {
 		return nil, err
 	}
-	defer instance.cleanup()
-	return d.runInvocation(ctx, instance, req, false)
+	result, invokeErr := d.runInvocation(ctx, instance, req, false, trace)
+	cleanupStarted := time.Now()
+	instance.cleanupWithTimeout(d.config.InvokeShutdownTimeout)
+	trace.Step("cleanup_vm", cleanupStarted)
+	return result, invokeErr
 }
 
-func (d *Driver) executeFromSnapshot(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset, usePreparedRoot bool) (*firecracker.ExecuteResult, error) {
-	instance, err := d.restoreInstance(ctx, req, asset)
+func (d *Driver) executeFromSnapshot(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset, usePreparedRoot bool, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {
+	instance, err := d.restoreInstance(ctx, req, asset, trace)
 	if err != nil {
 		return nil, err
 	}
-	defer instance.cleanup()
-	return d.runInvocation(ctx, instance, req, usePreparedRoot)
+	result, invokeErr := d.runInvocation(ctx, instance, req, usePreparedRoot, trace)
+	cleanupStarted := time.Now()
+	instance.cleanupWithTimeout(d.config.InvokeShutdownTimeout)
+	trace.Step("cleanup_vm", cleanupStarted)
+	return result, invokeErr
 }
 
-func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req firecracker.ExecuteRequest, usePreparedRoot bool) (*firecracker.ExecuteResult, error) {
+func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req firecracker.ExecuteRequest, usePreparedRoot bool, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {
 	invokeCtx, cancel := context.WithTimeout(ctx, d.config.ConnectTimeout+req.Timeout)
 	defer cancel()
 
+	invokeStarted := time.Now()
 	response, err := invokeGuest(invokeCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, firecracker.GuestInvocationRequest{
 		AttemptID:       req.AttemptID,
 		JobID:           req.JobID,
@@ -83,8 +93,7 @@ func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req fi
 		Region:          req.Region,
 		HostID:          req.HostID,
 	})
-
-	_ = instance.proc.wait(d.config.ShutdownTimeout)
+	trace.Step("invoke_guest", invokeStarted)
 
 	if response == nil {
 		return nil, fmt.Errorf("guest execution failed: %w; firecracker logs: %s", err, instance.proc.logs())
@@ -108,34 +117,46 @@ func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req fi
 	return result, nil
 }
 
-func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteRequest) (*vmInstance, error) {
+func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*vmInstance, error) {
+	prepareLayoutStarted := time.Now()
 	layout, vmID, err := d.prepareLayout(req.AttemptID)
 	if err != nil {
 		return nil, err
 	}
+	trace.Step("prepare_layout", prepareLayoutStarted)
+	stageKernelStarted := time.Now()
 	if err := stageKernel(layout.kernelPath, d.config.KernelImagePath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("stage_kernel", stageKernelStarted)
+	stageRootFSStarted := time.Now()
 	if err := copyFile(d.config.RootFSPath, layout.rootFSPath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("stage_rootfs", stageRootFSStarted)
+	ownershipStarted := time.Now()
 	if err := d.prepareOwnership(layout, layout.kernelPath, layout.rootFSPath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("prepare_ownership", ownershipStarted)
 
+	startVMStarted := time.Now()
 	proc, err := d.startVM(ctx, vmID, layout)
 	if err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("start_firecracker", startVMStarted)
+	waitSocketStarted := time.Now()
 	if err := waitForFile(ctx, layout.apiSocketHost, d.config.StartTimeout, proc); err != nil {
 		layout.cleanup()
 		_ = proc.close()
 		return nil, fmt.Errorf("wait for firecracker api socket: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("wait_api_socket", waitSocketStarted)
 
 	api := newAPIClient(layout.apiSocketHost)
 	guestCID := d.allocCID()
@@ -145,6 +166,7 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 		_ = proc.close()
 		return nil, err
 	}
+	configMachineStarted := time.Now()
 	if err := api.put(ctx, "/machine-config", machineConfig{
 		VCPUCount:  d.config.VCPUCount,
 		MemSizeMib: int64(req.MemoryMB),
@@ -154,6 +176,8 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 		_ = proc.close()
 		return nil, fmt.Errorf("configure machine: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("configure_machine", configMachineStarted)
+	bootSourceStarted := time.Now()
 	if err := api.put(ctx, "/boot-source", bootSource{
 		KernelImagePath: layout.guestKernelPath,
 		BootArgs:        bootArgs,
@@ -162,6 +186,8 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 		_ = proc.close()
 		return nil, fmt.Errorf("configure boot source: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("configure_boot_source", bootSourceStarted)
+	rootfsDriveStarted := time.Now()
 	if err := api.put(ctx, "/drives/rootfs", drive{
 		DriveID:      "rootfs",
 		PathOnHost:   layout.guestRootFSPath,
@@ -172,7 +198,9 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 		_ = proc.close()
 		return nil, fmt.Errorf("configure rootfs: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("configure_rootfs_drive", rootfsDriveStarted)
 	if strings.EqualFold(req.NetworkPolicy, "full") {
+		networkStarted := time.Now()
 		if err := api.put(ctx, "/network-interfaces/eth0", networkInterface{
 			IfaceID:     "eth0",
 			HostDevName: d.config.TapDevice,
@@ -182,7 +210,9 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 			_ = proc.close()
 			return nil, fmt.Errorf("configure network interface: %w; logs: %s", err, proc.logs())
 		}
+		trace.Step("configure_network", networkStarted)
 	}
+	vsockStarted := time.Now()
 	if err := api.put(ctx, "/vsock", vsockDevice{
 		VsockID:  "vsock0",
 		GuestCID: guestCID,
@@ -192,52 +222,70 @@ func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteReques
 		_ = proc.close()
 		return nil, fmt.Errorf("configure vsock: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("configure_vsock", vsockStarted)
+	instanceStartStarted := time.Now()
 	if err := api.put(ctx, "/actions", action{ActionType: "InstanceStart"}); err != nil {
 		layout.cleanup()
 		_ = proc.close()
 		return nil, fmt.Errorf("start vm: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("instance_start", instanceStartStarted)
 
 	return &vmInstance{layout: layout, proc: proc, api: api}, nil
 }
 
-func (d *Driver) restoreInstance(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset) (*vmInstance, error) {
+func (d *Driver) restoreInstance(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset, trace *timetrace.Recorder) (*vmInstance, error) {
+	prepareLayoutStarted := time.Now()
 	layout, vmID, err := d.prepareLayout(req.AttemptID)
 	if err != nil {
 		return nil, err
 	}
+	trace.Step("prepare_layout", prepareLayoutStarted)
 
 	instanceStatePath := filepath.Join(layout.rootDir, "snapshot.state")
 	instanceMemoryPath := filepath.Join(layout.rootDir, "snapshot.mem")
+	stageStateStarted := time.Now()
 	if err := copyFile(asset.statePath, instanceStatePath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("stage_snapshot_state", stageStateStarted)
+	stageMemoryStarted := time.Now()
 	if err := copyFile(asset.memoryPath, instanceMemoryPath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("stage_snapshot_memory", stageMemoryStarted)
+	stageRootFSStarted := time.Now()
 	if err := copyFile(asset.rootFSPath, layout.rootFSPath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("stage_snapshot_rootfs", stageRootFSStarted)
+	ownershipStarted := time.Now()
 	if err := d.prepareOwnership(layout, instanceStatePath, instanceMemoryPath, layout.rootFSPath); err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("prepare_ownership", ownershipStarted)
 
+	startVMStarted := time.Now()
 	proc, err := d.startVM(ctx, vmID, layout)
 	if err != nil {
 		layout.cleanup()
 		return nil, err
 	}
+	trace.Step("start_firecracker", startVMStarted)
+	waitSocketStarted := time.Now()
 	if err := waitForFile(ctx, layout.apiSocketHost, d.config.StartTimeout, proc); err != nil {
 		layout.cleanup()
 		_ = proc.close()
 		return nil, fmt.Errorf("wait for firecracker api socket: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("wait_api_socket", waitSocketStarted)
 
 	api := newAPIClient(layout.apiSocketHost)
+	loadSnapshotStarted := time.Now()
 	if err := api.put(ctx, "/snapshot/load", snapshotLoadRequest{
 		SnapshotPath: "snapshot.state",
 		MemBackend: &snapshotMemoryBackend{
@@ -250,24 +298,33 @@ func (d *Driver) restoreInstance(ctx context.Context, req firecracker.ExecuteReq
 		_ = proc.close()
 		return nil, fmt.Errorf("load snapshot: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("load_snapshot", loadSnapshotStarted)
+	resumeStarted := time.Now()
 	if err := api.patch(ctx, "/vm", vmState{State: "Resumed"}); err != nil {
 		layout.cleanup()
 		_ = proc.close()
 		return nil, fmt.Errorf("resume snapshot vm: %w; logs: %s", err, proc.logs())
 	}
+	trace.Step("resume_snapshot", resumeStarted)
 	return &vmInstance{layout: layout, proc: proc, api: api}, nil
 }
 
 func (v *vmInstance) cleanup() {
+	v.cleanupWithTimeout(2 * time.Second)
+}
+
+func (v *vmInstance) cleanupWithTimeout(timeout time.Duration) {
 	if v == nil {
 		return
 	}
-	if v.proc != nil {
-		_ = v.proc.close()
-	}
-	if v.layout != nil && v.layout.cleanup != nil {
-		v.layout.cleanup()
-	}
+	v.cleanupOnce.Do(func() {
+		if v.proc != nil {
+			_ = v.proc.wait(timeout)
+		}
+		if v.layout != nil && v.layout.cleanup != nil {
+			v.layout.cleanup()
+		}
+	})
 }
 
 func (d *Driver) ensureBlankSnapshotLocked(ctx context.Context) error {
@@ -283,7 +340,7 @@ func (d *Driver) ensureBlankSnapshotLocked(ctx context.Context) error {
 		MemoryMB:      int(d.config.DefaultMemoryMB),
 		NetworkPolicy: "none",
 	}
-	instance, err := d.bootInstance(ctx, req)
+	instance, err := d.bootInstance(ctx, req, nil)
 	if err != nil {
 		return err
 	}
@@ -316,12 +373,12 @@ func (d *Driver) ensureFunctionSnapshotLocked(ctx context.Context, req firecrack
 	if strings.EqualFold(req.NetworkPolicy, "none") {
 		if err := d.ensureBlankSnapshotLocked(ctx); err == nil {
 			if blankAsset, ok := d.blankSnapshotAssetForRequest(req); ok {
-				instance, err = d.restoreInstance(ctx, req, blankAsset)
+				instance, err = d.restoreInstance(ctx, req, blankAsset, nil)
 			}
 		}
 	}
 	if instance == nil {
-		instance, err = d.bootInstance(ctx, req)
+		instance, err = d.bootInstance(ctx, req, nil)
 	}
 	if err != nil {
 		return err

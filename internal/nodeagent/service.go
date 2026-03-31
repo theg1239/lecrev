@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/theg1239/lecrev/internal/artifact"
 	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/secrets"
+	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 type Service struct {
@@ -214,6 +216,32 @@ func (s *Service) PrepareEmbeddedSnapshot(ctx context.Context, coordinator Embed
 }
 
 func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.ExecutionAssignment, sendUpdate func(*regionv1.AssignmentUpdate), sendHeartbeat func()) {
+	overallStarted := time.Now()
+	trace := timetrace.New()
+	var (
+		bundleLoadMs    int64
+		secretsLoadMs   int64
+		driverExecuteMs int64
+		warmPrepareMs   int64
+		terminalState   = "unknown"
+		terminalErr     string
+	)
+	defer func() {
+		slog.Info("node-agent assignment timing",
+			"hostID", s.hostID,
+			"region", s.region,
+			"jobID", msg.JobId,
+			"attemptID", msg.AttemptId,
+			"functionVersionID", msg.FunctionVersionId,
+			"state", terminalState,
+			"error", terminalErr,
+			"bundleLoadMs", bundleLoadMs,
+			"secretsLoadMs", secretsLoadMs,
+			"driverExecuteMs", driverExecuteMs,
+			"warmPrepareMs", warmPrepareMs,
+			"totalMs", time.Since(overallStarted).Milliseconds(),
+		)
+	}()
 	s.mu.Lock()
 	if s.availableSlots > 0 {
 		s.availableSlots--
@@ -251,22 +279,34 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 
 	bundleKey := strings.TrimSpace(msg.ArtifactBundleKey)
 	if bundleKey == "" {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, "assignment missing artifact_bundle_key", 1)
+		terminalState = "failed"
+		terminalErr = "assignment missing artifact_bundle_key"
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, trace.String(), nil, "assignment missing artifact_bundle_key", 1)
 		return
 	}
+	loadBundleStarted := time.Now()
 	bundle, err := s.loadBundle(ctx, bundleKey)
+	bundleLoadMs = time.Since(loadBundleStarted).Milliseconds()
+	trace.Add("load_bundle", time.Duration(bundleLoadMs)*time.Millisecond)
 	if err != nil {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+		terminalState = "failed"
+		terminalErr = err.Error()
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, trace.String(), nil, err.Error(), 1)
 		return
 	}
+	resolveSecretsStarted := time.Now()
 	env, err := s.secrets.ResolveExecution(ctx, secrets.ExecutionRequest{
 		HostID:            s.hostID,
 		Region:            s.region,
 		FunctionVersionID: msg.FunctionVersionId,
 		SecretRefs:        msg.EnvRefs,
 	})
+	secretsLoadMs = time.Since(resolveSecretsStarted).Milliseconds()
+	trace.Add("resolve_secrets", time.Duration(secretsLoadMs)*time.Millisecond)
 	if err != nil {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, "", nil, err.Error(), 1)
+		terminalState = "failed"
+		terminalErr = err.Error()
+		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, trace.String(), nil, err.Error(), 1)
 		return
 	}
 
@@ -277,6 +317,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", nil, "", 0)
 	})
 
+	driverExecuteStarted := time.Now()
 	result, execErr := s.driver.Execute(ctx, firecracker.ExecuteRequest{
 		AttemptID:      msg.AttemptId,
 		JobID:          msg.JobId,
@@ -291,20 +332,26 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		Region:         s.region,
 		HostID:         s.hostID,
 	})
+	driverExecuteMs = time.Since(driverExecuteStarted).Milliseconds()
+	trace.Add("driver_execute", time.Duration(driverExecuteMs)*time.Millisecond)
+	resultLogs := ""
 	logs := ""
 	var output []byte
 	exitCode := 1
 	var limitErr error
 	if result != nil {
-		logs, output, limitErr = enforceExecutionResultLimits(result.Logs, result.Output)
+		resultLogs = timetrace.Combine(result.PlatformTrace, result.Logs)
+		logs, output, limitErr = enforceExecutionResultLimits(timetrace.Combine(trace.String(), resultLogs), result.Output)
 		exitCode = result.ExitCode
+	} else {
+		logs, output, limitErr = enforceExecutionResultLimits(trace.String(), nil)
 	}
 	if execErr != nil {
 		stopRunningHeartbeats()
 		errMsg := combineErrorMessages(execErr, limitErr)
-		if archiveErr := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); archiveErr != nil {
-			errMsg = fmt.Sprintf("%s; archive execution artifacts: %v", errMsg, archiveErr)
-		}
+		terminalState = "failed"
+		terminalErr = errMsg
+		s.archiveExecutionArtifactsAsync(msg.JobId, msg.AttemptId, logs, output)
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, terminalExitCode(exitCode))
 		releaseSlot()
 		sendHeartbeat()
@@ -313,23 +360,20 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	stopRunningHeartbeats()
 	if limitErr != nil {
 		errMsg := limitErr.Error()
-		if archiveErr := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); archiveErr != nil {
-			errMsg = fmt.Sprintf("%s; archive execution artifacts: %v", errMsg, archiveErr)
-		}
+		terminalState = "failed"
+		terminalErr = errMsg
+		s.archiveExecutionArtifactsAsync(msg.JobId, msg.AttemptId, logs, output)
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, terminalExitCode(exitCode))
 		releaseSlot()
 		sendHeartbeat()
 		return
 	}
-	if err := s.archiveExecutionArtifacts(ctx, msg.JobId, msg.AttemptId, logs, output); err != nil {
-		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, fmt.Sprintf("archive execution artifacts: %v", err), terminalExitCode(exitCode))
-		releaseSlot()
-		sendHeartbeat()
-		return
-	}
+	terminalState = "succeeded"
+	s.archiveExecutionArtifactsAsync(msg.JobId, msg.AttemptId, logs, output)
 	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, logs, output, "", exitCode)
 	sendHeartbeat()
 	if warmer, ok := s.driver.(firecracker.PostExecutionWarmer); ok {
+		warmPrepareStarted := time.Now()
 		_ = warmer.PrepareFunctionWarm(ctx, firecracker.ExecuteRequest{
 			AttemptID:      msg.AttemptId,
 			JobID:          msg.JobId,
@@ -344,6 +388,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 			Region:         s.region,
 			HostID:         s.hostID,
 		})
+		warmPrepareMs = time.Since(warmPrepareStarted).Milliseconds()
 	} else if result.SnapshotEligible {
 		s.mu.Lock()
 		s.functionWarm[msg.FunctionVersionId] = 1
@@ -436,6 +481,17 @@ func (s *Service) archiveExecutionArtifacts(ctx context.Context, jobID, attemptI
 		normalizedOutput = append([]byte(nil), output...)
 	}
 	return s.objects.Put(ctx, artifact.ExecutionOutputKey(jobID, attemptID), normalizedOutput)
+}
+
+func (s *Service) archiveExecutionArtifactsAsync(jobID, attemptID, logs string, output []byte) {
+	if s.objects == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.archiveExecutionArtifacts(ctx, jobID, attemptID, logs, output)
+	}()
 }
 
 func enforceExecutionResultLimits(logs string, output []byte) (string, []byte, error) {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/runtime/nodeexec"
+	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 const preparedRoot = "/var/lib/lecrev/functions"
@@ -241,9 +242,10 @@ func execute(request *firecracker.GuestInvocationRequest) (*firecracker.GuestInv
 			FinishedAt: time.Now().UTC(),
 		}
 	}
+	logs := timetrace.Combine(result.PlatformTrace, result.Logs)
 	return &firecracker.GuestInvocationResponse{
 		ExitCode:   result.ExitCode,
-		Logs:       result.Logs,
+		Logs:       logs,
 		Output:     result.Output,
 		StartedAt:  result.StartedAt,
 		FinishedAt: result.FinishedAt,

@@ -70,13 +70,41 @@ func (s *Service) DispatchExecution(ctx context.Context, versionID string, paylo
 }
 
 func (s *Service) DispatchExecutionIdempotent(ctx context.Context, versionID string, payload []byte, idempotencyKey string) (*domain.ExecutionJob, error) {
+	started := time.Now()
+	var (
+		versionLookupMs int64
+		idempotencyMs   int64
+		enqueueMs       int64
+		jobID           string
+		state           = "started"
+		errMsg          string
+	)
+	defer func() {
+		slog.Info("scheduler dispatch request timing",
+			"functionVersionID", versionID,
+			"jobID", jobID,
+			"state", state,
+			"error", errMsg,
+			"versionLookupMs", versionLookupMs,
+			"idempotencyMs", idempotencyMs,
+			"enqueueMs", enqueueMs,
+			"totalMs", time.Since(started).Milliseconds(),
+		)
+	}()
+	versionLookupStarted := time.Now()
 	version, err := s.store.GetFunctionVersion(ctx, versionID)
+	versionLookupMs = time.Since(versionLookupStarted).Milliseconds()
 	if err != nil {
+		state = "version_lookup_failed"
+		errMsg = err.Error()
 		return nil, err
 	}
 	if idempotencyKey != "" {
+		idempotencyStarted := time.Now()
 		requestHash, err := invokeRequestHash(versionID, payload)
 		if err != nil {
+			state = "request_hash_failed"
+			errMsg = err.Error()
 			return nil, err
 		}
 		now := s.now()
@@ -92,24 +120,55 @@ func (s *Service) DispatchExecutionIdempotent(ctx context.Context, versionID str
 		}
 		if err := s.store.CreateIdempotencyRecord(ctx, record); err != nil {
 			if errors.Is(err, store.ErrAlreadyExists) {
-				return s.replayExecution(ctx, version.ProjectID, idempotencyKey, requestHash)
+				idempotencyMs = time.Since(idempotencyStarted).Milliseconds()
+				job, replayErr := s.replayExecution(ctx, version.ProjectID, idempotencyKey, requestHash)
+				if replayErr != nil {
+					state = "idempotency_replay_failed"
+					errMsg = replayErr.Error()
+					return nil, replayErr
+				}
+				jobID = job.ID
+				state = "replayed"
+				return job, nil
 			}
+			idempotencyMs = time.Since(idempotencyStarted).Milliseconds()
+			state = "idempotency_create_failed"
+			errMsg = err.Error()
 			return nil, err
 		}
+		enqueueStarted := time.Now()
 		job, err := s.enqueueExecution(ctx, version, payload)
+		enqueueMs = time.Since(enqueueStarted).Milliseconds()
+		idempotencyMs = time.Since(idempotencyStarted).Milliseconds()
 		if err != nil {
 			_ = s.store.DeleteIdempotencyRecord(ctx, record.Scope, record.ProjectID, record.Key)
+			state = "enqueue_failed"
+			errMsg = err.Error()
 			return nil, err
 		}
+		jobID = job.ID
 		record.ResourceID = job.ID
 		record.Status = domain.IdempotencyStatusCompleted
 		record.UpdatedAt = s.now()
 		if err := s.store.UpdateIdempotencyRecord(ctx, record); err != nil {
+			state = "idempotency_update_failed"
+			errMsg = err.Error()
 			return nil, err
 		}
+		state = "enqueued"
 		return job, nil
 	}
-	return s.enqueueExecution(ctx, version, payload)
+	enqueueStarted := time.Now()
+	job, err := s.enqueueExecution(ctx, version, payload)
+	enqueueMs = time.Since(enqueueStarted).Milliseconds()
+	if err != nil {
+		state = "enqueue_failed"
+		errMsg = err.Error()
+		return nil, err
+	}
+	jobID = job.ID
+	state = "enqueued"
+	return job, nil
 }
 
 func (s *Service) enqueueExecution(ctx context.Context, version *domain.FunctionVersion, payload []byte) (*domain.ExecutionJob, error) {
@@ -287,22 +346,54 @@ func (s *Service) scheduleNext(ctx context.Context) (bool, error) {
 
 func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.FunctionVersion, job *domain.ExecutionJob) error {
 	now := s.now()
+	started := time.Now()
+	var (
+		artifactLookupMs int64
+		rankMs           int64
+		persistAttemptMs int64
+		enqueueMs        int64
+		targetRegion     string
+		state            = "started"
+		errMsg           string
+	)
+	defer func() {
+		slog.Info("scheduler attempt timing",
+			"jobID", job.ID,
+			"functionVersionID", version.ID,
+			"targetRegion", targetRegion,
+			"state", state,
+			"error", errMsg,
+			"artifactLookupMs", artifactLookupMs,
+			"rankMs", rankMs,
+			"persistAttemptMs", persistAttemptMs,
+			"enqueueMs", enqueueMs,
+			"totalMs", time.Since(started).Milliseconds(),
+		)
+	}()
+	artifactLookupStarted := time.Now()
 	artifactMeta, err := s.store.GetArtifact(ctx, version.ArtifactDigest)
+	artifactLookupMs = time.Since(artifactLookupStarted).Milliseconds()
 	if err != nil {
 		job.State = domain.JobStateQueued
 		job.TargetRegion = ""
 		job.Error = err.Error()
 		job.UpdatedAt = now
 		_ = s.store.UpdateExecutionJob(ctx, job)
+		state = "artifact_lookup_failed"
+		errMsg = err.Error()
 		return err
 	}
+	rankStarted := time.Now()
 	candidates, err := s.rankDispatchers(ctx, version)
+	rankMs = time.Since(rankStarted).Milliseconds()
 	if err != nil {
 		job.State = domain.JobStateQueued
 		job.TargetRegion = ""
 		job.Error = err.Error()
 		job.UpdatedAt = now
 		_ = s.store.UpdateExecutionJob(ctx, job)
+		state = "rank_failed"
+		errMsg = err.Error()
 		return err
 	}
 
@@ -320,16 +411,25 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 		}
 		job.LastAttemptID = attempt.ID
 		job.TargetRegion = candidate.region
+		targetRegion = candidate.region
 		job.State = domain.JobStateAssigned
 		job.Error = ""
 		job.UpdatedAt = now
 
+		persistStarted := time.Now()
 		if err := s.store.PutAttempt(ctx, attempt); err != nil {
+			persistAttemptMs = time.Since(persistStarted).Milliseconds()
+			state = "put_attempt_failed"
+			errMsg = err.Error()
 			return err
 		}
 		if err := s.store.UpdateExecutionJob(ctx, job); err != nil {
+			persistAttemptMs = time.Since(persistStarted).Milliseconds()
+			state = "update_job_failed"
+			errMsg = err.Error()
 			return err
 		}
+		persistAttemptMs = time.Since(persistStarted).Milliseconds()
 
 		assignment := domain.Assignment{
 			AttemptID:         attempt.ID,
@@ -344,11 +444,15 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 			TimeoutSec:        version.TimeoutSec,
 			MemoryMB:          version.MemoryMB,
 		}
+		enqueueStarted := time.Now()
 		if err := candidate.dispatcher.EnqueueExecution(ctx, assignment); err == nil {
+			enqueueMs = time.Since(enqueueStarted).Milliseconds()
 			job.AttemptCount++
 			job.UpdatedAt = s.now()
+			state = "assigned"
 			return s.store.UpdateExecutionJob(ctx, job)
 		} else {
+			enqueueMs = time.Since(enqueueStarted).Milliseconds()
 			attempt.State = domain.AttemptStateFailed
 			attempt.Error = err.Error()
 			attempt.LeaseExpiresAt = s.now()
@@ -363,6 +467,8 @@ func (s *Service) dispatchJobAttempt(ctx context.Context, version *domain.Functi
 	job.Error = strings.Join(dispatchErrors, "; ")
 	job.UpdatedAt = s.now()
 	_ = s.store.UpdateExecutionJob(ctx, job)
+	state = "enqueue_failed"
+	errMsg = job.Error
 	return errors.New(job.Error)
 }
 

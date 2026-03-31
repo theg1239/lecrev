@@ -19,6 +19,12 @@ import (
 	"time"
 
 	"github.com/theg1239/lecrev/internal/firecracker"
+	"github.com/theg1239/lecrev/internal/timetrace"
+)
+
+const (
+	guestRequestRetryInterval = 25 * time.Millisecond
+	fileWaitPollInterval      = 25 * time.Millisecond
 )
 
 type Config struct {
@@ -46,10 +52,11 @@ type Config struct {
 	GatewayIP string
 	Netmask   string
 
-	StartTimeout    time.Duration
-	ConnectTimeout  time.Duration
-	PrepareTimeout  time.Duration
-	ShutdownTimeout time.Duration
+	StartTimeout          time.Duration
+	ConnectTimeout        time.Duration
+	PrepareTimeout        time.Duration
+	ShutdownTimeout       time.Duration
+	InvokeShutdownTimeout time.Duration
 
 	JailerUID int
 	JailerGID int
@@ -78,19 +85,39 @@ func (d *Driver) Name() string {
 }
 
 func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
+	trace := timetrace.New()
 	if err := d.validateHost(); err != nil {
 		return nil, err
 	}
 	if req.MemoryMB <= 0 {
 		req.MemoryMB = int(d.config.DefaultMemoryMB)
 	}
+	var (
+		result *firecracker.ExecuteResult
+		err    error
+	)
 	if asset, ok := d.functionSnapshotAsset(req.FunctionID); ok {
-		return d.executeFromSnapshot(ctx, req, asset, true)
+		trace.Note("execution_path", "startMode=function-warm")
+		result, err = d.executeFromSnapshot(ctx, req, asset, true, trace)
+		if result != nil {
+			result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
+		}
+		return result, err
 	}
 	if asset, ok := d.blankSnapshotAssetForRequest(req); ok {
-		return d.executeFromSnapshot(ctx, req, asset, false)
+		trace.Note("execution_path", "startMode=blank-warm")
+		result, err = d.executeFromSnapshot(ctx, req, asset, false, trace)
+		if result != nil {
+			result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
+		}
+		return result, err
 	}
-	return d.executeCold(ctx, req)
+	trace.Note("execution_path", "startMode=cold")
+	result, err = d.executeCold(ctx, req, trace)
+	if result != nil {
+		result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
+	}
+	return result, err
 }
 
 func (d *Driver) WarmInventory() firecracker.WarmInventory {
@@ -202,6 +229,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ShutdownTimeout == 0 {
 		c.ShutdownTimeout = 5 * time.Second
+	}
+	if c.InvokeShutdownTimeout == 0 {
+		c.InvokeShutdownTimeout = 300 * time.Millisecond
 	}
 	if c.UseJailer {
 		if c.JailerUID == 0 {
@@ -529,7 +559,7 @@ func guestRequestWithDialer(ctx context.Context, dial func(context.Context) (net
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(guestRequestRetryInterval):
 		}
 	}
 	if lastErr == nil {
@@ -581,7 +611,7 @@ func waitForFile(ctx context.Context, path string, timeout time.Duration, proc *
 				return err
 			}
 			return fmt.Errorf("process exited before %s appeared", path)
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(fileWaitPollInterval):
 		}
 	}
 	return fmt.Errorf("timed out waiting for %s", path)

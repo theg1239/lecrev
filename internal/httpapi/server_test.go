@@ -730,6 +730,67 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 }
 
+func TestJobArtifactEndpointsFallbackToInlineResultWhenArchivePending(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := meta.PutExecutionJob(context.Background(), &domain.ExecutionJob{
+		ID:                "job-inline",
+		FunctionVersionID: "fn-inline",
+		ProjectID:         "demo",
+		State:             domain.JobStateSucceeded,
+		Result: &domain.JobResult{
+			ExitCode:   0,
+			Logs:       "inline logs\n",
+			LogsKey:    "jobs/job-inline/logs.txt",
+			Output:     json.RawMessage(`{"inline":true}`),
+			OutputKey:  "jobs/job-inline/output.json",
+			HostID:     "host-ap-south-1-a",
+			Region:     "ap-south-1",
+			StartedAt:  now,
+			FinishedAt: now,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("put job: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	logsReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-inline/logs", nil)
+	logsReq.Header.Set("X-API-Key", "tenant-key")
+	logsResp := httptest.NewRecorder()
+	handler.ServeHTTP(logsResp, logsReq)
+	if logsResp.Code != http.StatusOK {
+		t.Fatalf("expected logs status %d, got %d: %s", http.StatusOK, logsResp.Code, logsResp.Body.String())
+	}
+	if body := logsResp.Body.String(); body != "inline logs\n" {
+		t.Fatalf("unexpected inline logs body %q", body)
+	}
+
+	outputReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-inline/output", nil)
+	outputReq.Header.Set("X-API-Key", "tenant-key")
+	outputResp := httptest.NewRecorder()
+	handler.ServeHTTP(outputResp, outputReq)
+	if outputResp.Code != http.StatusOK {
+		t.Fatalf("expected output status %d, got %d: %s", http.StatusOK, outputResp.Code, outputResp.Body.String())
+	}
+	if body := strings.TrimSpace(outputResp.Body.String()); body != `{"inline":true}` {
+		t.Fatalf("unexpected inline output body %q", body)
+	}
+}
+
 func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
 	t.Parallel()
 

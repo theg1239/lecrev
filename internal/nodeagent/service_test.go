@@ -52,10 +52,7 @@ func TestExecuteAssignmentFailsWhenLogsExceedLimit(t *testing.T) {
 		t.Fatalf("expected output to remain intact, got %s", string(last.OutputJson))
 	}
 
-	archivedLogs, err := objects.Get(context.Background(), artifact.ExecutionLogsKey("job-1", "attempt-1"))
-	if err != nil {
-		t.Fatalf("get archived logs: %v", err)
-	}
+	archivedLogs := waitForStoredObject(t, objects, artifact.ExecutionLogsKey("job-1", "attempt-1"))
 	if len(archivedLogs) != maxExecutionLogBytes {
 		t.Fatalf("expected archived truncated logs length %d, got %d", maxExecutionLogBytes, len(archivedLogs))
 	}
@@ -97,13 +94,58 @@ func TestExecuteAssignmentFailsWhenOutputExceedsLimit(t *testing.T) {
 		t.Fatalf("expected oversized output to be dropped, got %d bytes", len(last.OutputJson))
 	}
 
-	archivedOutput, err := objects.Get(context.Background(), artifact.ExecutionOutputKey("job-1", "attempt-1"))
-	if err != nil {
-		t.Fatalf("get archived output: %v", err)
-	}
+	archivedOutput := waitForStoredObject(t, objects, artifact.ExecutionOutputKey("job-1", "attempt-1"))
 	if string(archivedOutput) != "null" {
 		t.Fatalf("expected archived null output, got %s", string(archivedOutput))
 	}
+}
+
+func TestExecuteAssignmentDoesNotBlockOnArtifactArchival(t *testing.T) {
+	t.Parallel()
+
+	objects := &slowExecutionArtifactStore{
+		Store: artifact.NewMemoryStore(),
+		delay: 250 * time.Millisecond,
+		puts:  make(chan string, 4),
+	}
+	bundle, err := artifact.BundleFromFiles(map[string][]byte{
+		"index.mjs": []byte(`export async function handler() { return { ok: true }; }`),
+	})
+	if err != nil {
+		t.Fatalf("bundle fixture: %v", err)
+	}
+	if err := objects.Store.Put(context.Background(), "artifacts/digest/bundle.tgz", bundle); err != nil {
+		t.Fatalf("put bundle object: %v", err)
+	}
+
+	svc := NewWithConfig(Config{}, "host-ap-south-1-a", "ap-south-1", "", stubDriver{
+		result: &firecracker.ExecuteResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"ok":true}`),
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		},
+	}, objects, stubResolver{})
+
+	var terminal *regionv1.AssignmentUpdate
+	started := time.Now()
+	svc.executeAssignment(context.Background(), testAssignment(), func(update *regionv1.AssignmentUpdate) {
+		if update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED || update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED {
+			terminal = update
+		}
+	}, func() {})
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("expected terminal update before archival delay, took %s", elapsed)
+	}
+	if terminal == nil || terminal.State != regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED {
+		t.Fatalf("expected succeeded terminal update, got %+v", terminal)
+	}
+
+	wantKeys := map[string]bool{
+		artifact.ExecutionLogsKey("job-1", "attempt-1"):   false,
+		artifact.ExecutionOutputKey("job-1", "attempt-1"): false,
+	}
+	waitForArtifactPuts(t, objects.puts, wantKeys)
 }
 
 func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
@@ -174,6 +216,36 @@ func TestPrepareSnapshotUsesDriverWarmPreparation(t *testing.T) {
 	heartbeat := svc.heartbeatMessage()
 	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 2 {
 		t.Fatalf("expected function warm capacity 2 after prepare, got %+v", heartbeat.FunctionWarm)
+	}
+}
+
+func TestExecuteAssignmentIncludesPlatformTraceInLogs(t *testing.T) {
+	t.Parallel()
+
+	svc, _ := newTestService(t, stubDriver{result: &firecracker.ExecuteResult{
+		ExitCode:   0,
+		Output:     json.RawMessage(`{"ok":true}`),
+		StartedAt:  time.Now().UTC(),
+		FinishedAt: time.Now().UTC(),
+	}})
+
+	var terminal *regionv1.AssignmentUpdate
+	svc.executeAssignment(context.Background(), testAssignment(), func(update *regionv1.AssignmentUpdate) {
+		if update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED || update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED {
+			terminal = update
+		}
+	}, func() {})
+	if terminal == nil {
+		t.Fatal("expected terminal assignment update")
+	}
+	for _, want := range []string{
+		"[platform] step=load_bundle",
+		"[platform] step=resolve_secrets",
+		"[platform] step=driver_execute",
+	} {
+		if !strings.Contains(terminal.Logs, want) {
+			t.Fatalf("expected terminal logs to contain %q, got %q", want, terminal.Logs)
+		}
 	}
 }
 
@@ -361,4 +433,67 @@ func (s *countingArtifactStore) getCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gets
+}
+
+type slowExecutionArtifactStore struct {
+	artifact.Store
+	delay time.Duration
+	puts  chan string
+}
+
+func (s *slowExecutionArtifactStore) Put(ctx context.Context, key string, data []byte) error {
+	if strings.HasPrefix(key, "executions/") && s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	if err := s.Store.Put(ctx, key, data); err != nil {
+		return err
+	}
+	if strings.HasPrefix(key, "executions/") && s.puts != nil {
+		select {
+		case s.puts <- key:
+		default:
+		}
+	}
+	return nil
+}
+
+func waitForStoredObject(t *testing.T, objects artifact.Store, key string) []byte {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := objects.Get(context.Background(), key)
+		if err == nil {
+			return data
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for stored object %s", key)
+	return nil
+}
+
+func waitForArtifactPuts(t *testing.T, puts <-chan string, want map[string]bool) {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		allSeen := true
+		for _, seen := range want {
+			if !seen {
+				allSeen = false
+				break
+			}
+		}
+		if allSeen {
+			return
+		}
+		select {
+		case key := <-puts:
+			if _, ok := want[key]; ok {
+				want[key] = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for archival of %+v", want)
+		}
+	}
 }

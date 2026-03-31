@@ -3,9 +3,11 @@ package localnode
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/theg1239/lecrev/internal/firecracker"
 	"github.com/theg1239/lecrev/internal/runtime/nodeexec"
+	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 type Driver struct {
@@ -76,6 +78,8 @@ func (d *Driver) PrepareFunctionWarm(_ context.Context, req firecracker.ExecuteR
 }
 
 func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
+	trace := timetrace.New()
+	executeStarted := time.Now()
 	result, err := nodeexec.ExecuteBundle(ctx, nodeexec.Request{
 		AttemptID:      req.AttemptID,
 		JobID:          req.JobID,
@@ -89,6 +93,7 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 		HostID:         req.HostID,
 		NodeBinary:     "node",
 	})
+	trace.Step("localnode_execute_bundle", executeStarted)
 	if err != nil {
 		if result == nil {
 			return nil, err
@@ -97,6 +102,7 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 			ExitCode:         result.ExitCode,
 			Logs:             result.Logs,
 			Output:           result.Output,
+			PlatformTrace:    timetrace.Combine(trace.String(), result.PlatformTrace),
 			SnapshotEligible: false,
 			StartedAt:        result.StartedAt,
 			FinishedAt:       result.FinishedAt,
@@ -107,6 +113,7 @@ func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*
 		ExitCode:         result.ExitCode,
 		Logs:             result.Logs,
 		Output:           result.Output,
+		PlatformTrace:    timetrace.Combine(trace.String(), result.PlatformTrace),
 		SnapshotEligible: false,
 		StartedAt:        result.StartedAt,
 		FinishedAt:       result.FinishedAt,

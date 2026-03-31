@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sort"
 	"sync"
@@ -214,21 +215,62 @@ func (s *Service) PrepareFunctionWarm(ctx context.Context, version *domain.Funct
 }
 
 func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignment) error {
+	started := time.Now()
+	var (
+		pickHostMs      int64
+		loadAttemptMs   int64
+		updateAttemptMs int64
+		sendMs          int64
+		hostID          string
+		startMode       domain.StartMode
+		errMsg          string
+		state           = "started"
+	)
+	defer func() {
+		slog.Info("coordinator assign timing",
+			"region", s.region,
+			"jobID", assignment.JobID,
+			"attemptID", assignment.AttemptID,
+			"functionVersionID", assignment.FunctionVersionID,
+			"hostID", hostID,
+			"startMode", startMode,
+			"state", state,
+			"error", errMsg,
+			"pickHostMs", pickHostMs,
+			"loadAttemptMs", loadAttemptMs,
+			"updateAttemptMs", updateAttemptMs,
+			"sendMs", sendMs,
+			"totalMs", time.Since(started).Milliseconds(),
+		)
+	}()
+	pickHostStarted := time.Now()
 	hostID, session, startMode, err := s.pickHost(assignment)
+	pickHostMs = time.Since(pickHostStarted).Milliseconds()
 	if err != nil {
+		state = "pick_host_failed"
+		errMsg = err.Error()
 		return err
 	}
 
+	loadAttemptStarted := time.Now()
 	attempt, err := s.store.GetAttempt(ctx, assignment.AttemptID)
+	loadAttemptMs = time.Since(loadAttemptStarted).Milliseconds()
 	if err != nil {
+		state = "load_attempt_failed"
+		errMsg = err.Error()
 		return err
 	}
 	attempt.HostID = hostID
 	attempt.StartMode = startMode
 	attempt.UpdatedAt = time.Now().UTC()
+	updateAttemptStarted := time.Now()
 	if err := s.store.UpdateAttempt(ctx, attempt); err != nil {
+		updateAttemptMs = time.Since(updateAttemptStarted).Milliseconds()
+		state = "update_attempt_failed"
+		errMsg = err.Error()
 		return err
 	}
+	updateAttemptMs = time.Since(updateAttemptStarted).Milliseconds()
 
 	execAssignment := &regionv1.ExecutionAssignment{
 		AttemptId:         assignment.AttemptID,
@@ -249,18 +291,28 @@ func (s *Service) assignExecution(ctx context.Context, assignment domain.Assignm
 		},
 	}
 	if session.executor != nil {
+		state = "assigned"
 		go session.executor(context.Background(), execAssignment)
 		return nil
 	}
 
+	sendStarted := time.Now()
 	select {
 	case session.sendCh <- msg:
+		sendMs = time.Since(sendStarted).Milliseconds()
+		state = "assigned"
 		return nil
 	case <-ctx.Done():
+		sendMs = time.Since(sendStarted).Milliseconds()
 		s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode)
+		state = "send_canceled"
+		errMsg = ctx.Err().Error()
 		return ctx.Err()
 	default:
+		sendMs = time.Since(sendStarted).Milliseconds()
 		s.restoreHostReservation(hostID, assignment.FunctionVersionID, startMode)
+		state = "send_failed"
+		errMsg = fmt.Sprintf("host %s control channel full", hostID)
 		return fmt.Errorf("host %s control channel full", hostID)
 	}
 }
@@ -394,12 +446,44 @@ func (s *Service) ApplyAssignmentUpdate(ctx context.Context, msg *regionv1.Assig
 }
 
 func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.AssignmentUpdate) error {
+	started := time.Now()
+	var (
+		loadAttemptMs   int64
+		loadJobMs       int64
+		updateAttemptMs int64
+		updateJobMs     int64
+		recordCostMs    int64
+		state           = msg.State.String()
+		errMsg          string
+	)
+	defer func() {
+		slog.Info("coordinator assignment update timing",
+			"region", s.region,
+			"jobID", msg.JobId,
+			"attemptID", msg.AttemptId,
+			"hostID", msg.HostId,
+			"state", state,
+			"error", errMsg,
+			"loadAttemptMs", loadAttemptMs,
+			"loadJobMs", loadJobMs,
+			"updateAttemptMs", updateAttemptMs,
+			"updateJobMs", updateJobMs,
+			"recordCostMs", recordCostMs,
+			"totalMs", time.Since(started).Milliseconds(),
+		)
+	}()
+	loadAttemptStarted := time.Now()
 	attempt, err := s.store.GetAttempt(ctx, msg.AttemptId)
+	loadAttemptMs = time.Since(loadAttemptStarted).Milliseconds()
 	if err != nil {
+		errMsg = err.Error()
 		return err
 	}
+	loadJobStarted := time.Now()
 	job, err := s.store.GetExecutionJob(ctx, msg.JobId)
+	loadJobMs = time.Since(loadJobStarted).Milliseconds()
 	if err != nil {
+		errMsg = err.Error()
 		return err
 	}
 
@@ -464,16 +548,28 @@ func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.Assi
 	}
 
 	job.UpdatedAt = now
+	updateAttemptStarted := time.Now()
 	if err := s.store.UpdateAttempt(ctx, attempt); err != nil {
+		updateAttemptMs = time.Since(updateAttemptStarted).Milliseconds()
+		errMsg = err.Error()
 		return err
 	}
+	updateAttemptMs = time.Since(updateAttemptStarted).Milliseconds()
+	updateJobStarted := time.Now()
 	if err := s.store.UpdateExecutionJob(ctx, job); err != nil {
+		updateJobMs = time.Since(updateJobStarted).Milliseconds()
+		errMsg = err.Error()
 		return err
 	}
+	updateJobMs = time.Since(updateJobStarted).Milliseconds()
 	if msg.State == regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED || msg.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED {
+		recordCostStarted := time.Now()
 		if err := s.recordCost(ctx, attempt, job); err != nil {
+			recordCostMs = time.Since(recordCostStarted).Milliseconds()
+			errMsg = err.Error()
 			return err
 		}
+		recordCostMs = time.Since(recordCostStarted).Milliseconds()
 	}
 	if msg.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED && job.State == domain.JobStateRetrying {
 		go func(jobID string) {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -97,9 +98,10 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 }
 
 const (
-	defaultProjectListLimit  = 50
-	defaultOverviewItemLimit = 8
-	maxListLimit             = 200
+	defaultProjectListLimit    = 50
+	defaultOverviewItemLimit   = 8
+	maxListLimit               = 200
+	httpTriggerJobPollInterval = 25 * time.Millisecond
 )
 
 var (
@@ -323,8 +325,8 @@ func (s *Server) getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	if latestJob != nil && latestJob.Result != nil && strings.TrimSpace(latestJob.Result.LogsKey) != "" {
-		data, err := s.objects.Get(r.Context(), latestJob.Result.LogsKey)
+	if latestJob != nil && latestJob.Result != nil {
+		data, err := s.executionLogsData(r.Context(), latestJob)
 		if err != nil {
 			writeServiceError(w, err)
 			return
@@ -358,12 +360,7 @@ func (s *Server) getDeploymentOutput(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, domain.ErrExecutionResultNotReady)
 		return
 	}
-	key, err := jobResultKey(latestJob, "output")
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	data, err := s.objects.Get(r.Context(), key)
+	data, err := s.executionOutputData(r.Context(), latestJob)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -585,12 +582,7 @@ func (s *Server) getJobLogs(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	key, err := jobResultKey(job, "logs")
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	data, err := s.objects.Get(r.Context(), key)
+	data, err := s.executionLogsData(r.Context(), job)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -604,12 +596,7 @@ func (s *Server) getJobOutput(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	key, err := jobResultKey(job, "output")
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	data, err := s.objects.Get(r.Context(), key)
+	data, err := s.executionOutputData(r.Context(), job)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -832,13 +819,44 @@ func (s *Server) listWebhookTriggers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 	requestStartedAt := time.Now().UTC()
 	token := chi.URLParam(r, "token")
+	var (
+		triggerLookupMs int64
+		versionLoadMs   int64
+		buildPayloadMs  int64
+		dispatchMs      int64
+		waitMs          int64
+		versionID       string
+		jobID           string
+		state           = "started"
+		errMsg          string
+	)
+	defer func() {
+		slog.Info("http trigger invoke timing",
+			"token", token,
+			"versionID", versionID,
+			"jobID", jobID,
+			"state", state,
+			"error", errMsg,
+			"triggerLookupMs", triggerLookupMs,
+			"versionLoadMs", versionLoadMs,
+			"buildPayloadMs", buildPayloadMs,
+			"dispatchMs", dispatchMs,
+			"waitMs", waitMs,
+			"totalMs", time.Since(requestStartedAt).Milliseconds(),
+		)
+	}()
+	triggerLookupStarted := time.Now()
 	trigger, err := s.store.GetHTTPTrigger(r.Context(), token)
+	triggerLookupMs = time.Since(triggerLookupStarted).Milliseconds()
 	if err != nil || !trigger.Enabled {
+		state = "not_found"
 		http.Error(w, "http trigger not found", http.StatusNotFound)
 		return
 	}
 	requestCtx, err := s.authContextForHTTPTrigger(r.Context(), r, trigger)
 	if err != nil {
+		state = "unauthorized"
+		errMsg = err.Error()
 		switch {
 		case errors.Is(err, errMissingAPIKey):
 			http.Error(w, "missing X-API-Key", http.StatusUnauthorized)
@@ -849,23 +867,35 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	versionLoadStarted := time.Now()
 	version, err := s.store.GetFunctionVersion(r.Context(), trigger.FunctionVersionID)
+	versionLoadMs = time.Since(versionLoadStarted).Milliseconds()
 	if err != nil {
+		state = "version_lookup_failed"
+		errMsg = err.Error()
 		writeServiceError(w, err)
 		return
 	}
+	versionID = version.ID
 	if trigger.AuthMode == domain.HTTPTriggerAuthModeAPIKey {
 		if err := s.authorizeProject(requestCtx, version.ProjectID); err != nil {
+			state = "forbidden"
+			errMsg = err.Error()
 			writeServiceError(w, err)
 			return
 		}
 	}
 	if version.State != domain.FunctionStateReady {
+		state = "not_ready"
 		http.Error(w, "function url not ready", http.StatusServiceUnavailable)
 		return
 	}
+	buildPayloadStarted := time.Now()
 	payload, err := buildHTTPPayload(r, token)
+	buildPayloadMs = time.Since(buildPayloadStarted).Milliseconds()
 	if err != nil {
+		state = "payload_failed"
+		errMsg = err.Error()
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -873,19 +903,28 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 	dispatchCtx, cancelDispatch := context.WithTimeout(requestCtx, 15*time.Second)
 	defer cancelDispatch()
 
+	dispatchStarted := time.Now()
 	job, err := s.scheduler.DispatchExecutionIdempotent(dispatchCtx, trigger.FunctionVersionID, payload, idempotencyKey(r.Header.Get("Idempotency-Key"), ""))
+	dispatchMs = time.Since(dispatchStarted).Milliseconds()
 	if err != nil {
+		state = "dispatch_failed"
+		errMsg = err.Error()
 		writeServiceError(w, err)
 		return
 	}
+	jobID = job.ID
 
 	waitCtx, cancelWait := context.WithTimeout(requestCtx, httpTriggerTimeout(version.TimeoutSec))
 	defer cancelWait()
 
-	job, err = s.waitForExecutionJob(waitCtx, job.ID, 100*time.Millisecond)
+	waitStarted := time.Now()
+	job, err = s.waitForExecutionJob(waitCtx, job.ID, httpTriggerJobPollInterval)
+	waitMs = time.Since(waitStarted).Milliseconds()
 	if err != nil {
 		latencyMs := computeLatencyMs(requestStartedAt, time.Now().UTC())
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			state = "timeout"
+			errMsg = err.Error()
 			w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
 			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
 				"jobId":             job.ID,
@@ -896,6 +935,8 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		state = "wait_failed"
+		errMsg = err.Error()
 		writeServiceError(w, err)
 		return
 	}
@@ -912,6 +953,8 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
 
 	if job.State != domain.JobStateSucceeded || job.Result == nil {
+		state = string(job.State)
+		errMsg = job.Error
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"jobId":             job.ID,
 			"functionVersionId": version.ID,
@@ -921,8 +964,11 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	state = "succeeded"
 
 	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output, latencyMs); err != nil {
+		state = "response_write_failed"
+		errMsg = err.Error()
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"jobId":             job.ID,
 			"functionVersionId": version.ID,
@@ -1861,6 +1907,41 @@ func jobResultKey(job *domain.ExecutionJob, kind string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported execution artifact %q", kind)
 	}
+}
+
+func (s *Server) executionLogsData(ctx context.Context, job *domain.ExecutionJob) ([]byte, error) {
+	if job == nil || job.Result == nil {
+		return nil, domain.ErrExecutionResultNotReady
+	}
+	if key := strings.TrimSpace(job.Result.LogsKey); key != "" {
+		data, err := s.objects.Get(ctx, key)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, artifact.ErrNotFound) {
+			return nil, err
+		}
+	}
+	return []byte(job.Result.Logs), nil
+}
+
+func (s *Server) executionOutputData(ctx context.Context, job *domain.ExecutionJob) ([]byte, error) {
+	if job == nil || job.Result == nil {
+		return nil, domain.ErrExecutionResultNotReady
+	}
+	if key := strings.TrimSpace(job.Result.OutputKey); key != "" {
+		data, err := s.objects.Get(ctx, key)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, artifact.ErrNotFound) {
+			return nil, err
+		}
+	}
+	if len(job.Result.Output) == 0 {
+		return []byte("null"), nil
+	}
+	return append([]byte(nil), job.Result.Output...), nil
 }
 
 func (s *Server) authorizeProject(ctx context.Context, projectID string) error {

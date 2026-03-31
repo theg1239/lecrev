@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 var ErrPreparedWorkerUnavailable = errors.New("prepared worker unavailable")
@@ -111,7 +113,9 @@ func StartPreparedWorker(ctx context.Context, req PrepareWorkerRequest) error {
 
 func ExecutePreparedWorker(ctx context.Context, req WorkspaceRequest) (*Result, error) {
 	startedAt := time.Now().UTC()
+	trace := timetrace.New()
 
+	contextStarted := time.Now()
 	contextJSON, err := invocationContextJSON(req)
 	if err != nil {
 		return nil, err
@@ -120,28 +124,32 @@ func ExecutePreparedWorker(ctx context.Context, req WorkspaceRequest) (*Result, 
 	if err := json.Unmarshal(contextJSON, &contextValue); err != nil {
 		return nil, err
 	}
+	trace.Step("build_context", contextStarted)
 
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`null`)
 	}
 
+	workerInvokeStarted := time.Now()
 	response, err := preparedWorkerRequest(ctx, req.FunctionID, preparedWorkerMessage{
 		Type:    "invoke",
 		Payload: req.Payload,
 		Context: contextValue,
 		Env:     req.Env,
 	})
+	trace.Step("prepared_worker_invoke", workerInvokeStarted)
 	finishedAt := time.Now().UTC()
 	if err != nil {
 		return nil, err
 	}
 
 	result := &Result{
-		ExitCode:   0,
-		Logs:       strings.TrimSpace(response.Logs),
-		Output:     normalizedWorkerOutput(response.Output),
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
+		ExitCode:      0,
+		Logs:          strings.TrimSpace(response.Logs),
+		Output:        normalizedWorkerOutput(response.Output),
+		PlatformTrace: trace.String(),
+		StartedAt:     startedAt,
+		FinishedAt:    finishedAt,
 	}
 	if response.Error != "" {
 		result.ExitCode = 1

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/theg1239/lecrev/internal/artifact"
+	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 type Request struct {
@@ -44,11 +45,12 @@ type WorkspaceRequest struct {
 }
 
 type Result struct {
-	ExitCode   int
-	Logs       string
-	Output     json.RawMessage
-	StartedAt  time.Time
-	FinishedAt time.Time
+	ExitCode      int
+	Logs          string
+	Output        json.RawMessage
+	PlatformTrace string
+	StartedAt     time.Time
+	FinishedAt    time.Time
 }
 
 func PrepareWorkspace(artifactBundle []byte, workspace string) error {
@@ -59,17 +61,21 @@ func PrepareWorkspace(artifactBundle []byte, workspace string) error {
 }
 
 func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
+	trace := timetrace.New()
 	workspace, err := os.MkdirTemp("", "lecrev-run-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(workspace)
 
+	prepareStarted := time.Now()
 	if err := PrepareWorkspace(req.ArtifactBundle, workspace); err != nil {
 		return nil, err
 	}
+	trace.Step("prepare_workspace", prepareStarted)
 
-	return ExecuteWorkspace(ctx, WorkspaceRequest{
+	executeStarted := time.Now()
+	result, err := ExecuteWorkspace(ctx, WorkspaceRequest{
 		AttemptID:  req.AttemptID,
 		JobID:      req.JobID,
 		FunctionID: req.FunctionID,
@@ -82,16 +88,24 @@ func ExecuteBundle(ctx context.Context, req Request) (*Result, error) {
 		HostID:     req.HostID,
 		NodeBinary: req.NodeBinary,
 	})
+	trace.Step("execute_workspace", executeStarted)
+	if result != nil {
+		result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
+	}
+	return result, err
 }
 
 func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error) {
 	startedAt := time.Now().UTC()
+	trace := timetrace.New()
 
+	scratchStarted := time.Now()
 	scratchDir, err := os.MkdirTemp("", "lecrev-nodeexec-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(scratchDir)
+	trace.Step("prepare_scratch_dir", scratchStarted)
 
 	payloadPath := filepath.Join(scratchDir, "__lecrev_payload.json")
 	resultPath := filepath.Join(scratchDir, "__lecrev_result.json")
@@ -100,12 +114,16 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`null`)
 	}
+	writePayloadStarted := time.Now()
 	if err := os.WriteFile(payloadPath, req.Payload, 0o644); err != nil {
 		return nil, err
 	}
+	trace.Step("write_payload", writePayloadStarted)
+	writeWrapperStarted := time.Now()
 	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0o644); err != nil {
 		return nil, err
 	}
+	trace.Step("write_wrapper", writeWrapperStarted)
 
 	if req.NodeBinary == "" {
 		req.NodeBinary = "node"
@@ -115,13 +133,17 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	defer cancel()
 
 	entrypoint := filepath.Join(req.Workspace, filepath.FromSlash(req.Entrypoint))
+	entrypointStarted := time.Now()
 	if _, err := os.Stat(entrypoint); err != nil {
 		return nil, fmt.Errorf("entrypoint %s: %w", req.Entrypoint, err)
 	}
+	trace.Step("resolve_entrypoint", entrypointStarted)
+	contextStarted := time.Now()
 	contextJSON, err := invocationContextJSON(req)
 	if err != nil {
 		return nil, err
 	}
+	trace.Step("build_context", contextStarted)
 
 	cmd := exec.CommandContext(invokeCtx, req.NodeBinary, wrapperPath, payloadPath, entrypoint, resultPath)
 	cmd.Dir = req.Workspace
@@ -131,7 +153,9 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	cmd.Stderr = &stderr
 	cmd.Env = commandEnv(req.Env, contextJSON)
 
+	runStarted := time.Now()
 	runErr := cmd.Run()
+	trace.Step("node_run", runStarted)
 	logParts := make([]string, 0, 2)
 	if stdout.Len() > 0 {
 		logParts = append(logParts, strings.TrimSpace(stdout.String()))
@@ -143,33 +167,38 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 
 	if invokeCtx.Err() == context.DeadlineExceeded {
 		return &Result{
-			ExitCode:   -1,
-			Logs:       logs,
-			StartedAt:  startedAt,
-			FinishedAt: time.Now().UTC(),
+			ExitCode:      -1,
+			Logs:          logs,
+			PlatformTrace: trace.String(),
+			StartedAt:     startedAt,
+			FinishedAt:    time.Now().UTC(),
 		}, fmt.Errorf("execution timed out after %s", req.Timeout)
 	}
 
 	if runErr != nil {
 		return &Result{
-			ExitCode:   exitCode(runErr),
-			Logs:       logs,
-			StartedAt:  startedAt,
-			FinishedAt: time.Now().UTC(),
+			ExitCode:      exitCode(runErr),
+			Logs:          logs,
+			PlatformTrace: trace.String(),
+			StartedAt:     startedAt,
+			FinishedAt:    time.Now().UTC(),
 		}, runErr
 	}
 
+	readResultStarted := time.Now()
 	output, err := os.ReadFile(resultPath)
 	if err != nil {
 		return nil, fmt.Errorf("read result: %w", err)
 	}
+	trace.Step("read_result", readResultStarted)
 
 	return &Result{
-		ExitCode:   0,
-		Logs:       logs,
-		Output:     output,
-		StartedAt:  startedAt,
-		FinishedAt: time.Now().UTC(),
+		ExitCode:      0,
+		Logs:          logs,
+		Output:        output,
+		PlatformTrace: trace.String(),
+		StartedAt:     startedAt,
+		FinishedAt:    time.Now().UTC(),
 	}, nil
 }
 
