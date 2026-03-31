@@ -148,6 +148,53 @@ func TestExecuteAssignmentDoesNotBlockOnArtifactArchival(t *testing.T) {
 	waitForArtifactPuts(t, objects.puts, wantKeys)
 }
 
+func TestExecuteAssignmentDoesNotBlockOnDeferredCleanup(t *testing.T) {
+	t.Parallel()
+
+	driver := &deferredCleanupDriver{
+		result: &firecracker.ExecuteResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"ok":true}`),
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		},
+		cleanupDelay: 250 * time.Millisecond,
+	}
+	svc, _ := newTestService(t, driver)
+
+	terminalCh := make(chan *regionv1.AssignmentUpdate, 1)
+	done := make(chan struct{})
+	go func() {
+		svc.executeAssignment(context.Background(), testAssignment(), func(update *regionv1.AssignmentUpdate) {
+			if update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED || update.State == regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED {
+				select {
+				case terminalCh <- update:
+				default:
+				}
+			}
+		}, func() {})
+		close(done)
+	}()
+
+	started := time.Now()
+	var terminal *regionv1.AssignmentUpdate
+	select {
+	case terminal = <-terminalCh:
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("timed out waiting for terminal update before deferred cleanup finished")
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("expected terminal update before deferred cleanup delay, took %s", elapsed)
+	}
+	if terminal == nil || terminal.State != regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED {
+		t.Fatalf("expected succeeded terminal update, got %+v", terminal)
+	}
+	<-done
+	if driver.cleanupCount() != 1 {
+		t.Fatalf("expected deferred cleanup to run once, got %d", driver.cleanupCount())
+	}
+}
+
 func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
 	t.Parallel()
 
@@ -343,6 +390,36 @@ func (d *inventoryDriver) PrepareFunctionWarm(_ context.Context, req firecracker
 	}
 	d.inventory.FunctionWarm[req.FunctionID] = 1
 	return nil
+}
+
+type deferredCleanupDriver struct {
+	result       *firecracker.ExecuteResult
+	cleanupDelay time.Duration
+	mu           sync.Mutex
+	cleanups     int
+}
+
+func (d *deferredCleanupDriver) Name() string {
+	return "deferred-cleanup-driver"
+}
+
+func (d *deferredCleanupDriver) Execute(context.Context, firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
+	return d.result, nil
+}
+
+func (d *deferredCleanupDriver) ExecuteDeferred(context.Context, firecracker.ExecuteRequest) (*firecracker.ExecuteResult, func(), error) {
+	return d.result, func() {
+		time.Sleep(d.cleanupDelay)
+		d.mu.Lock()
+		d.cleanups++
+		d.mu.Unlock()
+	}, nil
+}
+
+func (d *deferredCleanupDriver) cleanupCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cleanups
 }
 
 func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact.Store) {

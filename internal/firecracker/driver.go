@@ -36,6 +36,10 @@ type Driver interface {
 	Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error)
 }
 
+type DeferredCleanupDriver interface {
+	ExecuteDeferred(ctx context.Context, req ExecuteRequest) (*ExecuteResult, func(), error)
+}
+
 type WarmInventory struct {
 	BlankWarm    int
 	FunctionWarm map[string]int

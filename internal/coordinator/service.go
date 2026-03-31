@@ -522,7 +522,6 @@ func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.Assi
 			StartedAt:  startTimeOr(now, attempt.StartedAt),
 			FinishedAt: now,
 		}
-		s.releaseHostSlot(msg.HostId)
 	case regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED:
 		attempt.State = domain.AttemptStateFailed
 		attempt.LeaseExpiresAt = now
@@ -539,7 +538,6 @@ func (s *Service) handleAssignmentUpdate(ctx context.Context, msg *regionv1.Assi
 			StartedAt:  startTimeOr(now, attempt.StartedAt),
 			FinishedAt: now,
 		}
-		s.releaseHostSlot(msg.HostId)
 		if job.AttemptCount <= job.MaxRetries && s.retry != nil {
 			job.State = domain.JobStateRetrying
 		} else {

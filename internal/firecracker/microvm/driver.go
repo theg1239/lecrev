@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/theg1239/lecrev/internal/firecracker"
-	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
 const (
@@ -85,37 +84,9 @@ func (d *Driver) Name() string {
 }
 
 func (d *Driver) Execute(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
-	trace := timetrace.New()
-	if err := d.validateHost(); err != nil {
-		return nil, err
-	}
-	if req.MemoryMB <= 0 {
-		req.MemoryMB = int(d.config.DefaultMemoryMB)
-	}
-	var (
-		result *firecracker.ExecuteResult
-		err    error
-	)
-	if asset, ok := d.functionSnapshotAsset(req.FunctionID); ok {
-		trace.Note("execution_path", "startMode=function-warm")
-		result, err = d.executeFromSnapshot(ctx, req, asset, true, trace)
-		if result != nil {
-			result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
-		}
-		return result, err
-	}
-	if asset, ok := d.blankSnapshotAssetForRequest(req); ok {
-		trace.Note("execution_path", "startMode=blank-warm")
-		result, err = d.executeFromSnapshot(ctx, req, asset, false, trace)
-		if result != nil {
-			result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
-		}
-		return result, err
-	}
-	trace.Note("execution_path", "startMode=cold")
-	result, err = d.executeCold(ctx, req, trace)
-	if result != nil {
-		result.PlatformTrace = timetrace.Combine(trace.String(), result.PlatformTrace)
+	result, cleanup, err := d.ExecuteDeferred(ctx, req)
+	if cleanup != nil {
+		cleanup()
 	}
 	return result, err
 }

@@ -51,28 +51,83 @@ func (d *Driver) validateHost() error {
 	return nil
 }
 
+func (d *Driver) ExecuteDeferred(ctx context.Context, req firecracker.ExecuteRequest) (*firecracker.ExecuteResult, func(), error) {
+	trace := timetrace.New()
+	if err := d.validateHost(); err != nil {
+		return nil, nil, err
+	}
+	if req.MemoryMB <= 0 {
+		req.MemoryMB = int(d.config.DefaultMemoryMB)
+	}
+	if asset, ok := d.functionSnapshotAsset(req.FunctionID); ok {
+		trace.Note("execution_path", "startMode=function-warm")
+		return d.executeFromSnapshotDeferred(ctx, req, asset, true, trace)
+	}
+	if asset, ok := d.blankSnapshotAssetForRequest(req); ok {
+		trace.Note("execution_path", "startMode=blank-warm")
+		return d.executeFromSnapshotDeferred(ctx, req, asset, false, trace)
+	}
+	trace.Note("execution_path", "startMode=cold")
+	return d.executeColdDeferred(ctx, req, trace)
+}
+
 func (d *Driver) executeCold(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {
+	result, cleanup, err := d.executeColdDeferred(ctx, req, trace)
+	if cleanup != nil {
+		cleanup()
+	}
+	return result, err
+}
+
+func (d *Driver) executeColdDeferred(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*firecracker.ExecuteResult, func(), error) {
 	instance, err := d.bootInstance(ctx, req, trace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result, invokeErr := d.runInvocation(ctx, instance, req, false, trace)
-	cleanupStarted := time.Now()
-	instance.cleanupWithTimeout(d.config.InvokeShutdownTimeout)
-	trace.Step("cleanup_vm", cleanupStarted)
-	return result, invokeErr
+	result = combineExecutionTrace(result, trace.String())
+	return result, d.cleanupFunc(instance, result), invokeErr
 }
 
 func (d *Driver) executeFromSnapshot(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset, usePreparedRoot bool, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {
+	result, cleanup, err := d.executeFromSnapshotDeferred(ctx, req, asset, usePreparedRoot, trace)
+	if cleanup != nil {
+		cleanup()
+	}
+	return result, err
+}
+
+func (d *Driver) executeFromSnapshotDeferred(ctx context.Context, req firecracker.ExecuteRequest, asset snapshotAsset, usePreparedRoot bool, trace *timetrace.Recorder) (*firecracker.ExecuteResult, func(), error) {
 	instance, err := d.restoreInstance(ctx, req, asset, trace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result, invokeErr := d.runInvocation(ctx, instance, req, usePreparedRoot, trace)
-	cleanupStarted := time.Now()
-	instance.cleanupWithTimeout(d.config.InvokeShutdownTimeout)
-	trace.Step("cleanup_vm", cleanupStarted)
-	return result, invokeErr
+	result = combineExecutionTrace(result, trace.String())
+	return result, d.cleanupFunc(instance, result), invokeErr
+}
+
+func (d *Driver) cleanupFunc(instance *vmInstance, result *firecracker.ExecuteResult) func() {
+	if instance == nil {
+		return nil
+	}
+	return func() {
+		cleanupStarted := time.Now()
+		instance.cleanupWithTimeout(d.config.InvokeShutdownTimeout)
+		cleanupTrace := timetrace.New()
+		cleanupTrace.Step("cleanup_vm", cleanupStarted)
+		if result != nil {
+			result.PlatformTrace = timetrace.Combine(result.PlatformTrace, cleanupTrace.String())
+		}
+	}
+}
+
+func combineExecutionTrace(result *firecracker.ExecuteResult, outerTrace string) *firecracker.ExecuteResult {
+	if result == nil {
+		return nil
+	}
+	result.PlatformTrace = timetrace.Combine(outerTrace, result.PlatformTrace)
+	return result
 }
 
 func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req firecracker.ExecuteRequest, usePreparedRoot bool, trace *timetrace.Recorder) (*firecracker.ExecuteResult, error) {

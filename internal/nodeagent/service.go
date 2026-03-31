@@ -317,8 +317,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_RUNNING, "", nil, "", 0)
 	})
 
-	driverExecuteStarted := time.Now()
-	result, execErr := s.driver.Execute(ctx, firecracker.ExecuteRequest{
+	executeReq := firecracker.ExecuteRequest{
 		AttemptID:      msg.AttemptId,
 		JobID:          msg.JobId,
 		FunctionID:     msg.FunctionVersionId,
@@ -331,7 +330,19 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		NetworkPolicy:  msg.NetworkPolicy,
 		Region:         s.region,
 		HostID:         s.hostID,
-	})
+	}
+
+	driverExecuteStarted := time.Now()
+	var (
+		result        *firecracker.ExecuteResult
+		execErr       error
+		deferredClean func()
+	)
+	if deferredDriver, ok := s.driver.(firecracker.DeferredCleanupDriver); ok {
+		result, deferredClean, execErr = deferredDriver.ExecuteDeferred(ctx, executeReq)
+	} else {
+		result, execErr = s.driver.Execute(ctx, executeReq)
+	}
 	driverExecuteMs = time.Since(driverExecuteStarted).Milliseconds()
 	trace.Add("driver_execute", time.Duration(driverExecuteMs)*time.Millisecond)
 	resultLogs := ""
@@ -353,6 +364,9 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		terminalErr = errMsg
 		s.archiveExecutionArtifactsAsync(msg.JobId, msg.AttemptId, logs, output)
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, terminalExitCode(exitCode))
+		if deferredClean != nil {
+			deferredClean()
+		}
 		releaseSlot()
 		sendHeartbeat()
 		return
@@ -364,6 +378,9 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		terminalErr = errMsg
 		s.archiveExecutionArtifactsAsync(msg.JobId, msg.AttemptId, logs, output)
 		emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_FAILED, logs, output, errMsg, terminalExitCode(exitCode))
+		if deferredClean != nil {
+			deferredClean()
+		}
 		releaseSlot()
 		sendHeartbeat()
 		return
@@ -371,23 +388,12 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	terminalState = "succeeded"
 	s.archiveExecutionArtifactsAsync(msg.JobId, msg.AttemptId, logs, output)
 	emitUpdate(regionv1.AssignmentState_ASSIGNMENT_STATE_SUCCEEDED, logs, output, "", exitCode)
-	sendHeartbeat()
+	if deferredClean != nil {
+		deferredClean()
+	}
 	if warmer, ok := s.driver.(firecracker.PostExecutionWarmer); ok {
 		warmPrepareStarted := time.Now()
-		_ = warmer.PrepareFunctionWarm(ctx, firecracker.ExecuteRequest{
-			AttemptID:      msg.AttemptId,
-			JobID:          msg.JobId,
-			FunctionID:     msg.FunctionVersionId,
-			Entrypoint:     msg.Entrypoint,
-			ArtifactBundle: bundle,
-			Payload:        msg.PayloadJson,
-			Env:            env,
-			Timeout:        time.Duration(msg.TimeoutSec) * time.Second,
-			MemoryMB:       int(msg.MemoryMb),
-			NetworkPolicy:  msg.NetworkPolicy,
-			Region:         s.region,
-			HostID:         s.hostID,
-		})
+		_ = warmer.PrepareFunctionWarm(ctx, executeReq)
 		warmPrepareMs = time.Since(warmPrepareStarted).Milliseconds()
 	} else if result.SnapshotEligible {
 		s.mu.Lock()
