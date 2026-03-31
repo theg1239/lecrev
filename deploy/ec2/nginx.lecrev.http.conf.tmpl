@@ -3,6 +3,13 @@ server {
   listen [::]:80 default_server;
   server_name __FRONTEND_HOST__ __API_HOST__ __FUNCTIONS_HOST__;
 
+  gzip on;
+  gzip_vary on;
+  gzip_proxied any;
+  gzip_comp_level 6;
+  gzip_min_length 1024;
+  gzip_types text/plain text/css text/html application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
   root /var/www/lecrev;
   index index.html;
 
