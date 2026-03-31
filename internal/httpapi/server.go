@@ -1196,6 +1196,8 @@ type httpDirectStreamWriter struct {
 	startMode domain.StartMode
 }
 
+const latencyTrailerHeader = "X-Lecrev-Latency-Ms"
+
 func newHTTPDirectStreamWriter(w http.ResponseWriter, method, token, versionID string) *httpDirectStreamWriter {
 	sw := &httpDirectStreamWriter{
 		writer:    w,
@@ -1208,6 +1210,20 @@ func newHTTPDirectStreamWriter(w http.ResponseWriter, method, token, versionID s
 		sw.flusher = flusher
 	}
 	return sw
+}
+
+func (w *httpDirectStreamWriter) declareLatencyTrailer() {
+	headers := w.writer.Header()
+	const trailerKey = "Trailer"
+	current := headers.Values(trailerKey)
+	for _, value := range current {
+		for _, name := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(name), latencyTrailerHeader) {
+				return
+			}
+		}
+	}
+	headers.Add(trailerKey, latencyTrailerHeader)
 }
 
 func (w *httpDirectStreamWriter) SetMeta(jobID string, startMode domain.StartMode) {
@@ -1231,9 +1247,14 @@ func (w *httpDirectStreamWriter) SetMeta(jobID string, startMode domain.StartMod
 func (w *httpDirectStreamWriter) SetLatency(latencyMs int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if latencyMs > 0 {
-		w.writer.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
+	if latencyMs <= 0 {
+		return
 	}
+	if w.started {
+		w.writer.Header().Set(latencyTrailerHeader, strconv.FormatInt(latencyMs, 10))
+		return
+	}
+	w.writer.Header().Set(latencyTrailerHeader, strconv.FormatInt(latencyMs, 10))
 }
 
 func (w *httpDirectStreamWriter) Started() bool {
@@ -1253,6 +1274,7 @@ func (w *httpDirectStreamWriter) HandleEvent(event firecracker.HTTPStreamEvent) 
 		if w.started {
 			return nil
 		}
+		w.declareLatencyTrailer()
 		if event.StatusCode > 0 {
 			w.status = event.StatusCode
 		}
@@ -1269,6 +1291,7 @@ func (w *httpDirectStreamWriter) HandleEvent(event firecracker.HTTPStreamEvent) 
 		}
 	case firecracker.HTTPStreamEventChunk:
 		if !w.started {
+			w.declareLatencyTrailer()
 			w.writer.WriteHeader(w.status)
 			w.started = true
 		}
@@ -1282,6 +1305,7 @@ func (w *httpDirectStreamWriter) HandleEvent(event firecracker.HTTPStreamEvent) 
 		}
 	case firecracker.HTTPStreamEventEnd:
 		if !w.started {
+			w.declareLatencyTrailer()
 			w.writer.WriteHeader(w.status)
 			w.started = true
 		}
@@ -2122,7 +2146,7 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Idempotency-Key, Authorization")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, X-Lecrev-Job-Id, X-Lecrev-Function-Version-Id, X-Lecrev-Function-Url-Token, X-Lecrev-Latency-Ms")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Trailer, X-Lecrev-Job-Id, X-Lecrev-Function-Version-Id, X-Lecrev-Function-Url-Token, X-Lecrev-Latency-Ms")
 	w.Header().Set("Access-Control-Max-Age", "600")
 	w.Header().Add("Vary", "Origin")
 }

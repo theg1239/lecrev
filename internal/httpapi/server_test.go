@@ -745,11 +745,15 @@ func TestHTTPTriggerInvokeStreamsDirectExecutionEvents(t *testing.T) {
 	if got := recorder.Header().Get("X-Lecrev-Start-Mode"); got != string(domain.StartModeFunctionWarm) {
 		t.Fatalf("expected start mode header, got %q", got)
 	}
-	if got := recorder.Header().Get("X-Lecrev-Latency-Ms"); got != "19" {
-		t.Fatalf("expected latency header, got %q", got)
-	}
 	if got := recorder.Header().Get("X-Stream-Test"); got != "yes" {
 		t.Fatalf("expected stream header, got %q", got)
+	}
+	result := recorder.Result()
+	if got := result.Trailer.Get("X-Lecrev-Latency-Ms"); got != "19" {
+		t.Fatalf("expected latency trailer, got %q", got)
+	}
+	if trailerDecl := result.Header.Get("Trailer"); !strings.Contains(trailerDecl, "X-Lecrev-Latency-Ms") {
+		t.Fatalf("expected trailer declaration, got %q", trailerDecl)
 	}
 	if recorder.flushCount == 0 {
 		t.Fatal("expected streamed direct invoke to flush chunks")
