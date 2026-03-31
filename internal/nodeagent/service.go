@@ -248,6 +248,7 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	}
 	s.mu.Unlock()
 	released := false
+	holdDeferredRelease := false
 	releaseSlot := func() {
 		if released {
 			return
@@ -259,7 +260,12 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 		}
 		s.mu.Unlock()
 	}
-	defer releaseSlot()
+	defer func() {
+		if holdDeferredRelease {
+			return
+		}
+		releaseSlot()
+	}()
 
 	emitUpdate := func(state regionv1.AssignmentState, logs string, output []byte, errMsg string, exitCode int) {
 		sendUpdate(&regionv1.AssignmentUpdate{
@@ -391,12 +397,27 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	if deferredClean != nil {
 		deferredClean()
 	}
+	if s.shouldHoldSlotDuringWarmPrepare(executeReq) {
+		holdDeferredRelease = true
+		s.prepareWarmAsync(executeReq, msg.FunctionVersionId, releaseSlot, sendHeartbeat)
+		return
+	}
 	releaseSlot()
 	sendHeartbeat()
-	s.prepareWarmAsync(executeReq, msg.FunctionVersionId, sendHeartbeat)
+	s.prepareWarmAsync(executeReq, msg.FunctionVersionId, nil, sendHeartbeat)
 }
 
-func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersionID string, sendHeartbeat func()) {
+func (s *Service) shouldHoldSlotDuringWarmPrepare(req firecracker.ExecuteRequest) bool {
+	return strings.EqualFold(strings.TrimSpace(req.NetworkPolicy), "full")
+}
+
+func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersionID string, releaseSlot func(), sendHeartbeat func()) {
+	finish := func() {
+		if releaseSlot != nil {
+			releaseSlot()
+		}
+		sendHeartbeat()
+	}
 	warmer, ok := s.driver.(firecracker.PostExecutionWarmer)
 	if ok {
 		go func() {
@@ -411,6 +432,7 @@ func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersi
 					"durationMs", time.Since(warmPrepareStarted).Milliseconds(),
 					"err", err,
 				)
+				finish()
 				return
 			}
 			slog.Info("node-agent async warm prepare completed",
@@ -419,7 +441,7 @@ func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersi
 				"functionVersionID", functionVersionID,
 				"durationMs", time.Since(warmPrepareStarted).Milliseconds(),
 			)
-			sendHeartbeat()
+			finish()
 		}()
 		return
 	}
@@ -427,7 +449,7 @@ func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersi
 		s.mu.Lock()
 		s.functionWarm[functionVersionID] = 1
 		s.mu.Unlock()
-		sendHeartbeat()
+		finish()
 	}()
 }
 

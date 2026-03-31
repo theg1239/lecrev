@@ -195,6 +195,45 @@ func TestExecuteAssignmentDoesNotBlockOnDeferredCleanup(t *testing.T) {
 	}
 }
 
+func TestExecuteAssignmentKeepsSlotReservedDuringFullNetworkWarmPrepare(t *testing.T) {
+	t.Parallel()
+
+	driver := &delayedWarmDriver{
+		result: &firecracker.ExecuteResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"ok":true}`),
+			StartedAt:  time.Now().UTC(),
+			FinishedAt: time.Now().UTC(),
+		},
+		delay: 150 * time.Millisecond,
+	}
+	svc, _ := newConfiguredTestService(t, driver, Config{MaxConcurrentAssignments: 1})
+
+	assignment := testAssignment()
+	assignment.NetworkPolicy = string(domain.NetworkPolicyFull)
+
+	started := time.Now()
+	svc.executeAssignment(context.Background(), assignment, func(*regionv1.AssignmentUpdate) {}, func() {})
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("expected executeAssignment to return before warm prepare finished, took %s", elapsed)
+	}
+
+	if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots != 0 {
+		t.Fatalf("expected slot to remain reserved during full-network warm prepare, got %d", heartbeat.AvailableSlots)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if heartbeat := svc.heartbeatMessage(); heartbeat.AvailableSlots == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected slot to be released after warm prepare completed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
 	t.Parallel()
 
@@ -427,6 +466,24 @@ func (d *deferredCleanupDriver) cleanupCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.cleanups
+}
+
+type delayedWarmDriver struct {
+	result *firecracker.ExecuteResult
+	delay  time.Duration
+}
+
+func (d *delayedWarmDriver) Name() string {
+	return "delayed-warm-driver"
+}
+
+func (d *delayedWarmDriver) Execute(context.Context, firecracker.ExecuteRequest) (*firecracker.ExecuteResult, error) {
+	return d.result, nil
+}
+
+func (d *delayedWarmDriver) PrepareFunctionWarm(context.Context, firecracker.ExecuteRequest) error {
+	time.Sleep(d.delay)
+	return nil
 }
 
 func newTestService(t *testing.T, driver firecracker.Driver) (*Service, artifact.Store) {

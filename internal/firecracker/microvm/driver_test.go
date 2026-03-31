@@ -232,3 +232,36 @@ func TestBlankSnapshotAssetForRequestRequiresMatchingShape(t *testing.T) {
 		t.Fatal("expected memory mismatch to reject blank snapshot")
 	}
 }
+
+func TestGuestInvocationRequestOmitsArtifactBundleForPreparedRoot(t *testing.T) {
+	t.Parallel()
+
+	req := firecracker.ExecuteRequest{
+		AttemptID:      "attempt-1",
+		JobID:          "job-1",
+		FunctionID:     "fn-1",
+		Entrypoint:     "index.mjs",
+		ArtifactBundle: []byte("bundle-bytes"),
+		Payload:        json.RawMessage(`{"ok":true}`),
+		Env:            map[string]string{"A": "B"},
+		Timeout:        5 * time.Second,
+		Region:         "ap-south-1",
+		HostID:         "host-ap-south-1-a",
+	}
+
+	prepared := guestInvocationRequest(req, true)
+	if len(prepared.ArtifactBundle) != 0 {
+		t.Fatalf("expected prepared-root invocation to omit artifact bundle, got %d bytes", len(prepared.ArtifactBundle))
+	}
+	if !prepared.UsePreparedRoot {
+		t.Fatal("expected prepared-root invocation flag to be set")
+	}
+
+	cold := guestInvocationRequest(req, false)
+	if string(cold.ArtifactBundle) != "bundle-bytes" {
+		t.Fatalf("expected cold invocation to keep artifact bundle, got %q", string(cold.ArtifactBundle))
+	}
+	if cold.UsePreparedRoot {
+		t.Fatal("expected cold invocation flag to be unset")
+	}
+}

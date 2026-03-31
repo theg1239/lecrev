@@ -135,19 +135,7 @@ func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req fi
 	defer cancel()
 
 	invokeStarted := time.Now()
-	response, err := invokeGuest(invokeCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, firecracker.GuestInvocationRequest{
-		AttemptID:       req.AttemptID,
-		JobID:           req.JobID,
-		FunctionID:      req.FunctionID,
-		Entrypoint:      req.Entrypoint,
-		ArtifactBundle:  req.ArtifactBundle,
-		UsePreparedRoot: usePreparedRoot,
-		Payload:         req.Payload,
-		Env:             req.Env,
-		TimeoutMillis:   req.Timeout.Milliseconds(),
-		Region:          req.Region,
-		HostID:          req.HostID,
-	})
+	response, err := invokeGuest(invokeCtx, instance.layout.vsockSocketHost, d.config.GuestVSockPort, guestInvocationRequest(req, usePreparedRoot))
 	trace.Step("invoke_guest", invokeStarted)
 
 	if response == nil {
@@ -170,6 +158,26 @@ func (d *Driver) runInvocation(ctx context.Context, instance *vmInstance, req fi
 		return result, errors.New(response.Error)
 	}
 	return result, nil
+}
+
+func guestInvocationRequest(req firecracker.ExecuteRequest, usePreparedRoot bool) firecracker.GuestInvocationRequest {
+	artifactBundle := req.ArtifactBundle
+	if usePreparedRoot {
+		artifactBundle = nil
+	}
+	return firecracker.GuestInvocationRequest{
+		AttemptID:       req.AttemptID,
+		JobID:           req.JobID,
+		FunctionID:      req.FunctionID,
+		Entrypoint:      req.Entrypoint,
+		ArtifactBundle:  artifactBundle,
+		UsePreparedRoot: usePreparedRoot,
+		Payload:         req.Payload,
+		Env:             req.Env,
+		TimeoutMillis:   req.Timeout.Milliseconds(),
+		Region:          req.Region,
+		HostID:          req.HostID,
+	}
 }
 
 func (d *Driver) bootInstance(ctx context.Context, req firecracker.ExecuteRequest, trace *timetrace.Recorder) (*vmInstance, error) {
