@@ -18,6 +18,15 @@ import (
 	memstore "github.com/theg1239/lecrev/internal/store/memory"
 )
 
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	flushCount int
+}
+
+func (r *flushRecorder) Flush() {
+	r.flushCount++
+}
+
 type testDispatcher struct {
 	region string
 }
@@ -593,6 +602,28 @@ func TestHTTPTriggerInvokeAPIKeyModeRequiresAuthorizedKey(t *testing.T) {
 	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("expected one execution job, got jobs=%d err=%v", len(jobs), err)
+	}
+}
+
+func TestWriteHTTPFunctionResultStreamsLargeBodies(t *testing.T) {
+	t.Parallel()
+
+	body := strings.Repeat("a", 128<<10)
+	output := json.RawMessage(`{"statusCode":200,"headers":{"Content-Type":"text/plain; charset=utf-8"},"body":"` + body + `"}`)
+
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	if err := writeHTTPFunctionResult(recorder, http.MethodGet, output, 42); err != nil {
+		t.Fatalf("write http function result: %v", err)
+	}
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if got := recorder.Body.String(); got != body {
+		t.Fatalf("expected streamed body to round-trip, got len=%d", len(got))
+	}
+	if recorder.flushCount == 0 {
+		t.Fatal("expected large body write to flush chunks")
 	}
 }
 

@@ -91,9 +91,14 @@ func StartPreparedWorker(ctx context.Context, req PrepareWorkerRequest) error {
 	_ = os.Remove(socketPath)
 	_ = ShutdownPreparedWorker(context.Background(), req.FunctionID)
 
+	compileCacheDir, err := ensureCompileCacheDir(req.Workspace, filepath.Join(os.TempDir(), "lecrev-worker-cache", sanitizeID(req.FunctionID)))
+	if err != nil {
+		return err
+	}
+
 	cmd := exec.Command(req.NodeBinary, workerScriptPath, socketPath, entrypoint)
 	cmd.Dir = os.TempDir()
-	cmd.Env = preparedWorkerEnv(req.Env)
+	cmd.Env = preparedWorkerEnv(req.Env, compileCacheDir)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -368,8 +373,11 @@ func preparedWorkerSocketPath(functionID string) string {
 	return filepath.Join(os.TempDir(), "lecrev-worker-"+hex.EncodeToString(sum[:8])+".sock")
 }
 
-func preparedWorkerEnv(env map[string]string) []string {
+func preparedWorkerEnv(env map[string]string, compileCacheDir string) []string {
 	cmdEnv := append([]string(nil), os.Environ()...)
+	if strings.TrimSpace(compileCacheDir) != "" {
+		cmdEnv = append(cmdEnv, "NODE_COMPILE_CACHE="+compileCacheDir)
+	}
 	for key, value := range env {
 		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", key, value))
 	}

@@ -1376,7 +1376,7 @@ func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.R
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if method != http.MethodHead {
-			_, _ = w.Write(withLatencyJSON(output, latencyMs))
+			_ = writeHTTPResponseBody(w, withLatencyJSON(output, latencyMs))
 		}
 		return nil
 	}
@@ -1387,7 +1387,34 @@ func writeHTTPFunctionResult(w http.ResponseWriter, method string, output json.R
 	}
 	w.WriteHeader(statusCode)
 	if method != http.MethodHead && len(body) > 0 {
-		_, _ = w.Write(body)
+		_ = writeHTTPResponseBody(w, body)
+	}
+	return nil
+}
+
+func writeHTTPResponseBody(w http.ResponseWriter, body []byte) error {
+	if len(body) == 0 {
+		return nil
+	}
+
+	const streamThreshold = 64 << 10
+	const streamChunkSize = 32 << 10
+
+	flusher, ok := w.(http.Flusher)
+	if !ok || len(body) < streamThreshold {
+		_, err := w.Write(body)
+		return err
+	}
+
+	for offset := 0; offset < len(body); offset += streamChunkSize {
+		end := offset + streamChunkSize
+		if end > len(body) {
+			end = len(body)
+		}
+		if _, err := w.Write(body[offset:end]); err != nil {
+			return err
+		}
+		flusher.Flush()
 	}
 	return nil
 }

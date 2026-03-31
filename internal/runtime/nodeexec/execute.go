@@ -16,6 +16,8 @@ import (
 	"github.com/theg1239/lecrev/internal/timetrace"
 )
 
+const compileCacheSubdir = ".lecrev/compile-cache"
+
 type Request struct {
 	AttemptID      string
 	JobID          string
@@ -129,6 +131,13 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 		req.NodeBinary = "node"
 	}
 
+	compileCacheStarted := time.Now()
+	compileCacheDir, err := ensureCompileCacheDir(req.Workspace, scratchDir)
+	if err != nil {
+		return nil, err
+	}
+	trace.Step("prepare_compile_cache", compileCacheStarted)
+
 	invokeCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
@@ -151,7 +160,7 @@ func ExecuteWorkspace(ctx context.Context, req WorkspaceRequest) (*Result, error
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = commandEnv(req.Env, contextJSON)
+	cmd.Env = commandEnv(req.Env, contextJSON, compileCacheDir)
 
 	runStarted := time.Now()
 	runErr := cmd.Run()
@@ -227,12 +236,28 @@ func invocationContext(req WorkspaceRequest) map[string]any {
 	}
 }
 
-func commandEnv(env map[string]string, contextJSON []byte) []string {
+func commandEnv(env map[string]string, contextJSON []byte, compileCacheDir string) []string {
 	cmdEnv := append(os.Environ(), "LECREV_CONTEXT="+string(contextJSON))
+	if strings.TrimSpace(compileCacheDir) != "" {
+		cmdEnv = append(cmdEnv, "NODE_COMPILE_CACHE="+compileCacheDir)
+	}
 	for key, value := range env {
 		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", key, value))
 	}
 	return cmdEnv
+}
+
+func ensureCompileCacheDir(workspace, fallbackBase string) (string, error) {
+	primary := filepath.Join(workspace, filepath.FromSlash(compileCacheSubdir))
+	if err := os.MkdirAll(primary, 0o755); err == nil {
+		return primary, nil
+	}
+
+	fallback := filepath.Join(fallbackBase, "compile-cache")
+	if err := os.MkdirAll(fallback, 0o755); err != nil {
+		return "", err
+	}
+	return fallback, nil
 }
 
 const wrapperScript = `import fs from 'node:fs/promises';
