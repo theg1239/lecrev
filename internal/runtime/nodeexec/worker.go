@@ -226,9 +226,6 @@ func preparedWorkerRequest(ctx context.Context, functionID string, request prepa
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		return nil, fmt.Errorf("%w: send prepared worker request: %v", ErrPreparedWorkerUnavailable, err)
 	}
-	if unixConn, ok := conn.(*net.UnixConn); ok {
-		_ = unixConn.CloseWrite()
-	}
 
 	var response preparedWorkerResponse
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
@@ -355,14 +352,18 @@ function applyEnv(overrides) {
 
 const server = net.createServer({ allowHalfOpen: true }, (socket) => {
   let raw = '';
+  let handled = false;
   socket.setEncoding('utf8');
-  socket.on('data', (chunk) => {
-    raw += chunk;
-  });
-  socket.on('end', async () => {
+
+  async function handleRaw(rawRequest) {
+    if (handled) {
+      return;
+    }
+    handled = true;
+
     let request;
     try {
-      request = raw.trim() === '' ? { type: 'ping' } : JSON.parse(raw);
+      request = rawRequest.trim() === '' ? { type: 'ping' } : JSON.parse(rawRequest);
     } catch (error) {
       socket.end(JSON.stringify({ error: error?.stack ?? String(error) }));
       return;
@@ -399,6 +400,27 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       restoreStderr();
       restoreEnv();
     }
+  }
+
+  socket.on('data', (chunk) => {
+    if (handled) {
+      return;
+    }
+    raw += chunk;
+    const newlineIndex = raw.indexOf('\n');
+    if (newlineIndex === -1) {
+      return;
+    }
+    const requestRaw = raw.slice(0, newlineIndex);
+    raw = raw.slice(newlineIndex + 1);
+    void handleRaw(requestRaw);
+  });
+
+  socket.on('end', () => {
+    if (handled) {
+      return;
+    }
+    void handleRaw(raw);
   });
 });
 
