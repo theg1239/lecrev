@@ -250,6 +250,7 @@ func RunBuildWorker(ctx context.Context, cfg Config) error {
 	builder.SetArtifactReplicator(artifactReplicator)
 	builder.SetBuildBus(buildBus)
 	builder.SetCommandTimeouts(cfg.BuildGitCloneTimeout, cfg.BuildNPMInstallTimeout, cfg.BuildNPMBuildTimeout, cfg.BuildNPMPruneTimeout)
+	builder.SetWarmPreparer(build.NewHTTPWarmPreparer(controlPlaneBaseURL(cfg.ControlPlaneBaseURL), cfg.BootstrapAdminAPIKey, http.DefaultClient))
 	slog.Info("build-worker started", "regions", cfg.ExecutionRegions)
 	return leadership.Run(ctx, leadership.Config{
 		Name: "build-worker",

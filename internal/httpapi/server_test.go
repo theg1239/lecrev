@@ -28,6 +28,21 @@ func (d testDispatcher) Stats() domain.RegionStats {
 }
 func (d testDispatcher) EnqueueExecution(context.Context, domain.Assignment) error { return nil }
 
+type warmTestDispatcher struct {
+	region  string
+	warmups []string
+}
+
+func (d *warmTestDispatcher) Region() string { return d.region }
+func (d *warmTestDispatcher) Stats() domain.RegionStats {
+	return domain.RegionStats{AvailableHosts: 1, BlankWarm: 1}
+}
+func (d *warmTestDispatcher) EnqueueExecution(context.Context, domain.Assignment) error { return nil }
+func (d *warmTestDispatcher) PrepareFunctionWarm(_ context.Context, version *domain.FunctionVersion) error {
+	d.warmups = append(d.warmups, version.ID)
+	return nil
+}
+
 type testAdmin struct {
 	region string
 	hostID string
@@ -58,6 +73,57 @@ func TestHealthz(t *testing.T) {
 	}
 	if payload["status"] != "healthy" || payload["ok"] != true {
 		t.Fatalf("unexpected healthz payload: %+v", payload)
+	}
+}
+
+func TestPrepareFunctionRequiresAdminAndQueuesWarmPrep(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	dispatcher := &warmTestDispatcher{region: "ap-south-1"}
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{dispatcher})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+	mustSeedAPIKey(t, meta, "admin-key", "tenant-dev", false, true)
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "fn-prepare",
+		ProjectID:      "demo",
+		Name:           "prepare",
+		Runtime:        "node22",
+		Entrypoint:     "index.mjs",
+		TimeoutSec:     5,
+		NetworkPolicy:  domain.NetworkPolicyFull,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "digest",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	tenantReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-prepare/prepare", nil)
+	tenantReq.Header.Set("X-API-Key", "tenant-key")
+	tenantResp := httptest.NewRecorder()
+	handler.ServeHTTP(tenantResp, tenantReq)
+	if tenantResp.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for tenant key, got %d: %s", tenantResp.Code, tenantResp.Body.String())
+	}
+
+	adminReq := httptest.NewRequest(http.MethodPost, "/v1/functions/fn-prepare/prepare", nil)
+	adminReq.Header.Set("X-API-Key", "admin-key")
+	adminResp := httptest.NewRecorder()
+	handler.ServeHTTP(adminResp, adminReq)
+	if adminResp.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted for admin prepare, got %d: %s", adminResp.Code, adminResp.Body.String())
+	}
+	if len(dispatcher.warmups) != 1 || dispatcher.warmups[0] != "fn-prepare" {
+		t.Fatalf("expected warm prep to be queued for fn-prepare, got %+v", dispatcher.warmups)
 	}
 }
 

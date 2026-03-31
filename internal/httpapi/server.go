@@ -83,6 +83,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Get("/jobs/{jobID}/logs", srv.getJobLogs)
 		r.Get("/jobs/{jobID}/output", srv.getJobOutput)
 		r.Get("/functions/{versionID}", srv.getFunction)
+		r.Post("/functions/{versionID}/prepare", srv.prepareFunction)
 		r.Post("/functions/{versionID}/triggers/http", srv.createHTTPTrigger)
 		r.Get("/functions/{versionID}/triggers/http", srv.listHTTPTriggers)
 		r.Post("/functions/{versionID}/triggers/webhook", srv.createWebhookTrigger)
@@ -508,6 +509,38 @@ func (s *Server) invokeFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, withJobLatency(job))
+}
+
+func (s *Server) prepareFunction(w http.ResponseWriter, r *http.Request) {
+	if err := requireAdmin(r.Context()); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	versionID := chi.URLParam(r, "versionID")
+	if versionID == "" {
+		http.Error(w, "missing versionID", http.StatusBadRequest)
+		return
+	}
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if version.State != domain.FunctionStateReady {
+		writeServiceError(w, domain.ErrFunctionVersionNotReady)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.scheduler.PrepareFunctionVersion(ctx, version); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":                true,
+		"functionVersionId": version.ID,
+		"state":             "queued",
+	})
 }
 
 func (s *Server) getBuildJob(w http.ResponseWriter, r *http.Request) {
