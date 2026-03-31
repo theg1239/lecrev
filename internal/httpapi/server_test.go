@@ -107,6 +107,57 @@ func (d *directTestDispatcher) ExecuteDirectStream(_ context.Context, assignment
 	return result, nil
 }
 
+type queuedFallbackDispatcher struct {
+	region string
+	store  *memstore.Store
+}
+
+func (d *queuedFallbackDispatcher) Region() string { return d.region }
+func (d *queuedFallbackDispatcher) Stats() domain.RegionStats {
+	return domain.RegionStats{AvailableHosts: 1, BlankWarm: 1}
+}
+func (d *queuedFallbackDispatcher) ExecuteDirect(context.Context, domain.Assignment) (*domain.DirectExecutionResult, error) {
+	return nil, domain.ErrNoExecutionCapacity
+}
+func (d *queuedFallbackDispatcher) ExecuteDirectStream(context.Context, domain.Assignment, func(string, string, domain.StartMode), func(firecracker.HTTPStreamEvent) error) (*domain.DirectExecutionResult, error) {
+	return nil, domain.ErrNoExecutionCapacity
+}
+func (d *queuedFallbackDispatcher) EnqueueExecution(_ context.Context, assignment domain.Assignment) error {
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		ctx := context.Background()
+		attempt, err := d.store.GetAttempt(ctx, assignment.AttemptID)
+		if err == nil {
+			now := time.Now().UTC()
+			attempt.State = domain.AttemptStateSucceeded
+			attempt.StartedAt = now
+			attempt.LatencyMs = 15
+			attempt.UpdatedAt = now
+			attempt.LeaseExpiresAt = now
+			_ = d.store.UpdateAttempt(ctx, attempt)
+		}
+		job, err := d.store.GetExecutionJob(ctx, assignment.JobID)
+		if err != nil {
+			return
+		}
+		now := time.Now().UTC()
+		job.State = domain.JobStateSucceeded
+		job.Error = ""
+		job.Result = &domain.JobResult{
+			ExitCode:   0,
+			Output:     json.RawMessage(`{"statusCode":200,"headers":{"Content-Type":"application/json"},"body":{"ok":true,"fallback":"queued"}}`),
+			HostID:     "host-" + d.region,
+			Region:     d.region,
+			StartedAt:  now,
+			FinishedAt: now,
+			LatencyMs:  15,
+		}
+		job.UpdatedAt = now
+		_ = d.store.UpdateExecutionJob(ctx, job)
+	}()
+	return nil
+}
+
 type warmTestDispatcher struct {
 	region  string
 	warmups []string
@@ -893,17 +944,22 @@ func TestHTTPTriggerInvokeStreamsDirectExecutionEvents(t *testing.T) {
 	}
 }
 
-func TestHTTPTriggerInvokeReturnsServiceUnavailableWhenDirectCapacityIsExhausted(t *testing.T) {
+func TestHTTPTriggerInvokeFallsBackToQueuedExecutionWhenDirectCapacityIsExhausted(t *testing.T) {
 	t.Parallel()
 
 	meta := memstore.New()
 	objects := artifact.NewMemoryStore()
 	builder := build.New(meta, objects)
-	dispatcher := &directTestDispatcher{
+	dispatcher := &queuedFallbackDispatcher{
 		region: "ap-south-1",
-		err:    domain.ErrNoExecutionCapacity,
+		store:  meta,
 	}
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{dispatcher})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = sched.Run(ctx)
+	}()
 	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
 		t.Fatalf("ensure project: %v", err)
 	}
@@ -948,28 +1004,22 @@ func TestHTTPTriggerInvokeReturnsServiceUnavailableWhenDirectCapacityIsExhausted
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, resp.Code, resp.Body.String())
-	}
-	if got := resp.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("expected Retry-After header 1, got %q", got)
-	}
-	if len(dispatcher.assignments) != 0 {
-		t.Fatalf("expected no persisted direct assignments on overload, got %d", len(dispatcher.assignments))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
 	}
 	jobs, err := meta.ListExecutionJobsByProject(context.Background(), "demo")
 	if err != nil {
 		t.Fatalf("list execution jobs: %v", err)
 	}
-	if len(jobs) != 0 {
-		t.Fatalf("expected overload path to skip queued jobs, got %d", len(jobs))
+	if len(jobs) != 1 {
+		t.Fatalf("expected queued fallback job, got %d", len(jobs))
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode overload response: %v", err)
+		t.Fatalf("decode fallback response: %v", err)
 	}
-	if payload["state"] != "overloaded" {
-		t.Fatalf("expected overloaded state, got %+v", payload)
+	if fallback, _ := payload["fallback"].(string); fallback != "queued" {
+		t.Fatalf("expected queued fallback response, got %+v", payload)
 	}
 }
 

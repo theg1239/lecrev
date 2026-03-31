@@ -2,6 +2,8 @@
 
 This document explains what happens in the platform from the moment a user uploads a function to final job completion.
 
+It is written against the current implementation in this repo, not the original target architecture.
+
 ## 1) What the platform is split into
 
 The system has three planes that work together:
@@ -22,6 +24,7 @@ Design intent:
 - Postgres (system of record).
 - NATS JetStream in each region (durable work queues).
 - Global scheduler and regional coordinators.
+- Dedicated build worker runtime.
 - Node agents on Firecracker hosts.
 - Artifact storage in S3 (replicated per target region).
 - Secrets proxy + AWS Secrets Manager.
@@ -51,9 +54,9 @@ Step-by-step:
 ### A) Git source deploy
 
 1. Builder clones repo.
-2. Resolves lockfile/dependencies.
-3. Installs dependencies. (ensure only the correct ones being used are pulled)
-4. Runs bundler.
+2. Detects the package manager (`npm`, `pnpm`, or `yarn`).
+3. Installs dependencies on the build worker host.
+4. Runs the package `build` script when present.
 5. Emits immutable artifact set:
 - `bundle.tgz`
 - `function.json`
@@ -61,9 +64,11 @@ Step-by-step:
 - `startup.json`
 6. Uploads artifact to S3.
 7. Replicates artifact to target execution regions.
-8. Marks function version as ready.
-9. Queues best-effort function snapshot preparation in each target execution region when the network policy allows safe snapshot reuse.
-10. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
+8. If the build produced a Next.js standalone website, writes a site manifest plus static assets into object storage.
+9. Marks function version as ready.
+10. Ensures a default public HTTP trigger exists for the ready version.
+11. Queues best-effort function snapshot preparation in each target execution region when the network policy allows safe snapshot reuse.
+12. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
 
 ### B) Bundle source deploy
 
@@ -73,14 +78,16 @@ Step-by-step:
 4. Uploads to S3.
 5. Replicates to target regions.
 6. Marks function version as ready.
-7. Queues best-effort function snapshot preparation in each target execution region when the network policy allows safe snapshot reuse.
-8. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
+7. Ensures a default public HTTP trigger exists for the ready version.
+8. Queues best-effort function snapshot preparation in each target execution region when the network policy allows safe snapshot reuse.
+9. Archives build logs for later inspection through `GET /v1/build-jobs/{buildJobId}/logs`.
 
-Builder isolation notes:
+Build isolation notes:
 
-- Builders run in Firecracker on dedicated build hosts.
-- Build hosts are separate from execution hosts.
-- Only safe content-addressed caches are reused.
+- Build workers are separate from execution hosts.
+- Git builds currently run package-manager commands directly on the build worker host.
+- Firecracker-isolated build workers are still a planned improvement, not the current implementation.
+- Only safe content-addressed caches should be reused.
 
 ## 5) Artifact contract (why this matters)
 
@@ -100,6 +107,7 @@ Request:
 - `POST /v1/functions/{versionId}/triggers/http`
 - `GET /v1/functions/{versionId}/triggers/http`
 - Public Function URL: `/f/{token}`
+- Website preview URL: `/w/{functionVersionId}`
 
 Step-by-step:
 
@@ -120,11 +128,24 @@ This is the Lambda Function URL equivalent in this platform.
 - `api_key`: caller must send `X-API-Key` or `Authorization: Bearer <api-key>`
 4. External caller sends an HTTP request to that URL.
 5. Control plane wraps the inbound request into an execution payload with method, path, query, headers, and body.
-6. Control plane dispatches the request through the same execution-job path as normal invoke.
-7. The Function URL handler waits for terminal completion and maps the function output back to the caller:
+6. Control plane tries direct synchronous execution against live region capacity first.
+7. If direct capacity is unavailable, control plane falls back to the queued execution-job path.
+8. The Function URL handler maps the function output back to the caller:
 - raw JSON output returns `200 application/json`
 - structured output in the shape `{ statusCode, headers, body }` is emitted as an HTTP response directly
+- large bodies can stream chunk-by-chunk from the function runtime to the caller
 - `HEAD` requests suppress the response body while preserving headers and status
+- final streamed-response latency is emitted as the `X-Lecrev-Latency-Ms` trailer
+
+### Website preview flow
+
+Website previews are distinct from Function URLs.
+
+1. A website build writes a site manifest plus static assets into object storage.
+2. The control plane exposes a preview route at `/w/{functionVersionId}`.
+3. Static assets are served directly from object storage when the path matches a known asset.
+4. Dynamic requests route into the function runtime through the same direct-or-queued execution model used by Function URLs.
+5. Website previews return `503` while the site manifest or warm readiness is not yet available.
 
 ## 7) Regional assignment flow
 
@@ -168,8 +189,9 @@ Node agent manages full microVM lifecycle:
 5. Retrieves scoped secrets via secrets proxy.
 6. Injects env and secrets to guest over controlled channel.
 7. Guest runner executes handler subprocess.
-8. Guest streams structured logs and result back.
-9. Node agent finalizes attempt and either tears down VM or preserves safe reusable snapshot.
+8. For HTTP-triggered functions, guest can stream HTTP response events back before the handler fully finishes.
+9. Guest streams structured logs and final result back.
+10. Node agent finalizes attempt and either tears down VM or preserves safe reusable snapshot.
 
 Isolation rule:
 
@@ -205,21 +227,27 @@ On success:
 Current v1 implementation caps:
 
 - runtime: `node22`
-- memory: `64` to `1024` MB
-- timeout: `1` to `300` seconds
-- retries: `0` to `5`
-- env refs: up to `64`
-- artifact size: `10 MiB`
-- execution logs: `1 MiB`
-- execution output payload: `1 MiB`
-- active build jobs per project: `5`
-- active execution jobs per project: `50`
+- memory: `64` to `4096` MB
+- timeout: `1` to `900` seconds
+- retries: `0` to `10`
+- env vars: up to `128`
+- env refs: up to `128`
+- artifact size: `64 MiB`
+- execution logs: `8 MiB`
+- execution output payload: `32 MiB`
+- active build jobs per project: `20`
+- active execution jobs per project: `200`
+- Function URL timeout cap: `180` seconds
+- website defaults (`framework=nextjs` or `deliveryKind=website`):
+  - memory floor `2048 MB`
+  - timeout floor `180` seconds
+  - network policy `full`
 
 ## 13) Observability flow
 
-- Structured logs from agents/executions to Loki.
-- Raw logs/results archived to S3.
-- Prometheus metrics for queue depth, cold/warm/hot starts, retries, saturation, backlog, and tenant cost.
+- `/metrics` exposes Prometheus-format control-plane metrics.
+- Raw logs/results are archived to object storage and exposed through the API.
+- Execution traces now include latency and warm-start mode data.
 - Postgres remains source of truth for object and status state.
 
 ## 14) End-to-end timeline (happy path)
@@ -228,12 +256,13 @@ Current v1 implementation caps:
 2. Control plane validates and records metadata.
 3. Build job queued and processed.
 4. Immutable artifact generated, uploaded, replicated.
-5. Function version marked ready.
-6. User invokes function.
-7. Execution job queued in chosen region.
-8. Coordinator assigns host.
-9. Node agent runs microVM and executes handler.
-10. Result/logs persisted; status becomes completed.
+5. Default public Function URL is created.
+6. Function version marked ready.
+7. User invokes function, Function URL, or website preview.
+8. Execution is dispatched directly or queued in the chosen region.
+9. Coordinator assigns host.
+10. Node agent runs microVM and executes handler.
+11. Result/logs persisted; status becomes completed.
 
 ## 15) Mental model to remember
 

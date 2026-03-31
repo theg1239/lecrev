@@ -1208,18 +1208,8 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case errors.Is(directErr, domain.ErrNoExecutionCapacity):
-		latencyMs := computeLatencyMs(requestStartedAt, time.Now().UTC())
-		state = "overloaded"
+		state = "capacity_fallback"
 		errMsg = directErr.Error()
-		w.Header().Set("Retry-After", "1")
-		w.Header().Set("X-Lecrev-Latency-Ms", strconv.FormatInt(latencyMs, 10))
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"functionVersionId": version.ID,
-			"state":             "overloaded",
-			"message":           "function url execution capacity is unavailable; retry later",
-			"latencyMs":         latencyMs,
-		})
-		return
 	case errors.Is(directErr, domain.ErrDirectInvokeUnavailable):
 		state = "direct_fallback"
 	case errors.Is(directErr, context.DeadlineExceeded), errors.Is(directErr, context.Canceled):
