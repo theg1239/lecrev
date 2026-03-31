@@ -185,6 +185,10 @@ func prepare(request *firecracker.GuestPrepareRequest) (*firecracker.GuestPrepar
 				Logs:           err.Error(),
 			}, nil
 		}
+		// Snapshots should not preserve a live control fd to the prepared worker.
+		// Restored guests can reconnect on the first invoke far cheaper than
+		// recovering from a stale pre-snapshot Unix socket connection.
+		nodeexec.ReleasePreparedWorkerConnection(request.FunctionID)
 		workerPrepared = true
 	}
 	return &firecracker.GuestPrepareResponse{Prepared: true, WorkerPrepared: workerPrepared}, nil

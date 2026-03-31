@@ -1,6 +1,7 @@
 package nodeexec
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/theg1239/lecrev/internal/timetrace"
@@ -43,6 +45,21 @@ type preparedWorkerResponse struct {
 	Error  string          `json:"error,omitempty"`
 }
 
+type preparedWorkerController struct {
+	functionID string
+	socketPath string
+	cmd        *exec.Cmd
+	conn       *net.UnixConn
+	reader     *bufio.Reader
+	waitCh     chan error
+
+	mu       sync.Mutex
+	stderrMu sync.Mutex
+	stderr   bytes.Buffer
+}
+
+var preparedWorkers sync.Map
+
 func StartPreparedWorker(ctx context.Context, req PrepareWorkerRequest) error {
 	if strings.TrimSpace(req.FunctionID) == "" {
 		return fmt.Errorf("functionID is required")
@@ -72,42 +89,44 @@ func StartPreparedWorker(ctx context.Context, req PrepareWorkerRequest) error {
 
 	socketPath := preparedWorkerSocketPath(req.FunctionID)
 	_ = os.Remove(socketPath)
+	_ = ShutdownPreparedWorker(context.Background(), req.FunctionID)
 
 	cmd := exec.Command(req.NodeBinary, workerScriptPath, socketPath, entrypoint)
 	cmd.Dir = os.TempDir()
 	cmd.Env = preparedWorkerEnv(req.Env)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
+	controller := &preparedWorkerController{
+		functionID: req.FunctionID,
+		socketPath: socketPath,
+		cmd:        cmd,
+		waitCh:     make(chan error, 1),
+	}
+	go controller.captureOutput(stdout, &controller.stderr)
+	go controller.captureOutput(stderr, &controller.stderr)
+	go controller.wait()
 
 	readyCtx, cancel := context.WithTimeout(ctx, req.StartupTimeout)
 	defer cancel()
-	if err := waitForPreparedWorker(readyCtx, req.FunctionID, waitCh); err != nil {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		select {
-		case <-waitCh:
-		default:
-		}
-		logs := strings.TrimSpace(strings.Join([]string{
-			strings.TrimSpace(stdout.String()),
-			strings.TrimSpace(stderr.String()),
-		}, "\n"))
+	if err := connectPreparedWorker(readyCtx, controller); err != nil {
+		controller.terminate()
+		logs := strings.TrimSpace(controller.stderrLogs())
 		if logs != "" {
 			return fmt.Errorf("start prepared worker: %w; logs: %s", err, logs)
 		}
 		return fmt.Errorf("start prepared worker: %w", err)
 	}
+	preparedWorkers.Store(req.FunctionID, controller)
 	return nil
 }
 
@@ -160,6 +179,10 @@ func ExecutePreparedWorker(ctx context.Context, req WorkspaceRequest) (*Result, 
 
 func ShutdownPreparedWorker(ctx context.Context, functionID string) error {
 	response, err := preparedWorkerRequest(ctx, functionID, preparedWorkerMessage{Type: "shutdown"})
+	if controller, ok := loadPreparedWorker(functionID); ok {
+		controller.close()
+		preparedWorkers.Delete(functionID)
+	}
 	if err != nil {
 		if errors.Is(err, ErrPreparedWorkerUnavailable) {
 			return nil
@@ -172,24 +195,74 @@ func ShutdownPreparedWorker(ctx context.Context, functionID string) error {
 	return nil
 }
 
-func waitForPreparedWorker(ctx context.Context, functionID string, waitCh <-chan error) error {
-	ticker := time.NewTicker(20 * time.Millisecond)
+func pingPreparedWorker(ctx context.Context, functionID string) (bool, error) {
+	response, err := preparedWorkerRequest(ctx, functionID, preparedWorkerMessage{Type: "ping"})
+	if err != nil {
+		return false, err
+	}
+	return response.Ready, nil
+}
+
+func ReleasePreparedWorkerConnection(functionID string) {
+	controller, ok := loadPreparedWorker(functionID)
+	if !ok {
+		return
+	}
+	controller.closeConnection()
+}
+
+func preparedWorkerRequest(ctx context.Context, functionID string, request preparedWorkerMessage) (*preparedWorkerResponse, error) {
+	if strings.TrimSpace(functionID) == "" {
+		return nil, fmt.Errorf("%w: functionID is required", ErrPreparedWorkerUnavailable)
+	}
+	controller, ok := loadPreparedWorker(functionID)
+	if !ok {
+		return nil, fmt.Errorf("%w: missing prepared worker controller", ErrPreparedWorkerUnavailable)
+	}
+	response, err := controller.request(ctx, request)
+	if err == nil {
+		return response, nil
+	}
+	controller.closeConnection()
+	if reconnectErr := controller.openConnection(ctx); reconnectErr == nil {
+		response, retryErr := controller.request(ctx, request)
+		if retryErr == nil {
+			return response, nil
+		}
+		err = retryErr
+	}
+	preparedWorkers.Delete(functionID)
+	controller.close()
+	return nil, err
+}
+
+func loadPreparedWorker(functionID string) (*preparedWorkerController, bool) {
+	value, ok := preparedWorkers.Load(functionID)
+	if !ok {
+		return nil, false
+	}
+	controller, ok := value.(*preparedWorkerController)
+	return controller, ok
+}
+
+func connectPreparedWorker(ctx context.Context, controller *preparedWorkerController) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		pingCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-		ready, err := pingPreparedWorker(pingCtx, functionID)
-		cancel()
-		if err == nil && ready {
-			return nil
+		if err := controller.openConnection(ctx); err == nil {
+			pingCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			response, pingErr := controller.request(pingCtx, preparedWorkerMessage{Type: "ping"})
+			cancel()
+			if pingErr == nil && response.Ready {
+				return nil
+			}
+			controller.closeConnection()
 		}
 		select {
 		case <-ctx.Done():
-			if err != nil {
-				return err
-			}
 			return ctx.Err()
-		case procErr := <-waitCh:
+		case procErr := <-controller.waitCh:
 			if procErr == nil {
 				return fmt.Errorf("%w: prepared worker exited before becoming ready", ErrPreparedWorkerUnavailable)
 			}
@@ -199,39 +272,102 @@ func waitForPreparedWorker(ctx context.Context, functionID string, waitCh <-chan
 	}
 }
 
-func pingPreparedWorker(ctx context.Context, functionID string) (bool, error) {
-	response, err := preparedWorkerRequest(ctx, functionID, preparedWorkerMessage{Type: "ping"})
-	if err != nil {
-		return false, err
+func (c *preparedWorkerController) openConnection(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		return nil
 	}
-	return response.Ready, nil
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
+	if err != nil {
+		return fmt.Errorf("%w: dial prepared worker: %v", ErrPreparedWorkerUnavailable, err)
+	}
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		_ = conn.Close()
+		return fmt.Errorf("%w: prepared worker did not return a unix connection", ErrPreparedWorkerUnavailable)
+	}
+	c.conn = unixConn
+	c.reader = bufio.NewReader(unixConn)
+	return nil
 }
 
-func preparedWorkerRequest(ctx context.Context, functionID string, request preparedWorkerMessage) (*preparedWorkerResponse, error) {
-	if strings.TrimSpace(functionID) == "" {
-		return nil, fmt.Errorf("%w: functionID is required", ErrPreparedWorkerUnavailable)
-	}
-	socketPath := preparedWorkerSocketPath(functionID)
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("%w: dial prepared worker: %v", ErrPreparedWorkerUnavailable, err)
-	}
-	defer conn.Close()
+func (c *preparedWorkerController) request(ctx context.Context, request preparedWorkerMessage) (*preparedWorkerResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	if c.conn == nil {
+		return nil, fmt.Errorf("%w: prepared worker control connection is not ready", ErrPreparedWorkerUnavailable)
+	}
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+		_ = c.conn.SetDeadline(deadline)
+	} else {
+		_ = c.conn.SetDeadline(time.Time{})
 	}
-
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
+	if err := json.NewEncoder(c.conn).Encode(request); err != nil {
+		c.closeConnectionLocked()
 		return nil, fmt.Errorf("%w: send prepared worker request: %v", ErrPreparedWorkerUnavailable, err)
 	}
 
 	var response preparedWorkerResponse
-	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+	if err := json.NewDecoder(c.reader).Decode(&response); err != nil {
+		c.closeConnectionLocked()
 		return nil, fmt.Errorf("%w: read prepared worker response: %v", ErrPreparedWorkerUnavailable, err)
 	}
 	return &response, nil
+}
+
+func (c *preparedWorkerController) closeConnection() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeConnectionLocked()
+}
+
+func (c *preparedWorkerController) closeConnectionLocked() {
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+		c.reader = nil
+	}
+}
+
+func (c *preparedWorkerController) close() {
+	c.closeConnection()
+}
+
+func (c *preparedWorkerController) terminate() {
+	c.close()
+	if c.cmd != nil && c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+}
+
+func (c *preparedWorkerController) wait() {
+	err := c.cmd.Wait()
+	c.waitCh <- err
+}
+
+func (c *preparedWorkerController) captureOutput(stream interface{ Read([]byte) (int, error) }, dest *bytes.Buffer) {
+	var buffer [4096]byte
+	for {
+		n, err := stream.Read(buffer[:])
+		if n > 0 {
+			c.stderrMu.Lock()
+			dest.Write(buffer[:n])
+			c.stderrMu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (c *preparedWorkerController) stderrLogs() string {
+	c.stderrMu.Lock()
+	defer c.stderrMu.Unlock()
+	return c.stderr.String()
 }
 
 func preparedWorkerSocketPath(functionID string) string {
@@ -350,77 +486,85 @@ function applyEnv(overrides) {
   };
 }
 
-const server = net.createServer({ allowHalfOpen: true }, (socket) => {
-  let raw = '';
-  let handled = false;
-  socket.setEncoding('utf8');
+function handleRequest(socket, protocolWrite, request) {
+  if (request.type === 'ping') {
+    protocolWrite(JSON.stringify({ ready: true }) + '\n');
+    return false;
+  }
+  if (request.type === 'shutdown') {
+    protocolWrite(JSON.stringify({ ready: false }) + '\n');
+    server.close(() => process.exit(0));
+    return true;
+  }
+  if (request.type !== 'invoke') {
+    protocolWrite(JSON.stringify({ error: 'unsupported prepared worker request' }) + '\n');
+    return false;
+  }
 
-  async function handleRaw(rawRequest) {
-    if (handled) {
-      return;
-    }
-    handled = true;
+  const logs = [];
+  const restoreEnv = applyEnv(request.env);
+  const restoreStdout = captureStream(process.stdout, logs);
+  const restoreStderr = captureStream(process.stderr, logs);
+  const restoreConsole = captureConsole(logs);
 
-    let request;
-    try {
-      request = rawRequest.trim() === '' ? { type: 'ping' } : JSON.parse(rawRequest);
-    } catch (error) {
-      socket.end(JSON.stringify({ error: error?.stack ?? String(error) }));
-      return;
-    }
-
-    if (request.type === 'ping') {
-      socket.end(JSON.stringify({ ready: true }));
-      return;
-    }
-    if (request.type === 'shutdown') {
-      socket.end(JSON.stringify({ ready: false }));
-      server.close(() => process.exit(0));
-      return;
-    }
-    if (request.type !== 'invoke') {
-      socket.end(JSON.stringify({ error: 'unsupported prepared worker request' }));
-      return;
-    }
-
-    const logs = [];
-    const restoreEnv = applyEnv(request.env);
-    const restoreStdout = captureStream(process.stdout, logs);
-    const restoreStderr = captureStream(process.stderr, logs);
-    const restoreConsole = captureConsole(logs);
-
-    try {
-      const output = await mod.handler(request.payload ?? null, request.context ?? {});
-      socket.end(JSON.stringify({ output: output ?? null, logs: logs.join('') }));
-    } catch (error) {
-      socket.end(JSON.stringify({ error: error?.stack ?? String(error), logs: logs.join('') }));
-    } finally {
+  return Promise.resolve()
+    .then(() => mod.handler(request.payload ?? null, request.context ?? {}))
+    .then((output) => {
+      protocolWrite(JSON.stringify({ output: output ?? null, logs: logs.join('') }) + '\n');
+      return false;
+    })
+    .catch((error) => {
+      protocolWrite(JSON.stringify({ error: error?.stack ?? String(error), logs: logs.join('') }) + '\n');
+      return false;
+    })
+    .finally(() => {
       restoreConsole();
       restoreStdout();
       restoreStderr();
       restoreEnv();
-    }
+    });
+}
+
+const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+  let raw = '';
+  let processing = Promise.resolve(false);
+  const protocolWrite = socket.write.bind(socket);
+  socket.setEncoding('utf8');
+
+  function enqueue(rawRequest) {
+    processing = processing.then(async (shouldClose) => {
+      if (shouldClose) {
+        return true;
+      }
+      let request;
+      try {
+        request = rawRequest.trim() === '' ? { type: 'ping' } : JSON.parse(rawRequest);
+      } catch (error) {
+        protocolWrite(JSON.stringify({ error: error?.stack ?? String(error) }) + '\n');
+        return false;
+      }
+      return await handleRequest(socket, protocolWrite, request);
+    });
   }
 
   socket.on('data', (chunk) => {
-    if (handled) {
-      return;
-    }
     raw += chunk;
-    const newlineIndex = raw.indexOf('\n');
-    if (newlineIndex === -1) {
-      return;
+    for (;;) {
+      const newlineIndex = raw.indexOf('\n');
+      if (newlineIndex === -1) {
+        return;
+      }
+      const requestRaw = raw.slice(0, newlineIndex);
+      raw = raw.slice(newlineIndex + 1);
+      enqueue(requestRaw);
     }
-    const requestRaw = raw.slice(0, newlineIndex);
-    raw = raw.slice(newlineIndex + 1);
-    void handleRaw(requestRaw);
   });
 
   socket.on('end', () => {
-    if (handled) {
-      return;
+    if (raw.trim() !== '') {
+      enqueue(raw);
+      raw = '';
     }
-    void handleRaw(raw);
   });
 });
 

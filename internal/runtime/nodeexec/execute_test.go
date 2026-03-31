@@ -140,6 +140,61 @@ export async function handler(event, context) {
 	}
 }
 
+func TestPreparedWorkerReconnectsAfterControlConnectionRelease(t *testing.T) {
+	t.Parallel()
+
+	nodeBinary, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not available")
+	}
+
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "index.mjs"), []byte(`
+export async function handler(event) {
+  return { ok: true, name: event?.name ?? null };
+}
+`), 0o644); err != nil {
+		t.Fatalf("write entrypoint: %v", err)
+	}
+
+	functionID := sanitizeID(t.Name())
+	if err := StartPreparedWorker(context.Background(), PrepareWorkerRequest{
+		FunctionID:     functionID,
+		Workspace:      workspace,
+		Entrypoint:     "index.mjs",
+		NodeBinary:     nodeBinary,
+		StartupTimeout: 5 * time.Second,
+	}); err != nil {
+		t.Fatalf("start prepared worker: %v", err)
+	}
+	defer func() {
+		_ = ShutdownPreparedWorker(context.Background(), functionID)
+	}()
+
+	ReleasePreparedWorkerConnection(functionID)
+
+	result, err := ExecutePreparedWorker(context.Background(), WorkspaceRequest{
+		AttemptID:  "attempt-1",
+		JobID:      "job-1",
+		FunctionID: functionID,
+		Workspace:  workspace,
+		Entrypoint: "index.mjs",
+		Payload:    json.RawMessage(`{"name":"reconnected"}`),
+		Timeout:    5 * time.Second,
+		Region:     "ap-south-1",
+		HostID:     "host-ap-south-1-a",
+		NodeBinary: nodeBinary,
+	})
+	if err != nil {
+		t.Fatalf("execute prepared worker after releasing control connection: %v", err)
+	}
+
+	output := decodeResultMap(t, result.Output)
+	if output["name"] != "reconnected" {
+		t.Fatalf("unexpected output after reconnect: %#v", output)
+	}
+}
+
 func decodeResultMap(t *testing.T, raw json.RawMessage) map[string]any {
 	t.Helper()
 	var decoded map[string]any

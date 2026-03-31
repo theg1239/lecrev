@@ -391,17 +391,44 @@ func (s *Service) executeAssignment(ctx context.Context, msg *regionv1.Execution
 	if deferredClean != nil {
 		deferredClean()
 	}
-	if warmer, ok := s.driver.(firecracker.PostExecutionWarmer); ok {
-		warmPrepareStarted := time.Now()
-		_ = warmer.PrepareFunctionWarm(ctx, executeReq)
-		warmPrepareMs = time.Since(warmPrepareStarted).Milliseconds()
-	} else if result.SnapshotEligible {
-		s.mu.Lock()
-		s.functionWarm[msg.FunctionVersionId] = 1
-		s.mu.Unlock()
-	}
 	releaseSlot()
 	sendHeartbeat()
+	s.prepareWarmAsync(executeReq, msg.FunctionVersionId, sendHeartbeat)
+}
+
+func (s *Service) prepareWarmAsync(req firecracker.ExecuteRequest, functionVersionID string, sendHeartbeat func()) {
+	warmer, ok := s.driver.(firecracker.PostExecutionWarmer)
+	if ok {
+		go func() {
+			warmPrepareStarted := time.Now()
+			prepareCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := warmer.PrepareFunctionWarm(prepareCtx, req); err != nil {
+				slog.Warn("node-agent async warm prepare failed",
+					"hostID", s.hostID,
+					"region", s.region,
+					"functionVersionID", functionVersionID,
+					"durationMs", time.Since(warmPrepareStarted).Milliseconds(),
+					"err", err,
+				)
+				return
+			}
+			slog.Info("node-agent async warm prepare completed",
+				"hostID", s.hostID,
+				"region", s.region,
+				"functionVersionID", functionVersionID,
+				"durationMs", time.Since(warmPrepareStarted).Milliseconds(),
+			)
+			sendHeartbeat()
+		}()
+		return
+	}
+	go func() {
+		s.mu.Lock()
+		s.functionWarm[functionVersionID] = 1
+		s.mu.Unlock()
+		sendHeartbeat()
+	}()
 }
 
 func (s *Service) prepareSnapshot(ctx context.Context, msg *regionv1.PrepareSnapshot, sendHeartbeat func()) {

@@ -226,9 +226,16 @@ func TestRegistrationAndWarmupUseDriverInventory(t *testing.T) {
 
 	svc.executeAssignment(context.Background(), testAssignment(), func(*regionv1.AssignmentUpdate) {}, func() {})
 
-	heartbeat := svc.heartbeatMessage()
-	if len(heartbeat.FunctionWarm) != 1 || heartbeat.FunctionWarm[0].FunctionVersionId != "fn-1" || heartbeat.FunctionWarm[0].Available != 3 {
-		t.Fatalf("expected prepared function warm inventory, got %+v", heartbeat.FunctionWarm)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		heartbeat := svc.heartbeatMessage()
+		if len(heartbeat.FunctionWarm) == 1 && heartbeat.FunctionWarm[0].FunctionVersionId == "fn-1" && heartbeat.FunctionWarm[0].Available == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected prepared function warm inventory, got %+v", heartbeat.FunctionWarm)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
