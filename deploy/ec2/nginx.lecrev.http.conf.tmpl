@@ -1,7 +1,7 @@
 server {
   listen 80 default_server;
   listen [::]:80 default_server;
-  server_name __FRONTEND_HOST__ __API_HOST__ __FUNCTIONS_HOST__;
+  server_name __FRONTEND_HOST__;
 
   gzip on;
   gzip_vary on;
@@ -15,54 +15,6 @@ server {
 
   location /.well-known/acme-challenge/ {
     root __CERTBOT_WEBROOT__;
-  }
-
-  location = /healthz {
-    proxy_pass http://127.0.0.1:8080/healthz;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-
-  location = /metrics {
-    proxy_pass http://127.0.0.1:8080/metrics;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-
-  location /v1/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Connection "";
-  }
-
-  location /f/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Connection "te";
-    proxy_set_header TE "trailers";
-    proxy_pass_trailers on;
-    proxy_buffering off;
-    proxy_request_buffering off;
-    add_header X-Accel-Buffering no;
-  }
-
-  location /w/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Connection "";
   }
 
   location = /health/auth {
@@ -102,5 +54,78 @@ server {
 
   location / {
     try_files $uri $uri/ /index.html;
+  }
+}
+
+server {
+  listen 80;
+  listen [::]:80;
+  server_name __API_HOST__;
+
+  gzip on;
+  gzip_vary on;
+  gzip_proxied any;
+  gzip_comp_level 6;
+  gzip_min_length 1024;
+  gzip_types text/plain text/css text/html application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+  location /.well-known/acme-challenge/ {
+    root __CERTBOT_WEBROOT__;
+  }
+
+  location = /healthz {
+    proxy_pass http://127.0.0.1:8080/healthz;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  location = /metrics {
+    proxy_pass http://127.0.0.1:8080/metrics;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Connection "";
+  }
+}
+
+server {
+  listen 80;
+  listen [::]:80;
+  server_name __FUNCTIONS_HOST__;
+
+  gzip on;
+  gzip_vary on;
+  gzip_proxied any;
+  gzip_comp_level 6;
+  gzip_min_length 1024;
+  gzip_types text/plain text/css text/html application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+  location /.well-known/acme-challenge/ {
+    root __CERTBOT_WEBROOT__;
+  }
+
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Connection "te";
+    proxy_set_header TE "trailers";
+    proxy_pass_trailers on;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    add_header X-Accel-Buffering no;
   }
 }

@@ -61,6 +61,7 @@ const (
 	defaultMemoryMB      = 128
 	defaultTimeoutSec    = 30
 	defaultNetworkPolicy = domain.NetworkPolicyFull
+	websiteNetworkPolicy = domain.NetworkPolicyFull
 	websiteMemoryMB      = 2048
 	websiteTimeoutSec    = 180
 	minMemoryMB          = 64
@@ -237,6 +238,9 @@ func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, err
 		if req.TimeoutSec < websiteTimeoutSec {
 			req.TimeoutSec = websiteTimeoutSec
 		}
+		if req.NetworkPolicy == "" || req.NetworkPolicy == domain.NetworkPolicyNone {
+			req.NetworkPolicy = websiteNetworkPolicy
+		}
 	}
 	if req.NetworkPolicy == "" {
 		req.NetworkPolicy = defaultNetworkPolicy
@@ -412,6 +416,12 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 		buildJob.LogsKey = artifact.BuildLogsKey(buildJob.ID)
 	}
 	buildJob.UpdatedAt = s.now()
+	version.State = domain.FunctionStateBuilding
+	version.ArtifactDigest = ""
+	version.Entrypoint = ""
+	if err := s.store.PutFunctionVersion(ctx, version); err != nil {
+		return err
+	}
 	if err := s.store.PutBuildJob(ctx, buildJob); err != nil {
 		return err
 	}
@@ -841,6 +851,8 @@ const (
 	nodePackageManagerPNPM nodePackageManager = "pnpm"
 )
 
+var commandLookPath = exec.LookPath
+
 func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequest, recorder *buildRecorder) (string, map[string]string, func(), *preparedNextSite, error) {
 	if strings.TrimSpace(req.Source.GitURL) == "" {
 		return "", nil, nil, nil, fmt.Errorf("gitUrl is required for git source")
@@ -1017,9 +1029,9 @@ func nodeInstallCommand(root string, manager nodePackageManager, packageManager 
 		} else {
 			args = append(args, "--frozen-lockfile")
 		}
-		return "corepack", args
+		return resolveNodeToolCommand("yarn", args...)
 	case nodePackageManagerPNPM:
-		return "corepack", []string{"pnpm", "install", "--frozen-lockfile"}
+		return resolveNodeToolCommand("pnpm", "install", "--frozen-lockfile")
 	default:
 		args := []string{"install"}
 		if hasNpmLockfile(root) {
@@ -1035,9 +1047,9 @@ func nodeInstallCommand(root string, manager nodePackageManager, packageManager 
 func nodeBuildCommand(manager nodePackageManager) (string, []string) {
 	switch manager {
 	case nodePackageManagerYarn:
-		return "corepack", []string{"yarn", "build"}
+		return resolveNodeToolCommand("yarn", "build")
 	case nodePackageManagerPNPM:
-		return "corepack", []string{"pnpm", "build"}
+		return resolveNodeToolCommand("pnpm", "build")
 	default:
 		return "npm", []string{"run", "build", "--if-present"}
 	}
@@ -1046,15 +1058,43 @@ func nodeBuildCommand(manager nodePackageManager) (string, []string) {
 func nodePruneCommand(root string, manager nodePackageManager, packageManager string) (string, []string, bool) {
 	switch manager {
 	case nodePackageManagerPNPM:
-		return "corepack", []string{"pnpm", "prune", "--prod"}, true
+		name, args := resolveNodeToolCommand("pnpm", "prune", "--prod")
+		return name, args, true
 	case nodePackageManagerYarn:
 		if usesModernYarn(root, packageManager) {
 			return "", nil, false
 		}
-		return "corepack", []string{"yarn", "install", "--frozen-lockfile", "--production=true", "--ignore-scripts"}, true
+		name, args := resolveNodeToolCommand("yarn", "install", "--frozen-lockfile", "--production=true", "--ignore-scripts")
+		return name, args, true
 	default:
 		return "npm", []string{"prune", "--omit=dev"}, true
 	}
+}
+
+func resolveNodeToolCommand(tool string, args ...string) (string, []string) {
+	if nodeToolAvailable(tool) {
+		return tool, args
+	}
+	if nodeToolAvailable("corepack") {
+		return "corepack", append([]string{tool}, args...)
+	}
+	if nodeToolAvailable("npm") {
+		npmArgs := []string{"exec", "--yes", tool}
+		if len(args) > 0 {
+			npmArgs = append(npmArgs, "--")
+			npmArgs = append(npmArgs, args...)
+		}
+		return "npm", npmArgs
+	}
+	return tool, args
+}
+
+func nodeToolAvailable(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	_, err := commandLookPath(name)
+	return err == nil
 }
 
 func usesModernYarn(root, packageManager string) bool {

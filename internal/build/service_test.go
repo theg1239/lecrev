@@ -359,6 +359,9 @@ func TestNormalizeDeployRequestAppliesWebsiteResourceFloor(t *testing.T) {
 	if normalized.TimeoutSec != websiteTimeoutSec {
 		t.Fatalf("expected website timeout floor %d, got %d", websiteTimeoutSec, normalized.TimeoutSec)
 	}
+	if normalized.NetworkPolicy != websiteNetworkPolicy {
+		t.Fatalf("expected website network policy %q, got %q", websiteNetworkPolicy, normalized.NetworkPolicy)
+	}
 }
 
 func TestNormalizeDeployRequestPreservesLargerWebsiteResources(t *testing.T) {
@@ -390,6 +393,36 @@ func TestNormalizeDeployRequestPreservesLargerWebsiteResources(t *testing.T) {
 	}
 	if normalized.TimeoutSec != 300 {
 		t.Fatalf("expected explicit website timeout to be preserved, got %d", normalized.TimeoutSec)
+	}
+}
+
+func TestNormalizeDeployRequestOverridesWebsiteNetworkPolicyNone(t *testing.T) {
+	t.Parallel()
+
+	normalized, err := normalizeDeployRequest(domain.DeployRequest{
+		ProjectID:     "demo",
+		Name:          "next-site-network",
+		Runtime:       "node22",
+		Entrypoint:    "",
+		MemoryMB:      2048,
+		TimeoutSec:    300,
+		NetworkPolicy: domain.NetworkPolicyNone,
+		Source: domain.DeploySource{
+			Type:    domain.SourceTypeGit,
+			GitURL:  "https://github.com/acme/next-site.git",
+			GitRef:  "main",
+			SubPath: "web",
+			Metadata: map[string]string{
+				"deliveryKind": "website",
+				"framework":    "nextjs",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalize deploy request: %v", err)
+	}
+	if normalized.NetworkPolicy != websiteNetworkPolicy {
+		t.Fatalf("expected website network policy %q, got %q", websiteNetworkPolicy, normalized.NetworkPolicy)
 	}
 }
 
@@ -452,6 +485,81 @@ func TestDetectPackageManagerRecognizesCommonLockfiles(t *testing.T) {
 				t.Fatalf("expected package manager %q, got %q", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestResolveNodeToolCommandPrefersInstalledBinary(t *testing.T) {
+	t.Parallel()
+
+	original := commandLookPath
+	t.Cleanup(func() {
+		commandLookPath = original
+	})
+	commandLookPath = func(name string) (string, error) {
+		switch name {
+		case "pnpm":
+			return "/usr/local/bin/pnpm", nil
+		default:
+			return "", exec.ErrNotFound
+		}
+	}
+
+	name, args := resolveNodeToolCommand("pnpm", "install", "--frozen-lockfile")
+	if name != "pnpm" {
+		t.Fatalf("expected pnpm binary, got %q", name)
+	}
+	if got := strings.Join(args, " "); got != "install --frozen-lockfile" {
+		t.Fatalf("unexpected args %q", got)
+	}
+}
+
+func TestResolveNodeToolCommandFallsBackToCorepack(t *testing.T) {
+	t.Parallel()
+
+	original := commandLookPath
+	t.Cleanup(func() {
+		commandLookPath = original
+	})
+	commandLookPath = func(name string) (string, error) {
+		switch name {
+		case "corepack":
+			return "/usr/local/bin/corepack", nil
+		default:
+			return "", exec.ErrNotFound
+		}
+	}
+
+	name, args := resolveNodeToolCommand("yarn", "build")
+	if name != "corepack" {
+		t.Fatalf("expected corepack fallback, got %q", name)
+	}
+	if got := strings.Join(args, " "); got != "yarn build" {
+		t.Fatalf("unexpected args %q", got)
+	}
+}
+
+func TestResolveNodeToolCommandFallsBackToNpmExec(t *testing.T) {
+	t.Parallel()
+
+	original := commandLookPath
+	t.Cleanup(func() {
+		commandLookPath = original
+	})
+	commandLookPath = func(name string) (string, error) {
+		switch name {
+		case "npm":
+			return "/usr/local/bin/npm", nil
+		default:
+			return "", exec.ErrNotFound
+		}
+	}
+
+	name, args := resolveNodeToolCommand("pnpm", "install", "--frozen-lockfile")
+	if name != "npm" {
+		t.Fatalf("expected npm exec fallback, got %q", name)
+	}
+	if got := strings.Join(args, " "); got != "exec --yes pnpm -- install --frozen-lockfile" {
+		t.Fatalf("unexpected args %q", got)
 	}
 }
 

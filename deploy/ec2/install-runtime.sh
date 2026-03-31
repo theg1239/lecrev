@@ -34,6 +34,21 @@ install_node_from_dnf() {
   fi
 }
 
+ensure_node_package_managers() {
+  if ! command -v corepack >/dev/null 2>&1; then
+    npm install -g corepack
+  fi
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable || true
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    npm install -g pnpm
+  fi
+  if ! command -v yarn >/dev/null 2>&1; then
+    npm install -g yarn
+  fi
+}
+
 if [[ ! -x /usr/local/bin/node ]]; then
   node_shasums="$(curl -fsSL "${NODE_BASE_URL}/SHASUMS256.txt" || true)"
   node_tarball="$(python3 -c 'import re,sys
@@ -74,6 +89,8 @@ fi
 if [[ -x /opt/node22/bin/corepack ]]; then
   ln -sfn /opt/node22/bin/corepack /usr/local/bin/corepack
 fi
+
+ensure_node_package_managers
 
 if [[ ! -x /usr/local/bin/nats-server ]]; then
   tmpdir="$(mktemp -d)"

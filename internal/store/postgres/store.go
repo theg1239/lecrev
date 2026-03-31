@@ -490,7 +490,7 @@ func (s *Store) UpdateExecutionJob(ctx context.Context, job *domain.ExecutionJob
 
 func (s *Store) upsertExecutionJob(ctx context.Context, job *domain.ExecutionJob) error {
 	payload := normalizeRawJSON(job.Payload)
-	result, err := json.Marshal(job.Result)
+	result, err := json.Marshal(sanitizeJobResultForStorage(job.Result))
 	if err != nil {
 		return err
 	}
@@ -1221,5 +1221,65 @@ func normalizeRawJSON(value json.RawMessage) []byte {
 	if len(value) == 0 {
 		return []byte("null")
 	}
-	return append([]byte(nil), value...)
+	var decoded any
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		sanitized, marshalErr := json.Marshal(sanitizeJSONString(string(value)))
+		if marshalErr != nil {
+			return []byte("null")
+		}
+		return sanitized
+	}
+	sanitized, err := json.Marshal(sanitizeJSONValue(decoded))
+	if err != nil {
+		return []byte("null")
+	}
+	return sanitized
+}
+
+func sanitizeJobResultForStorage(result *domain.JobResult) *domain.JobResult {
+	if result == nil {
+		return nil
+	}
+	cp := *result
+	cp.Logs = sanitizeJSONString(cp.Logs)
+	cp.HostID = sanitizeJSONString(cp.HostID)
+	cp.Region = sanitizeJSONString(cp.Region)
+	cp.LogsKey = sanitizeJSONString(cp.LogsKey)
+	cp.OutputKey = sanitizeJSONString(cp.OutputKey)
+	cp.Output = normalizeRawJSON(cp.Output)
+	return &cp
+}
+
+func sanitizeJSONValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return sanitizeJSONString(typed)
+	case []any:
+		sanitized := make([]any, len(typed))
+		for i, item := range typed {
+			sanitized[i] = sanitizeJSONValue(item)
+		}
+		return sanitized
+	case map[string]any:
+		sanitized := make(map[string]any, len(typed))
+		for key, item := range typed {
+			sanitized[key] = sanitizeJSONValue(item)
+		}
+		return sanitized
+	default:
+		return value
+	}
+}
+
+func sanitizeJSONString(value string) string {
+	if value == "" {
+		return ""
+	}
+	clean := strings.ToValidUTF8(value, "\uFFFD")
+	return strings.Map(func(r rune) rune {
+		if r == 0 {
+			return '\uFFFD'
+		}
+		return r
+	}, clean)
 }

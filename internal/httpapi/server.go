@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"sort"
@@ -104,6 +105,9 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Get("/jobs/{jobID}/costs", srv.listJobCosts)
 		r.Post("/regions/{region}/hosts/{hostID}/drain", srv.drainHost)
 	})
+	r.Get("/*", srv.handleWebsiteContextFallback)
+	r.Head("/*", srv.handleWebsiteContextFallback)
+	r.NotFound(srv.handleNotFound)
 	return r
 }
 
@@ -112,6 +116,8 @@ const (
 	defaultOverviewItemLimit   = 8
 	maxListLimit               = 200
 	httpTriggerJobPollInterval = 25 * time.Millisecond
+	websiteContextCookieName   = "lecrev_website_version"
+	websiteContextCookieTTL    = 6 * time.Hour
 )
 
 var (
@@ -195,6 +201,24 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 		"ok":     true,
 		"status": "healthy",
 	})
+}
+
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleWebsiteContextFallback(w http.ResponseWriter, r *http.Request) {
+	requestPath := normalizedWebsitePath(r.URL.Path)
+	for _, prefix := range []string{"/v1/", "/api/", "/healthz", "/metrics"} {
+		if requestPath == prefix || strings.HasPrefix(requestPath, prefix) {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	if s.serveWebsiteContextRequest(w, r) {
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
@@ -784,6 +808,9 @@ func (s *Server) serveWebsite(w http.ResponseWriter, r *http.Request) {
 	}
 	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
 	if err != nil {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.serveWebsitePrefixedFallback(w, r, "/w") {
+			return
+		}
 		writeServiceError(w, err)
 		return
 	}
@@ -796,90 +823,8 @@ func (s *Server) serveWebsite(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-
-	sitePath := websiteRequestPath(r)
-	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.serveWebsiteStaticAsset(w, r, version.ArtifactDigest, sitePath) {
-		return
-	}
-
-	payload, err := buildHTTPPayloadForPath(r, "", sitePath)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	streamWriter := newHTTPDirectStreamWriter(w, r.Method, "", version.ID)
-	directCtx, cancelDirect := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
-	directResult, directErr := s.scheduler.ExecuteDirectStream(
-		directCtx,
-		version.ID,
-		payload,
-		func(jobID, _ string, startMode domain.StartMode) {
-			streamWriter.SetMeta(jobID, startMode)
-		},
-		streamWriter.HandleEvent,
-	)
-	cancelDirect()
-	if directErr == nil {
-		returnDirectHTTPResult(streamWriter, directResult)
-		return
-	}
-	if !errors.Is(directErr, domain.ErrDirectInvokeUnavailable) && !errors.Is(directErr, domain.ErrNoExecutionCapacity) {
-		if errors.Is(directErr, context.DeadlineExceeded) || errors.Is(directErr, context.Canceled) {
-			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-				"functionVersionId": version.ID,
-				"state":             "timeout",
-				"message":           "website preview did not complete before the response deadline",
-				"framework":         manifest.Framework,
-			})
-			return
-		}
-		writeServiceError(w, directErr)
-		return
-	}
-
-	dispatchCtx, cancelDispatch := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancelDispatch()
-	job, err := s.scheduler.DispatchExecutionIdempotent(dispatchCtx, version.ID, payload, idempotencyKey(r.Header.Get("Idempotency-Key"), ""))
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-
-	waitCtx, cancelWait := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
-	defer cancelWait()
-	job, err = s.waitForExecutionJob(waitCtx, job.ID, httpTriggerJobPollInterval)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-				"jobId":             job.ID,
-				"functionVersionId": version.ID,
-				"state":             "timeout",
-				"message":           "website preview did not complete before the response deadline",
-			})
-			return
-		}
-		writeServiceError(w, err)
-		return
-	}
-
-	job = withJobLatency(job)
-	if job.State != domain.JobStateSucceeded || job.Result == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"jobId":             job.ID,
-			"functionVersionId": version.ID,
-			"state":             job.State,
-			"error":             job.Error,
-		})
-		return
-	}
-	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output, jobLatencyMs(job)); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"jobId":             job.ID,
-			"functionVersionId": version.ID,
-			"state":             domain.JobStateFailed,
-			"error":             err.Error(),
-		})
-	}
+	s.attachWebsiteContextCookie(w, r, version.ID)
+	s.serveWebsiteRequest(w, r, version, manifest, websiteRequestPath(r))
 }
 
 func (s *Server) listRegions(w http.ResponseWriter, r *http.Request) {
@@ -1181,6 +1126,9 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 	trigger, err := s.store.GetHTTPTrigger(r.Context(), token)
 	triggerLookupMs = time.Since(triggerLookupStarted).Milliseconds()
 	if err != nil || !trigger.Enabled {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.serveWebsitePrefixedFallback(w, r, "/f") {
+			return
+		}
 		state = "not_found"
 		http.Error(w, "http trigger not found", http.StatusNotFound)
 		return
@@ -1222,6 +1170,7 @@ func (s *Server) invokeHTTPTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "function url not ready", http.StatusServiceUnavailable)
 		return
 	}
+	s.attachWebsiteContextCookieIfWebsite(w, r, version)
 	buildPayloadStarted := time.Now()
 	payload, err := buildHTTPPayload(r, token)
 	buildPayloadMs = time.Since(buildPayloadStarted).Milliseconds()
@@ -1770,6 +1719,16 @@ func websiteRequestPath(r *http.Request) string {
 	return "/" + strings.TrimPrefix(pathValue, "/")
 }
 
+func normalizedWebsitePath(rawPath string) string {
+	if strings.TrimSpace(rawPath) == "" {
+		return "/"
+	}
+	if strings.HasPrefix(rawPath, "/") {
+		return rawPath
+	}
+	return "/" + rawPath
+}
+
 func (s *Server) websiteManifest(ctx context.Context, version *domain.FunctionVersion) (*domain.WebsiteManifest, error) {
 	if version == nil {
 		return nil, fmt.Errorf("function version is required")
@@ -1855,6 +1814,204 @@ func publicWebsiteURL(r *http.Request, versionID string) string {
 
 func publicBaseURL(r *http.Request) string {
 	return requestScheme(r) + "://" + requestHost(r)
+}
+
+func (s *Server) serveWebsiteContextRequest(w http.ResponseWriter, r *http.Request) bool {
+	version, manifest, err := s.resolveWebsiteContextVersion(r.Context(), r)
+	if err != nil {
+		return false
+	}
+	s.attachWebsiteContextCookie(w, r, version.ID)
+	s.serveWebsiteRequest(w, r, version, manifest, normalizedWebsitePath(r.URL.Path))
+	return true
+}
+
+func (s *Server) serveWebsitePrefixedFallback(w http.ResponseWriter, r *http.Request, prefix string) bool {
+	version, manifest, err := s.resolveWebsiteContextVersion(r.Context(), r)
+	if err != nil {
+		return false
+	}
+	requestPath := normalizedWebsitePath(strings.TrimPrefix(normalizedWebsitePath(r.URL.Path), prefix))
+	s.attachWebsiteContextCookie(w, r, version.ID)
+	s.serveWebsiteRequest(w, r, version, manifest, requestPath)
+	return true
+}
+
+func (s *Server) serveWebsiteRequest(w http.ResponseWriter, r *http.Request, version *domain.FunctionVersion, manifest *domain.WebsiteManifest, sitePath string) {
+	if version == nil || manifest == nil {
+		http.Error(w, "website preview not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.serveWebsiteStaticAsset(w, r, version.ArtifactDigest, sitePath) {
+		return
+	}
+
+	payload, err := buildHTTPPayloadForPath(r, "", sitePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	streamWriter := newHTTPDirectStreamWriter(w, r.Method, "", version.ID)
+	directCtx, cancelDirect := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
+	directResult, directErr := s.scheduler.ExecuteDirectStream(
+		directCtx,
+		version.ID,
+		payload,
+		func(jobID, _ string, startMode domain.StartMode) {
+			streamWriter.SetMeta(jobID, startMode)
+		},
+		streamWriter.HandleEvent,
+	)
+	cancelDirect()
+	if directErr == nil {
+		returnDirectHTTPResult(streamWriter, directResult)
+		return
+	}
+	if !errors.Is(directErr, domain.ErrDirectInvokeUnavailable) && !errors.Is(directErr, domain.ErrNoExecutionCapacity) {
+		if errors.Is(directErr, context.DeadlineExceeded) || errors.Is(directErr, context.Canceled) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"functionVersionId": version.ID,
+				"state":             "timeout",
+				"message":           "website preview did not complete before the response deadline",
+				"framework":         manifest.Framework,
+			})
+			return
+		}
+		writeServiceError(w, directErr)
+		return
+	}
+
+	dispatchCtx, cancelDispatch := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancelDispatch()
+	job, err := s.scheduler.DispatchExecutionIdempotent(dispatchCtx, version.ID, payload, idempotencyKey(r.Header.Get("Idempotency-Key"), ""))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(r.Context(), httpTriggerTimeout(version.TimeoutSec))
+	defer cancelWait()
+	job, err = s.waitForExecutionJob(waitCtx, job.ID, httpTriggerJobPollInterval)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"jobId":             job.ID,
+				"functionVersionId": version.ID,
+				"state":             "timeout",
+				"message":           "website preview did not complete before the response deadline",
+			})
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+
+	job = withJobLatency(job)
+	if job.State != domain.JobStateSucceeded || job.Result == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             job.ID,
+			"functionVersionId": version.ID,
+			"state":             job.State,
+			"error":             job.Error,
+		})
+		return
+	}
+	if err := writeHTTPFunctionResult(w, r.Method, job.Result.Output, jobLatencyMs(job)); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"jobId":             job.ID,
+			"functionVersionId": version.ID,
+			"state":             domain.JobStateFailed,
+			"error":             err.Error(),
+		})
+	}
+}
+
+func (s *Server) resolveWebsiteContextVersion(ctx context.Context, r *http.Request) (*domain.FunctionVersion, *domain.WebsiteManifest, error) {
+	if version, manifest, err := s.resolveWebsiteContextVersionFromReferer(ctx, r.Referer()); err == nil {
+		return version, manifest, nil
+	}
+	cookie, err := r.Cookie(websiteContextCookieName)
+	if err != nil {
+		return nil, nil, store.ErrNotFound
+	}
+	return s.loadWebsiteContextVersion(ctx, strings.TrimSpace(cookie.Value))
+}
+
+func (s *Server) resolveWebsiteContextVersionFromReferer(ctx context.Context, referer string) (*domain.FunctionVersion, *domain.WebsiteManifest, error) {
+	trimmed := strings.TrimSpace(referer)
+	if trimmed == "" {
+		return nil, nil, store.ErrNotFound
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, nil, err
+	}
+	refererPath := normalizedWebsitePath(parsed.Path)
+	if versionID := pathSegmentAfterPrefix(refererPath, "/w/"); versionID != "" {
+		return s.loadWebsiteContextVersion(ctx, versionID)
+	}
+	if token := pathSegmentAfterPrefix(refererPath, "/f/"); token != "" {
+		trigger, err := s.store.GetHTTPTrigger(ctx, token)
+		if err != nil {
+			return nil, nil, err
+		}
+		return s.loadWebsiteContextVersion(ctx, trigger.FunctionVersionID)
+	}
+	return nil, nil, store.ErrNotFound
+}
+
+func pathSegmentAfterPrefix(fullPath, prefix string) string {
+	if !strings.HasPrefix(fullPath, prefix) {
+		return ""
+	}
+	trimmed := strings.TrimPrefix(fullPath, prefix)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(trimmed, "/", 2)[0])
+}
+
+func (s *Server) loadWebsiteContextVersion(ctx context.Context, versionID string) (*domain.FunctionVersion, *domain.WebsiteManifest, error) {
+	if strings.TrimSpace(versionID) == "" {
+		return nil, nil, store.ErrNotFound
+	}
+	version, err := s.store.GetFunctionVersion(ctx, versionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if version.State != domain.FunctionStateReady {
+		return nil, nil, domain.ErrFunctionVersionNotReady
+	}
+	manifest, err := s.websiteManifest(ctx, version)
+	if err != nil {
+		return nil, nil, err
+	}
+	return version, manifest, nil
+}
+
+func (s *Server) attachWebsiteContextCookieIfWebsite(w http.ResponseWriter, r *http.Request, version *domain.FunctionVersion) {
+	if version == nil {
+		return
+	}
+	if _, err := s.websiteManifest(r.Context(), version); err != nil {
+		return
+	}
+	s.attachWebsiteContextCookie(w, r, version.ID)
+}
+
+func (s *Server) attachWebsiteContextCookie(w http.ResponseWriter, r *http.Request, versionID string) {
+	if strings.TrimSpace(versionID) == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     websiteContextCookieName,
+		Value:    versionID,
+		Path:     "/",
+		MaxAge:   int(websiteContextCookieTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   strings.EqualFold(requestScheme(r), "https"),
+	})
 }
 
 func requestScheme(r *http.Request) string {

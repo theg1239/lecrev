@@ -973,6 +973,345 @@ func TestHTTPTriggerInvokeReturnsServiceUnavailableWhenDirectCapacityIsExhausted
 	}
 }
 
+func TestServeWebsiteSetsContextCookieForStaticAssets(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, nil)
+	now := time.Now().UTC()
+
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "site-version-cookie",
+		ProjectID:      "demo",
+		Name:           "site",
+		Runtime:        "node22",
+		Entrypoint:     "__lecrev_next_site_handler.mjs",
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "site-digest-cookie",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	manifest := domain.WebsiteManifest{
+		Framework:         "nextjs",
+		FunctionVersionID: "site-version-cookie",
+		StaticPrefix:      artifact.SiteAssetsPrefix("site-digest-cookie"),
+		DynamicEntrypoint: "__lecrev_next_site_handler.mjs",
+		CreatedAt:         now,
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteManifestKey("site-digest-cookie"), manifestJSON); err != nil {
+		t.Fatalf("put site manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteAssetObjectKey("site-digest-cookie", "/_next/static/chunks/app.js"), []byte("console.log('ok')")); err != nil {
+		t.Fatalf("put site asset: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/w/site-version-cookie/_next/static/chunks/app.js", nil)
+	req.Host = "api.lecrev.test"
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected static asset status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	cookies := resp.Result().Cookies()
+	found := false
+	for _, cookie := range cookies {
+		if cookie.Name == websiteContextCookieName && cookie.Value == "site-version-cookie" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected %s cookie to be set, got %+v", websiteContextCookieName, cookies)
+	}
+}
+
+func TestWebsiteFallbackServesRootRelativeAssetsFromReferer(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, nil)
+	now := time.Now().UTC()
+
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "site-version-referer",
+		ProjectID:      "demo",
+		Name:           "site",
+		Runtime:        "node22",
+		Entrypoint:     "__lecrev_next_site_handler.mjs",
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "site-digest-referer",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	manifest := domain.WebsiteManifest{
+		Framework:         "nextjs",
+		FunctionVersionID: "site-version-referer",
+		StaticPrefix:      artifact.SiteAssetsPrefix("site-digest-referer"),
+		DynamicEntrypoint: "__lecrev_next_site_handler.mjs",
+		CreatedAt:         now,
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteManifestKey("site-digest-referer"), manifestJSON); err != nil {
+		t.Fatalf("put site manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteAssetObjectKey("site-digest-referer", "/_next/static/chunks/app.js"), []byte("console.log('asset-ok')")); err != nil {
+		t.Fatalf("put site asset: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/_next/static/chunks/app.js", nil)
+	req.Host = "api.lecrev.test"
+	req.Header.Set("Referer", "https://api.lecrev.test/w/site-version-referer")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected fallback asset status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != "console.log('asset-ok')" {
+		t.Fatalf("unexpected asset body %q", got)
+	}
+	if got := resp.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
+		t.Fatalf("expected immutable cache-control, got %q", got)
+	}
+}
+
+func TestWebsiteRouteFallbackServesRelativePreviewAssets(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, nil)
+	now := time.Now().UTC()
+
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "site-version-relative-preview",
+		ProjectID:      "demo",
+		Name:           "site",
+		Runtime:        "node22",
+		Entrypoint:     "__lecrev_next_site_handler.mjs",
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "site-digest-relative-preview",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	manifest := domain.WebsiteManifest{
+		Framework:         "nextjs",
+		FunctionVersionID: "site-version-relative-preview",
+		StaticPrefix:      artifact.SiteAssetsPrefix("site-digest-relative-preview"),
+		DynamicEntrypoint: "__lecrev_next_site_handler.mjs",
+		CreatedAt:         now,
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteManifestKey("site-digest-relative-preview"), manifestJSON); err != nil {
+		t.Fatalf("put site manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteAssetObjectKey("site-digest-relative-preview", "/image_0.png"), []byte("preview-image")); err != nil {
+		t.Fatalf("put preview asset: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/w/image_0.png", nil)
+	req.Host = "api.lecrev.test"
+	req.Header.Set("Referer", "https://api.lecrev.test/w/site-version-relative-preview")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected relative preview asset status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != "preview-image" {
+		t.Fatalf("unexpected preview asset body %q", got)
+	}
+}
+
+func TestHTTPTriggerFallbackServesRelativeFunctionAssets(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, nil)
+	now := time.Now().UTC()
+
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "site-version-relative-function",
+		ProjectID:      "demo",
+		Name:           "site",
+		Runtime:        "node22",
+		Entrypoint:     "__lecrev_next_site_handler.mjs",
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "site-digest-relative-function",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutHTTPTrigger(context.Background(), &domain.HTTPTrigger{
+		Token:             "site-function-token",
+		ProjectID:         "demo",
+		FunctionVersionID: "site-version-relative-function",
+		AuthMode:          domain.HTTPTriggerAuthModeNone,
+		Enabled:           true,
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("put http trigger: %v", err)
+	}
+	manifest := domain.WebsiteManifest{
+		Framework:         "nextjs",
+		FunctionVersionID: "site-version-relative-function",
+		StaticPrefix:      artifact.SiteAssetsPrefix("site-digest-relative-function"),
+		DynamicEntrypoint: "__lecrev_next_site_handler.mjs",
+		CreatedAt:         now,
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteManifestKey("site-digest-relative-function"), manifestJSON); err != nil {
+		t.Fatalf("put site manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteAssetObjectKey("site-digest-relative-function", "/image_0.png"), []byte("function-image")); err != nil {
+		t.Fatalf("put function asset: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/f/image_0.png", nil)
+	req.Host = "functions.lecrev.test"
+	req.Header.Set("Referer", "https://functions.lecrev.test/f/site-function-token")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected relative function asset status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != "function-image" {
+		t.Fatalf("unexpected function asset body %q", got)
+	}
+}
+
+func TestWebsiteFallbackUsesCookieForDynamicPaths(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	dispatcher := &directTestDispatcher{region: "ap-south-1"}
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{dispatcher})
+	now := time.Now().UTC()
+
+	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+	if err := meta.PutArtifact(context.Background(), &domain.Artifact{
+		Digest:    "site-digest-cookie-dynamic",
+		BundleKey: "artifacts/site-digest-cookie-dynamic/bundle.tgz",
+		Regions: map[string]time.Time{
+			"ap-south-1": now,
+		},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:             "site-version-cookie-dynamic",
+		ProjectID:      "demo",
+		Name:           "site",
+		Runtime:        "node22",
+		Entrypoint:     "__lecrev_next_site_handler.mjs",
+		TimeoutSec:     30,
+		NetworkPolicy:  domain.NetworkPolicyNone,
+		Regions:        []string{"ap-south-1"},
+		ArtifactDigest: "site-digest-cookie-dynamic",
+		State:          domain.FunctionStateReady,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	manifest := domain.WebsiteManifest{
+		Framework:         "nextjs",
+		FunctionVersionID: "site-version-cookie-dynamic",
+		StaticPrefix:      artifact.SiteAssetsPrefix("site-digest-cookie-dynamic"),
+		DynamicEntrypoint: "__lecrev_next_site_handler.mjs",
+		CreatedAt:         now,
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := objects.Put(context.Background(), artifact.SiteManifestKey("site-digest-cookie-dynamic"), manifestJSON); err != nil {
+		t.Fatalf("put site manifest: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodGet, "/about", nil)
+	req.Host = "api.lecrev.test"
+	req.AddCookie(&http.Cookie{Name: websiteContextCookieName, Value: "site-version-cookie-dynamic"})
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected dynamic website status %d, got %d: %s", http.StatusOK, resp.Code, resp.Body.String())
+	}
+	if len(dispatcher.assignments) != 1 {
+		t.Fatalf("expected one direct dynamic assignment, got %d", len(dispatcher.assignments))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(dispatcher.assignments[0].Payload, &payload); err != nil {
+		t.Fatalf("decode direct payload: %v", err)
+	}
+	requestPayload, ok := payload["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected request payload, got %+v", payload)
+	}
+	if got := requestPayload["path"]; got != "/about" {
+		t.Fatalf("expected /about path, got %+v", got)
+	}
+}
+
 func TestHTTPTriggerInvokeAPIKeyModeRequiresAuthorizedKey(t *testing.T) {
 	t.Parallel()
 
