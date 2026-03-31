@@ -61,6 +61,8 @@ const (
 	defaultMemoryMB      = 128
 	defaultTimeoutSec    = 30
 	defaultNetworkPolicy = domain.NetworkPolicyFull
+	websiteMemoryMB      = 1024
+	websiteTimeoutSec    = 120
 	minMemoryMB          = 64
 	maxMemoryMB          = 4096
 	maxTimeoutSec        = 900
@@ -228,6 +230,14 @@ func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, err
 	} else if req.MemoryMB < 0 {
 		return domain.DeployRequest{}, fmt.Errorf("memoryMb must be positive")
 	}
+	if isWebsiteDeploy(req.Source) {
+		if req.MemoryMB < websiteMemoryMB {
+			req.MemoryMB = websiteMemoryMB
+		}
+		if req.TimeoutSec < websiteTimeoutSec {
+			req.TimeoutSec = websiteTimeoutSec
+		}
+	}
 	if req.NetworkPolicy == "" {
 		req.NetworkPolicy = defaultNetworkPolicy
 	}
@@ -243,6 +253,19 @@ func normalizeDeployRequest(req domain.DeployRequest) (domain.DeployRequest, err
 		return domain.DeployRequest{}, err
 	}
 	return req, nil
+}
+
+func isWebsiteDeploy(source domain.DeploySource) bool {
+	if source.Metadata == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(source.Metadata["deliveryKind"]), "website") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(source.Metadata["framework"]), "nextjs") {
+		return true
+	}
+	return false
 }
 
 func validateDeployRequest(req domain.DeployRequest) error {

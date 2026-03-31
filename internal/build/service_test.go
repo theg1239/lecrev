@@ -329,6 +329,70 @@ func TestCreateFunctionVersionPersistsEnvVars(t *testing.T) {
 	}
 }
 
+func TestNormalizeDeployRequestAppliesWebsiteResourceFloor(t *testing.T) {
+	t.Parallel()
+
+	normalized, err := normalizeDeployRequest(domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "next-site",
+		Runtime:    "node22",
+		Entrypoint: "",
+		MemoryMB:   256,
+		TimeoutSec: 30,
+		Source: domain.DeploySource{
+			Type:    domain.SourceTypeGit,
+			GitURL:  "https://github.com/acme/next-site.git",
+			GitRef:  "main",
+			SubPath: "web",
+			Metadata: map[string]string{
+				"deliveryKind": "website",
+				"framework":    "nextjs",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalize deploy request: %v", err)
+	}
+	if normalized.MemoryMB != websiteMemoryMB {
+		t.Fatalf("expected website memory floor %d, got %d", websiteMemoryMB, normalized.MemoryMB)
+	}
+	if normalized.TimeoutSec != websiteTimeoutSec {
+		t.Fatalf("expected website timeout floor %d, got %d", websiteTimeoutSec, normalized.TimeoutSec)
+	}
+}
+
+func TestNormalizeDeployRequestPreservesLargerWebsiteResources(t *testing.T) {
+	t.Parallel()
+
+	normalized, err := normalizeDeployRequest(domain.DeployRequest{
+		ProjectID:  "demo",
+		Name:       "next-site-large",
+		Runtime:    "node22",
+		Entrypoint: "",
+		MemoryMB:   2048,
+		TimeoutSec: 300,
+		Source: domain.DeploySource{
+			Type:    domain.SourceTypeGit,
+			GitURL:  "https://github.com/acme/next-site.git",
+			GitRef:  "main",
+			SubPath: "web",
+			Metadata: map[string]string{
+				"deliveryKind": "website",
+				"framework":    "nextjs",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalize deploy request: %v", err)
+	}
+	if normalized.MemoryMB != 2048 {
+		t.Fatalf("expected explicit website memory to be preserved, got %d", normalized.MemoryMB)
+	}
+	if normalized.TimeoutSec != 300 {
+		t.Fatalf("expected explicit website timeout to be preserved, got %d", normalized.TimeoutSec)
+	}
+}
+
 func TestDetectPackageManagerRecognizesCommonLockfiles(t *testing.T) {
 	t.Parallel()
 
