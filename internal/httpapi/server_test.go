@@ -605,11 +605,35 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
 		testDispatcher{region: "ap-south-1"},
 	})
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
 	mustSeedAPIKey(t, meta, "dev-root-key", "tenant-dev", false, true)
 	if _, err := meta.EnsureProject(context.Background(), "demo", "tenant-dev", "demo"); err != nil {
 		t.Fatalf("ensure project: %v", err)
 	}
 	now := time.Now().UTC()
+	if err := meta.PutFunctionVersion(context.Background(), &domain.FunctionVersion{
+		ID:            "fn-observe",
+		ProjectID:     "demo",
+		Name:          "observe",
+		Runtime:       "node22",
+		Entrypoint:    "index.mjs",
+		NetworkPolicy: domain.NetworkPolicyNone,
+		Regions:       []string{"ap-south-1"},
+		State:         domain.FunctionStateReady,
+		CreatedAt:     now,
+	}); err != nil {
+		t.Fatalf("put function version: %v", err)
+	}
+	if err := meta.PutRegion(context.Background(), &domain.Region{
+		Name:            "ap-south-1",
+		State:           "active",
+		AvailableHosts:  1,
+		BlankWarm:       1,
+		FunctionWarm:    2,
+		LastHeartbeatAt: now,
+	}); err != nil {
+		t.Fatalf("put region: %v", err)
+	}
 	finishedAt := now.Add(25 * time.Millisecond)
 	if err := meta.PutExecutionJob(context.Background(), &domain.ExecutionJob{
 		ID:                "job-observe",
@@ -766,6 +790,24 @@ func TestJobInspectionAndDrainEndpoints(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].AttemptID != "attempt-observe" {
 		t.Fatalf("unexpected cost payload: %+v", records)
+	}
+
+	warmStatusReq := httptest.NewRequest(http.MethodGet, "/v1/functions/fn-observe/warm-status", nil)
+	warmStatusReq.Header.Set("X-API-Key", "tenant-key")
+	warmStatusResp := httptest.NewRecorder()
+	handler.ServeHTTP(warmStatusResp, warmStatusReq)
+	if warmStatusResp.Code != http.StatusOK {
+		t.Fatalf("expected warm status %d, got %d: %s", http.StatusOK, warmStatusResp.Code, warmStatusResp.Body.String())
+	}
+	var warmStatus functionWarmStatusResponse
+	if err := json.Unmarshal(warmStatusResp.Body.Bytes(), &warmStatus); err != nil {
+		t.Fatalf("decode warm status: %v", err)
+	}
+	if !warmStatus.Ready {
+		t.Fatalf("expected warm status ready, got %+v", warmStatus)
+	}
+	if len(warmStatus.Regions) != 1 || warmStatus.Regions[0].FunctionWarm != 2 {
+		t.Fatalf("unexpected warm status regions: %+v", warmStatus.Regions)
 	}
 
 	warmReq := httptest.NewRequest(http.MethodGet, "/v1/regions/ap-south-1/warm-pools", nil)

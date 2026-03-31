@@ -49,6 +49,23 @@ type httpTriggerResponse struct {
 	CreatedAt         time.Time                  `json:"createdAt"`
 }
 
+type functionWarmRegionStatus struct {
+	Region                    string    `json:"region"`
+	State                     string    `json:"state"`
+	AvailableHosts            int       `json:"availableHosts"`
+	AvailableFullNetworkSlots int       `json:"availableFullNetworkSlots"`
+	BlankWarm                 int       `json:"blankWarm"`
+	FunctionWarm              int       `json:"functionWarm"`
+	Ready                     bool      `json:"ready"`
+	UpdatedAt                 time.Time `json:"updatedAt,omitempty"`
+}
+
+type functionWarmStatusResponse struct {
+	FunctionVersionID string                     `json:"functionVersionId"`
+	Ready             bool                       `json:"ready"`
+	Regions           []functionWarmRegionStatus `json:"regions"`
+}
+
 type drainHostRequest struct {
 	Reason string `json:"reason"`
 }

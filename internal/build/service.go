@@ -454,7 +454,7 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 		if err := s.warmer.PrepareFunctionVersion(ctx, version); err != nil {
 			recorder.Printf("warm preparation deferred for function version %s: %v", version.ID, err)
 		} else {
-			recorder.Printf("queued function warm preparation for function version %s", version.ID)
+			recorder.Printf("function warm preparation ready for function version %s", version.ID)
 		}
 	} else if s.warmer != nil {
 		recorder.Printf("warm preparation skipped for function version %s because envRefs are configured", version.ID)

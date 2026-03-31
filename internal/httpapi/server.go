@@ -83,6 +83,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 		r.Get("/jobs/{jobID}/logs", srv.getJobLogs)
 		r.Get("/jobs/{jobID}/output", srv.getJobOutput)
 		r.Get("/functions/{versionID}", srv.getFunction)
+		r.Get("/functions/{versionID}/warm-status", srv.getFunctionWarmStatus)
 		r.Post("/functions/{versionID}/prepare", srv.prepareFunction)
 		r.Post("/functions/{versionID}/triggers/http", srv.createHTTPTrigger)
 		r.Get("/functions/{versionID}/triggers/http", srv.listHTTPTriggers)
@@ -686,6 +687,72 @@ func (s *Server) listWarmPools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, pools)
+}
+
+func (s *Server) getFunctionWarmStatus(w http.ResponseWriter, r *http.Request) {
+	versionID := chi.URLParam(r, "versionID")
+	version, err := s.store.GetFunctionVersion(r.Context(), versionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := s.authorizeProject(r.Context(), version.ProjectID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	regions, err := s.store.ListRegions(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	regionIndex := make(map[string]domain.Region, len(regions))
+	for _, region := range regions {
+		regionIndex[region.Name] = region
+	}
+
+	response := functionWarmStatusResponse{
+		FunctionVersionID: version.ID,
+		Regions:           make([]functionWarmRegionStatus, 0, len(version.Regions)),
+	}
+
+	for _, regionName := range version.Regions {
+		regionRecord, ok := regionIndex[regionName]
+		regionStatus := functionWarmRegionStatus{
+			Region: regionName,
+			State:  "degraded",
+		}
+		if ok {
+			regionStatus.State = regionRecord.State
+			regionStatus.AvailableHosts = regionRecord.AvailableHosts
+			regionStatus.AvailableFullNetworkSlots = regionRecord.AvailableFullNetworkSlots
+		}
+
+		pools, err := s.store.ListWarmPoolsByRegion(r.Context(), regionName)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+
+		for _, pool := range pools {
+			regionStatus.BlankWarm += pool.BlankWarm
+			if pool.FunctionVersionID != version.ID {
+				continue
+			}
+			regionStatus.FunctionWarm += pool.FunctionWarm
+			if pool.UpdatedAt.After(regionStatus.UpdatedAt) {
+				regionStatus.UpdatedAt = pool.UpdatedAt
+			}
+		}
+
+		regionStatus.Ready = regionStatus.State == "active" && regionStatus.FunctionWarm > 0
+		if regionStatus.Ready {
+			response.Ready = true
+		}
+		response.Regions = append(response.Regions, regionStatus)
+	}
+
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) drainHost(w http.ResponseWriter, r *http.Request) {
