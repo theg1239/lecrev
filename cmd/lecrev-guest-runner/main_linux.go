@@ -32,6 +32,9 @@ func main() {
 	if err := mountGuestFilesystems(); err != nil {
 		log.Printf("guest runner mount setup failed: %v", err)
 	}
+	if err := ensureLoopbackUp(); err != nil {
+		log.Printf("guest runner loopback setup failed: %v", err)
+	}
 	port, err := guestPort()
 	if err != nil {
 		log.Fatal(err)
@@ -89,6 +92,31 @@ func mountGuestFilesystems() error {
 	}
 	if err := unix.Mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777"); err != nil && !errors.Is(err, syscall.EBUSY) {
 		return err
+	}
+	return nil
+}
+
+func ensureLoopbackUp() error {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		return fmt.Errorf("open network control socket: %w", err)
+	}
+	defer unix.Close(fd)
+
+	ifr, err := unix.NewIfreq("lo")
+	if err != nil {
+		return fmt.Errorf("build loopback ifreq: %w", err)
+	}
+	if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
+		return fmt.Errorf("read loopback flags: %w", err)
+	}
+	flags := ifr.Uint16()
+	if flags&unix.IFF_UP != 0 {
+		return nil
+	}
+	ifr.SetUint16(flags | unix.IFF_UP | unix.IFF_RUNNING)
+	if err := unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr); err != nil {
+		return fmt.Errorf("set loopback flags: %w", err)
 	}
 	return nil
 }
