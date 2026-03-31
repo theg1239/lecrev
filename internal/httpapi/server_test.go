@@ -1434,6 +1434,38 @@ func TestAuthRejectsCrossTenantProjectAccess(t *testing.T) {
 	}
 }
 
+func TestAdminCanCreateFunctionInExistingForeignTenantProject(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, []scheduler.RegionDispatcher{
+		testDispatcher{region: "ap-south-1"},
+	})
+	mustSeedAPIKey(t, meta, "admin-key", "tenant-dev", false, true)
+	if _, err := meta.EnsureProject(context.Background(), "project-b", "tenant-b", "project-b"); err != nil {
+		t.Fatalf("ensure project: %v", err)
+	}
+
+	handler := New(meta, objects, builder, sched)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/project-b/functions", bytes.NewBufferString(`{
+		"name":"echo",
+		"runtime":"node22",
+		"entrypoint":"index.mjs",
+		"source":{"type":"bundle","inlineFiles":{"index.mjs":"export async function handler(){ return { ok: true }; }"}}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "admin-key")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, resp.Code, resp.Body.String())
+	}
+}
+
 func TestCreateFunctionRejectsInvalidAdmissionRequest(t *testing.T) {
 	t.Parallel()
 

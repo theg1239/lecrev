@@ -235,7 +235,7 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	if _, err := s.store.EnsureProject(ctx, projectID, tenantIDFromContext(r.Context()), projectID); err != nil {
+	if _, err := s.ensureAuthorizedProject(ctx, projectID, projectID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -276,6 +276,22 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, version)
+}
+
+func (s *Server) ensureAuthorizedProject(ctx context.Context, projectID, defaultName string) (*domain.Project, error) {
+	project, err := s.store.GetProject(ctx, projectID)
+	switch {
+	case err == nil:
+		auth := authFromContext(ctx)
+		if !auth.IsAdmin && project.TenantID != auth.TenantID {
+			return nil, store.ErrAccessDenied
+		}
+		return project, nil
+	case errors.Is(err, store.ErrNotFound):
+		return s.store.EnsureProject(ctx, projectID, tenantIDFromContext(ctx), defaultName)
+	default:
+		return nil, err
+	}
 }
 
 func normalizeProjectID(rawID, name string) string {
