@@ -66,6 +66,7 @@ func New(store store.Store, objects artifact.Store, builder *build.Service, sche
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(srv.authMiddleware)
 		r.Options("/*", srv.handlePreflight)
+		r.Post("/projects", srv.createProject)
 		r.Get("/deployments", srv.listDeployments)
 		r.Get("/deployments/{deploymentID}", srv.getDeployment)
 		r.Get("/deployments/{deploymentID}/logs", srv.getDeploymentLogs)
@@ -191,6 +192,35 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	var body createProjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	projectID := normalizeProjectID(strings.TrimSpace(body.ID), name)
+	if projectID == "" {
+		http.Error(w, "project id is required", http.StatusBadRequest)
+		return
+	}
+
+	project, err := s.store.EnsureProject(ctx, projectID, tenantIDFromContext(r.Context()), name)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, project)
+}
+
 func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
 	if projectID == "" {
@@ -240,6 +270,40 @@ func (s *Server) createFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, version)
+}
+
+func normalizeProjectID(rawID, name string) string {
+	source := strings.TrimSpace(rawID)
+	if source == "" {
+		source = name
+	}
+	source = strings.ToLower(source)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range source {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastDash = false
+		case r == '-' || r == '_' || r == ' ':
+			if b.Len() == 0 || lastDash {
+				continue
+			}
+			b.WriteByte('-')
+			lastDash = true
+		default:
+			if b.Len() == 0 || lastDash {
+				continue
+			}
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	normalized := strings.Trim(b.String(), "-")
+	if normalized == "" {
+		return ""
+	}
+	return normalized
 }
 
 func (s *Server) listDeployments(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -365,6 +366,9 @@ func (s *Service) ProcessBuildJob(ctx context.Context, buildJobID string) error 
 	if err != nil {
 		return s.markBuildFailed(ctx, version, buildJob, err)
 	}
+	if sanitizedPayload, marshalErr := json.Marshal(sanitizeDeployRequestForStorage(req)); marshalErr == nil {
+		buildJob.Request = sanitizedPayload
+	}
 
 	buildJob.State = "running"
 	buildJob.Error = ""
@@ -553,7 +557,7 @@ func buildMetadataForRequest(req domain.DeployRequest) map[string]string {
 		metadata["branch"] = branch
 	}
 	if gitURL := strings.TrimSpace(req.Source.GitURL); gitURL != "" {
-		metadata["gitUrl"] = gitURL
+		metadata["gitUrl"] = sanitizeGitURL(gitURL)
 	}
 	if len(metadata) == 0 {
 		return nil
@@ -718,7 +722,7 @@ func (s *Service) prepareGitWorkspace(ctx context.Context, req domain.DeployRequ
 		cloneArgs = append(cloneArgs, "--branch", req.Source.GitRef)
 	}
 	cloneArgs = append(cloneArgs, req.Source.GitURL, tmpDir)
-	if err := runCommandWithTimeout(ctx, s.gitCloneTimeout, recorder, "", "git", cloneArgs...); err != nil {
+	if err := runGitCloneWithTimeout(ctx, s.gitCloneTimeout, recorder, cloneArgs...); err != nil {
 		cleanup()
 		return "", nil, nil, fmt.Errorf("git clone failed: %w", err)
 	}
@@ -954,6 +958,29 @@ func runCommandWithTimeout(ctx context.Context, timeout time.Duration, recorder 
 	return err
 }
 
+func runGitCloneWithTimeout(ctx context.Context, timeout time.Duration, recorder *buildRecorder, args ...string) error {
+	commandCtx := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		commandCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	cmd := exec.CommandContext(commandCtx, "git", args...)
+	if recorder != nil {
+		recorder.Printf("$ git %s", strings.Join(redactGitCloneArgs(args), " "))
+	}
+	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if recorder != nil && len(output) > 0 {
+		recorder.Printf("%s", trimmed)
+	}
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(redactGitCloneArgs(args), " "), err, trimmed)
+	}
+	return nil
+}
+
 func runCommandOutput(ctx context.Context, recorder *buildRecorder, dir, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
@@ -975,4 +1002,42 @@ func runCommandOutput(ctx context.Context, recorder *buildRecorder, dir, name st
 		return "", fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, trimmed)
 	}
 	return trimmed, nil
+}
+
+func redactGitCloneArgs(args []string) []string {
+	redacted := make([]string, len(args))
+	for i, arg := range args {
+		redacted[i] = arg
+	}
+	if len(redacted) >= 2 {
+		redacted[len(redacted)-2] = sanitizeGitURL(redacted[len(redacted)-2])
+	}
+	return redacted
+}
+
+func sanitizeGitURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	if parsed.User != nil {
+		username := parsed.User.Username()
+		if username != "" {
+			parsed.User = url.User(username)
+		} else {
+			parsed.User = nil
+		}
+	}
+	return parsed.String()
+}
+
+func sanitizeDeployRequestForStorage(req domain.DeployRequest) domain.DeployRequest {
+	sanitized := req
+	sanitized.Source = req.Source
+	sanitized.Source.GitURL = sanitizeGitURL(req.Source.GitURL)
+	return sanitized
 }

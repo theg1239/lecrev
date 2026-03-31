@@ -22,6 +22,11 @@ type createFunctionRequest struct {
 	Source         json.RawMessage `json:"source"`
 }
 
+type createProjectRequest struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
+}
+
 type invokeRequest struct {
 	Payload        json.RawMessage `json:"payload"`
 	IdempotencyKey string          `json:"idempotencyKey"`

@@ -155,6 +155,40 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestCreateProject(t *testing.T) {
+	t.Parallel()
+
+	meta := memstore.New()
+	objects := artifact.NewMemoryStore()
+	builder := build.New(meta, objects)
+	sched := scheduler.New(meta, nil)
+	mustSeedAPIKey(t, meta, "tenant-key", "tenant-dev", false, false)
+
+	handler := New(meta, objects, builder, sched)
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects", bytes.NewBufferString(`{"name":"My Preview Project"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "tenant-key")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, resp.Code, resp.Body.String())
+	}
+	var project domain.Project
+	if err := json.Unmarshal(resp.Body.Bytes(), &project); err != nil {
+		t.Fatalf("decode project response: %v", err)
+	}
+	if project.ID != "my-preview-project" {
+		t.Fatalf("expected normalized project id, got %q", project.ID)
+	}
+	if project.Name != "My Preview Project" {
+		t.Fatalf("expected project name to round-trip, got %q", project.Name)
+	}
+	if project.TenantID != "tenant-dev" {
+		t.Fatalf("expected tenant-dev, got %q", project.TenantID)
+	}
+}
+
 func TestPrepareFunctionRequiresAdminAndQueuesWarmPrep(t *testing.T) {
 	t.Parallel()
 
